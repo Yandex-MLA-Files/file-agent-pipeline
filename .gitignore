@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+
+.env
+.env.*
+
+data/raw/
+data/private/
+
+.ipynb_checkpoints/
+.vscode/
+
+*.log
