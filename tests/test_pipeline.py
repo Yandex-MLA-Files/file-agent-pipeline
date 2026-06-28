@@ -1,5 +1,6 @@
-import pytest
+﻿import pytest
 import fitz
+from openpyxl import Workbook
 
 from file_agent.pipeline import parse_file
 
@@ -10,6 +11,16 @@ def create_pdf(file_path, text):
     page.insert_text((72, 72), text)
     document.save(file_path)
     document.close()
+
+
+def create_xlsx(file_path):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["Name", "Age"] )
+    sheet.append(["Alice", 20])
+    workbook.save(file_path)
+    workbook.close()
 
 
 def test_parse_file_uses_markdown_parser(tmp_path):
@@ -49,9 +60,23 @@ def test_parse_file_uses_html_parser(tmp_path):
     assert document.blocks[0].text == "Hello from HTML"
 
 
+def test_parse_file_uses_xlsx_parser(tmp_path):
+    file_path = tmp_path / "example.xlsx"
+    create_xlsx(file_path)
+
+    document = parse_file(file_path)
+
+    assert document.file_name == "example.xlsx"
+    assert document.file_type == "xlsx"
+    assert len(document.blocks) == 1
+    assert document.blocks[0].type == "xlsx_sheet"
+    assert "Alice	20" in document.blocks[0].text
+
+
 def test_parse_file_rejects_unsupported_extension(tmp_path):
     file_path = tmp_path / "example.txt"
     file_path.write_text("Unsupported", encoding="utf-8")
 
     with pytest.raises(ValueError, match="Unsupported file type"):
         parse_file(file_path)
+
