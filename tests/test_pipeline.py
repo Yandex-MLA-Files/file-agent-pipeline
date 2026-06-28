@@ -36,6 +36,19 @@ def test_parse_file_uses_pdf_parser(tmp_path):
     assert document.blocks[0].metadata["page_number"] == 1
 
 
+def test_parse_file_uses_html_parser(tmp_path):
+    file_path = tmp_path / "example.html"
+    file_path.write_text("<p>Hello from HTML</p>", encoding="utf-8")
+
+    document = parse_file(file_path)
+
+    assert document.file_name == "example.html"
+    assert document.file_type == "html"
+    assert len(document.blocks) == 1
+    assert document.blocks[0].type == "html_text"
+    assert document.blocks[0].text == "Hello from HTML"
+
+
 def test_parse_file_rejects_unsupported_extension(tmp_path):
     file_path = tmp_path / "example.txt"
     file_path.write_text("Unsupported", encoding="utf-8")

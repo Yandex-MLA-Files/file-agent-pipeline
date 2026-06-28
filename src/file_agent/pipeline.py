@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from file_agent.document import Document
+from file_agent.parsers.html_parser import HTMLParser
 from file_agent.parsers.md_parser import MarkdownParser
 from file_agent.parsers.pdf_parser import PDFParser
 
@@ -14,5 +15,8 @@ def parse_file(file_path: str | Path) -> Document:
 
     if suffix == ".pdf":
         return PDFParser().parse(path)
+
+    if suffix in {".html", ".htm"}:
+        return HTMLParser().parse(path)
 
     raise ValueError(f"Unsupported file type: {suffix or '<no extension>'}")
