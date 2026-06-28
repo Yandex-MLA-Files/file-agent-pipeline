@@ -17,31 +17,30 @@
 
 ## Текущая цель MVP
 
-Базовый слой парсинга уже реализован:
+Базовый MVP уже реализован:
 
-- MarkdownParser
-- PDFParser
-- HTMLParser
+- парсинг Markdown, PDF, HTML
 - Document / Block
-- Streamlit MVP для загрузки файла и просмотра извлечённого текста
+- chunking
+- простой keyword retrieval
+- Streamlit-интерфейс для загрузки файла, просмотра текста и поиска по chunks
 
-Следующая цель — добавить chunking:
+Следующая цель — добавить LLM QA:
 
-Document -> chunks
+file + question -> relevant chunks -> LLM answer
 
-Нужно реализовать разбиение документа на небольшие фрагменты, чтобы позже использовать их для поиска релевантного контекста и ответа через LLM.
+Разрешено добавить:
+- обёртку над YandexGPT
+- prompt builder для ответа по контексту
+- функцию answer_question(document, question)
 
-Пока не нужно добавлять:
-
-- LLM
-- RAG
-- OCR
-- VLM
+Пока не добавлять:
 - LangChain
 - LangGraph
+- OCR
+- VLM
+- embeddings / FAISS
 - сложную агентную архитектуру
-
-Эти компоненты будут добавлены позже.
 
 ## Стек
 
