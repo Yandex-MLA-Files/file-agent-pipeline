@@ -1,6 +1,15 @@
 import pytest
+import fitz
 
 from file_agent.pipeline import parse_file
+
+
+def create_pdf(file_path, text):
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), text)
+    document.save(file_path)
+    document.close()
 
 
 def test_parse_file_uses_markdown_parser(tmp_path):
@@ -12,6 +21,19 @@ def test_parse_file_uses_markdown_parser(tmp_path):
     assert document.file_name == "example.md"
     assert document.file_type == "md"
     assert document.blocks[0].text == "Hello from pipeline"
+
+
+def test_parse_file_uses_pdf_parser(tmp_path):
+    file_path = tmp_path / "example.pdf"
+    create_pdf(file_path, "Hello from PDF")
+
+    document = parse_file(file_path)
+
+    assert document.file_name == "example.pdf"
+    assert document.file_type == "pdf"
+    assert len(document.blocks) == 1
+    assert "Hello from PDF" in document.blocks[0].text
+    assert document.blocks[0].metadata["page_number"] == 1
 
 
 def test_parse_file_rejects_unsupported_extension(tmp_path):
