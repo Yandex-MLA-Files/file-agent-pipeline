@@ -9,11 +9,14 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
+from file_agent.chunking import chunk_document
 from file_agent.pipeline import parse_file
+from file_agent.retrieval import search_chunks
 
 
 SUPPORTED_TYPES = ["md", "pdf", "html", "htm"]
 TEXT_PREVIEW_LIMIT = 3000
+CHUNK_PREVIEW_LIMIT = 1000
 
 
 st.set_page_config(page_title="File Agent Pipeline")
@@ -31,17 +34,41 @@ if uploaded_file is not None:
 
         try:
             document = parse_file(file_path)
+            chunks = chunk_document(document)
         except Exception as exc:
-            st.error(f"Не удалось разобрать файл: {exc}")
+            st.error(f"Could not parse file: {exc}")
         else:
             extracted_text = "\n\n".join(block.text for block in document.blocks)
 
-            st.write(f"**Имя файла:** {document.file_name}")
-            st.write(f"**Тип файла:** {document.file_type}")
-            st.write(f"**Количество блоков:** {len(document.blocks)}")
+            st.write(f"**File name:** {document.file_name}")
+            st.write(f"**File type:** {document.file_type}")
+            st.write(f"**Blocks:** {len(document.blocks)}")
+            st.write(f"**Chunks:** {len(chunks)}")
 
             st.text_area(
-                "Извлечённый текст",
+                "Extracted text",
                 value=extracted_text[:TEXT_PREVIEW_LIMIT],
                 height=400,
             )
+
+            query = st.text_input("Search in chunks")
+            if query.strip():
+                results = search_chunks(query, chunks, top_k=5)
+
+                if not results:
+                    st.info("No matching chunks found.")
+                else:
+                    st.subheader("Search results")
+                    for index, result in enumerate(results, start=1):
+                        with st.expander(
+                            f"Result {index} - score {result.score:g}",
+                            expanded=index == 1,
+                        ):
+                            st.write("**Metadata:**")
+                            st.json(result.chunk.metadata)
+                            st.text_area(
+                                "Chunk text",
+                                value=result.chunk.text[:CHUNK_PREVIEW_LIMIT],
+                                height=240,
+                                key=f"chunk-result-{index}",
+                            )
