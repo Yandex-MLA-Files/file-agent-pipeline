@@ -10,7 +10,9 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from file_agent.chunking import chunk_document
+from file_agent.llm.fake import FakeLLM
 from file_agent.pipeline import parse_file
+from file_agent.qa import answer_question_with_context
 from file_agent.retrieval import search_chunks
 
 
@@ -52,6 +54,10 @@ if uploaded_file is not None:
             )
 
             query = st.text_input("Search in chunks")
+            use_fake_llm = st.checkbox("Use Fake LLM")
+            generate_answer = st.button("Generate answer")
+            results = []
+
             if query.strip():
                 results = search_chunks(query, chunks, top_k=5)
 
@@ -72,3 +78,19 @@ if uploaded_file is not None:
                                 height=240,
                                 key=f"chunk-result-{index}",
                             )
+
+            if generate_answer:
+                if not query.strip():
+                    st.warning("Enter a question before generating an answer.")
+                elif not use_fake_llm:
+                    st.warning("Enable Use Fake LLM to test QA without YandexGPT.")
+                elif not results:
+                    st.info("No matching chunks found, so FakeLLM was not called.")
+                else:
+                    answer = answer_question_with_context(
+                        question=query,
+                        results=results,
+                        llm_client=FakeLLM(),
+                    )
+                    st.subheader("Answer")
+                    st.write(answer)
