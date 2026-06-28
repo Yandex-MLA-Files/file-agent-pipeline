@@ -19,28 +19,47 @@
 
 Базовый MVP уже реализован:
 
-- парсинг Markdown, PDF, HTML
-- Document / Block
-- chunking
-- простой keyword retrieval
-- Streamlit-интерфейс для загрузки файла, просмотра текста и поиска по chunks
+парсинг Markdown, PDF, HTML;
+единое представление Document / Block;
+chunking;
+простой keyword retrieval по chunks;
+Streamlit-интерфейс для загрузки файла, просмотра preview извлечённого текста и поиска по chunks;
+LLM QA prompt layer через абстрактный llm_client.
 
-Следующая цель — добавить LLM QA:
+Сейчас мы ждём доступ к Yandex Cloud / YandexGPT API.
 
-file + question -> relevant chunks -> LLM answer
+Пока доступа нет, нужно продолжать развивать проект без реальных API-запросов.
 
-Разрешено добавить:
-- обёртку над YandexGPT
-- prompt builder для ответа по контексту
-- функцию answer_question(document, question)
+Разрешено делать:
 
-Пока не добавлять:
-- LangChain
-- LangGraph
-- OCR
-- VLM
-- embeddings / FAISS
-- сложную агентную архитектуру
+подготовить YandexGPTClient без реальных запросов в тестах;
+использовать mock-тесты для YandexGPTClient;
+добавить FakeLLM-режим для проверки полного пайплайна без внешнего API;
+добавить новые парсеры, например XLSXParser и PPTXParser;
+улучшать Streamlit-интерфейс;
+улучшать README.md;
+добавлять тесты;
+улучшать обработку ошибок.
+
+Пока не делать:
+
+не выполнять реальные запросы к YandexGPT в pytest;
+не хардкодить API-ключи, folder_id или model_uri;
+не коммитить .env;
+не добавлять LangChain;
+не добавлять LangGraph;
+не добавлять OCR;
+не добавлять VLM;
+не добавлять embeddings / FAISS;
+не делать сложную агентную архитектуру.
+
+Для переменных окружения использовать:
+
+YANDEX_API_KEY;
+YANDEX_FOLDER_ID;
+YANDEX_MODEL.
+
+Файл .env.example можно коммитить, настоящий .env коммитить нельзя.
 
 ## Стек
 
