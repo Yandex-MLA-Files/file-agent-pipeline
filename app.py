@@ -16,7 +16,7 @@ from file_agent.qa import answer_question_with_context
 from file_agent.retrieval import search_chunks
 
 
-SUPPORTED_TYPES = ["md", "pdf", "html", "htm", "xlsx"]
+SUPPORTED_TYPES = ["md", "pdf", "html", "htm", "xlsx", "pptx"]
 TEXT_PREVIEW_LIMIT = 3000
 CHUNK_PREVIEW_LIMIT = 1000
 

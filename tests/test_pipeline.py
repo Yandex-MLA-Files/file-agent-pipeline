@@ -1,6 +1,7 @@
 ﻿import pytest
 import fitz
 from openpyxl import Workbook
+from pptx import Presentation
 
 from file_agent.pipeline import parse_file
 
@@ -17,10 +18,18 @@ def create_xlsx(file_path):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Data"
-    sheet.append(["Name", "Age"] )
+    sheet.append(["Name", "Age"])
     sheet.append(["Alice", 20])
     workbook.save(file_path)
     workbook.close()
+
+
+def create_pptx(file_path):
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+    slide.shapes.title.text = "Project Overview"
+    slide.placeholders[1].text = "PowerPoint content"
+    presentation.save(file_path)
 
 
 def test_parse_file_uses_markdown_parser(tmp_path):
@@ -70,7 +79,21 @@ def test_parse_file_uses_xlsx_parser(tmp_path):
     assert document.file_type == "xlsx"
     assert len(document.blocks) == 1
     assert document.blocks[0].type == "xlsx_sheet"
-    assert "Alice	20" in document.blocks[0].text
+    assert "Alice\t20" in document.blocks[0].text
+
+
+def test_parse_file_uses_pptx_parser(tmp_path):
+    file_path = tmp_path / "example.pptx"
+    create_pptx(file_path)
+
+    document = parse_file(file_path)
+
+    assert document.file_name == "example.pptx"
+    assert document.file_type == "pptx"
+    assert len(document.blocks) == 1
+    assert document.blocks[0].type == "pptx_slide"
+    assert "Project Overview" in document.blocks[0].text
+    assert "PowerPoint content" in document.blocks[0].text
 
 
 def test_parse_file_rejects_unsupported_extension(tmp_path):
@@ -79,4 +102,3 @@ def test_parse_file_rejects_unsupported_extension(tmp_path):
 
     with pytest.raises(ValueError, match="Unsupported file type"):
         parse_file(file_path)
-
