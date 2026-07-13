@@ -1,81 +1,124 @@
 # File Agent Pipeline
 
-ML-стажировочный проект для построения пайплайна работы с файлами.
+Python-проект для построения RAG-пайплайна поверх пользовательских файлов.
 
-Проект принимает файл, извлекает текст, приводит документ к единому внутреннему
-представлению, разбивает документ на chunks, ищет релевантные chunks по запросу
-пользователя и готовит prompt для будущего LLM-ответа.
+Система принимает один или несколько документов, извлекает текст, приводит данные к
+единому представлению `Document` / `Block`, разбивает документ на chunks, ищет
+релевантный контекст и отправляет prompt в LLM.
 
-Сейчас реального доступа к YandexGPT API нет, поэтому настоящие API-запросы не
-выполняются. Для проверки полного пайплайна используется `FakeLLM`.
+## Текущий статус
 
-## Текущий Статус MVP
+Реализовано:
 
-Уже реализовано:
+- единое представление `Document` / `Block`;
+- парсинг `.md`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.pptx`;
+- chunking документов;
+- retrieval: BM25 + semantic search через `sentence-transformers` + RRF;
+- QA prompt layer;
+- общий RAG-слой в `src/file_agent/rag.py`;
+- генерация через OpenAI-compatible API;
+- два режима LLM backend:
+  - Yandex AI Studio / Qwen;
+  - локальный OpenAI-compatible endpoint, например vLLM или SGLang;
+- Streamlit-интерфейс для загрузки нескольких файлов, поиска chunks и генерации ответа;
+- pytest-тесты для парсеров, chunking, retrieval, QA, RAG и LLM-клиентов.
 
-- `Document` / `Block` IR для единого представления документов.
-- Парсинг `.md` через `MarkdownParser`.
-- Парсинг `.pdf` через `PDFParser` и PyMuPDF.
-- Парсинг `.html` и `.htm` через `HTMLParser` и BeautifulSoup.
-- Парсинг `.xlsx` через `XLSXParser` и openpyxl.
-- Парсинг `.pptx` через `PPTXParser` и python-pptx.
-- Chunking документов.
-- Простой keyword-based retrieval по chunks.
-- QA prompt layer для сборки контекста и prompt.
-- `YandexGPTClient` подготовлен заранее, но не подключен к Streamlit и не вызывается в тестах.
-- `FakeLLM` mode для проверки полного QA-пайплайна без настоящего API.
-- Streamlit-интерфейс для загрузки файла, просмотра текста, поиска chunks и проверки FakeLLM.
-- Pytest-тесты для парсеров, chunking, retrieval, QA layer, FakeLLM и YandexGPTClient.
-
-Поддерживаемые форматы:
-
-- `.md`
-- `.pdf`
-- `.html`
-- `.htm`
-- `.xlsx`
-- `.pptx`
-
-## Как Работает Текущий Пайплайн
+## Как работает пайплайн
 
 ```text
-file -> parse_file -> Document/Block -> chunk_document -> search_chunks -> QA prompt -> FakeLLM/YandexGPT later -> answer
+files
+  -> parse_file
+  -> Document / Block
+  -> chunk_document
+  -> search_chunks
+  -> build QA prompt
+  -> LLMClient.generate
+  -> answer + sources
 ```
 
-Основные шаги:
+Ключевые слои:
 
-- `parse_file(file_path)` выбирает парсер по расширению файла.
-- Парсер возвращает `Document` с набором `Block`.
-- `chunk_document(document)` разбивает blocks на chunks.
-- `search_chunks(query, chunks)` ищет релевантные chunks простым keyword scoring.
-- QA layer собирает context из найденных chunks и строит prompt.
-- Сейчас prompt можно проверить через `FakeLLM`; позже его можно будет отправлять в YandexGPT.
+- `pipeline.py` выбирает парсер по расширению файла.
+- `chunking.py` разбивает `Document` на chunks.
+- `retrieval.py` ищет релевантные chunks через BM25, semantic search и RRF.
+- `qa.py` собирает контекст и prompt.
+- `rag.py` связывает полный путь от файлов до ответа.
+- `llm/` содержит общий интерфейс и OpenAI-compatible клиент.
 
-## Парсеры
+## Структура проекта
 
-`MarkdownParser` читает Markdown-файлы и создаёт один `Block` с исходным текстом документа.
+```text
+src/file_agent/
+  document.py
+  pipeline.py
+  rag.py
+  chunking.py
+  retrieval.py
+  qa.py
 
-`PDFParser` читает PDF через PyMuPDF и создаёт отдельный `Block` для каждой страницы. В metadata сохраняется номер страницы и имя исходного файла.
+  parsers/
+    base.py
+    md_parser.py
+    pdf_parser.py
+    html_parser.py
+    xlsx_parser.py
+    pptx_parser.py
 
-`HTMLParser` читает HTML через BeautifulSoup, удаляет `script` и `style`, затем извлекает читаемый текст страницы в один `Block`.
+  llm/
+    base.py
+    openai_compatible.py
+    factory.py
+```
 
-`XLSXParser` читает Excel-файлы через openpyxl в режиме `read_only=True` и `data_only=True`. Он создаёт отдельный `Block` для каждого листа, а строки листа превращает в табличный текст с разделителем `\t`.
+## LLM backend
 
-`PPTXParser` читает PowerPoint-презентации через python-pptx и создаёт отдельный `Block` для каждого слайда. Он извлекает заголовки, обычные текстовые блоки и текст из таблиц.
+В проекте используется один общий интерфейс:
 
-## FakeLLM
+```python
+class LLMClient(Protocol):
+    def generate(self, prompt: str) -> str:
+        ...
+```
 
-`FakeLLM` — временная заглушка для проверки пайплайна без доступа к YandexGPT.
+`OpenAICompatibleClient` ходит в endpoint вида:
 
-Важно:
+```text
+{base_url}/chat/completions
+```
 
-- `FakeLLM` не генерирует настоящий ответ по документу.
-- Он проверяет, что найденные chunks были собраны в context.
-- Он проверяет, что prompt был построен.
-- Он проверяет, что был вызван `llm_client.generate(prompt)`.
-- В ответе выводится тестовое сообщение, длина prompt и preview prompt.
+Один и тот же клиент используется для облачного и локального режима. Разница только
+в переменных окружения.
 
-После получения доступа к YandexGPT `FakeLLM` можно будет заменить на `YandexGPTClient`.
+### Yandex AI Studio
+
+```env
+LLM_BACKEND=yandex
+
+YANDEX_API_KEY=your_api_key_here
+YANDEX_FOLDER_ID=your_folder_id_here
+YANDEX_MODEL=qwen3.6-35b-a3b
+YANDEX_BASE_URL=https://ai.api.cloud.yandex.net/v1
+```
+
+Если `YANDEX_MODEL` не начинается с `gpt://`, код соберет model URI так:
+
+```text
+gpt://<YANDEX_FOLDER_ID>/<YANDEX_MODEL>
+```
+
+### Local LLM
+
+```env
+LLM_BACKEND=local
+
+LOCAL_LLM_BASE_URL=http://localhost:8000/v1
+LOCAL_LLM_API_KEY=
+LOCAL_LLM_AUTH_SCHEME=Bearer
+LOCAL_LLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct
+```
+
+Локальная модель должна быть поднята отдельно через vLLM, SGLang или другой
+OpenAI-compatible server. Подробнее см. `docs/local_inference.md`.
 
 ## Установка
 
@@ -85,7 +128,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Запуск Тестов
+## Запуск тестов
 
 ```bash
 .\.venv\Scripts\python.exe -m pytest
@@ -97,57 +140,19 @@ pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Если Streamlit не подхватывает новые парсеры, нужно полностью остановить старый
-процесс сервера и запустить команду выше заново.
+## Переменные окружения
 
-## Переменные Окружения
+В репозитории есть `.env.example`. Для реального запуска создайте локальный `.env`
+и заполните нужный backend.
 
-В проекте есть пример файла `.env.example`:
+Настоящий `.env` нельзя коммитить. Он должен оставаться в `.gitignore`.
 
-```env
-YANDEX_API_KEY=your_api_key_here
-YANDEX_FOLDER_ID=your_folder_id_here
-YANDEX_MODEL=yandexgpt-lite
-```
+## Текущие ограничения
 
-Для локального запуска с настоящим YandexGPT позже нужно будет создать файл
-`.env` и заполнить реальные значения.
-
-Настоящий `.env` нельзя коммитить. Он уже добавлен в `.gitignore`.
-
-## Текущие Ограничения
-
-- Настоящий ответ YandexGPT пока не используется, потому что доступа к API ещё нет.
-- `YandexGPTClient` подготовлен, но не подключен к Streamlit.
-- Retrieval пока keyword-based и может искать не идеально.
 - OCR пока нет.
 - VLM пока нет.
-- Изображения из PPTX пока не анализируются.
-- Excel-формулы не вычисляются; используется `data_only=True`, поэтому берутся сохранённые значения ячеек.
-- Embeddings, vector search, FAISS, LangChain и LangGraph пока не добавлены.
-
-## Roadmap
-
-Следующие шаги:
-
-- Подключить настоящий YandexGPT.
-- Добавить режим YandexGPT в Streamlit.
-- Улучшить retrieval.
-- Добавить evaluation dataset.
-- Добавить OCR/VLM.
-- Исследовать агентный подход и LangGraph.
-
-## Структура MVP
-
-Ключевые файлы:
-
-- `src/file_agent/document.py` — `Document` и `Block`.
-- `src/file_agent/pipeline.py` — выбор парсера по расширению файла.
-- `src/file_agent/parsers/` — парсеры Markdown, PDF, HTML, XLSX и PPTX.
-- `src/file_agent/chunking.py` — разбиение документов на chunks.
-- `src/file_agent/retrieval.py` — простой keyword retrieval.
-- `src/file_agent/qa.py` — сбор context и QA prompt.
-- `src/file_agent/llm/fake.py` — FakeLLM для локальной проверки.
-- `src/file_agent/llm/yandexgpt.py` — подготовленный клиент YandexGPT.
-- `app.py` — Streamlit MVP.
-- `tests/` — pytest-тесты.
+- Изображения из PPTX не анализируются.
+- Excel-формулы не вычисляются, используется `data_only=True`.
+- Embeddings используются только для semantic retrieval через `sentence-transformers`;
+  FAISS и отдельное vector storage пока не добавлены.
+- LangChain и LangGraph не используются.
