@@ -5,10 +5,7 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
-
-YANDEX_GPT_COMPLETION_URL = (
-    "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-)
+YANDEX_GPT_COMPLETION_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 DEFAULT_YANDEX_MODEL = "yandexgpt-lite"
 
 

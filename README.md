@@ -79,22 +79,36 @@ file -> parse_file -> Document/Block -> chunk_document -> search_chunks -> QA pr
 
 ## Установка
 
+Проект использует [uv](https://docs.astral.sh/uv/) для управления зависимостями.
+
 ```bash
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
+uv sync
+```
+
+Чтобы линт и форматирование запускались автоматически перед каждым коммитом,
+один раз установи git-хуки:
+
+```bash
+uv run pre-commit install
 ```
 
 ## Запуск Тестов
 
 ```bash
-.\.venv\Scripts\python.exe -m pytest
+uv run pytest
+```
+
+## Линт и форматирование
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
 ```
 
 ## Запуск Streamlit
 
 ```bash
-.\.venv\Scripts\python.exe -m streamlit run app.py
+uv run streamlit run app.py
 ```
 
 Если Streamlit не подхватывает новые парсеры, нужно полностью остановить старый

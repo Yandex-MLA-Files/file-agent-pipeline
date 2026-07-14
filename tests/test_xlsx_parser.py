@@ -1,4 +1,4 @@
-﻿from openpyxl import Workbook
+from openpyxl import Workbook
 
 from file_agent.parsers.xlsx_parser import XLSXParser
 

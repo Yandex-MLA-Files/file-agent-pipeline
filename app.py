@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import tempfile
 from pathlib import Path
 
@@ -14,7 +14,6 @@ from file_agent.llm.fake import FakeLLM
 from file_agent.pipeline import parse_file
 from file_agent.qa import answer_question_with_context
 from file_agent.retrieval import search_chunks
-
 
 SUPPORTED_TYPES = ["md", "pdf", "html", "htm", "xlsx", "pptx"]
 TEXT_PREVIEW_LIMIT = 3000
@@ -94,4 +93,3 @@ if uploaded_file is not None:
                     )
                     st.subheader("Answer")
                     st.write(answer)
-

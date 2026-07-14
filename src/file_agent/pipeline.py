@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from file_agent.document import Document
 from file_agent.parsers.html_parser import HTMLParser
@@ -28,4 +28,3 @@ def parse_file(file_path: str | Path) -> Document:
         return PPTXParser().parse(path)
 
     raise ValueError(f"Unsupported file type: {suffix or '<no extension>'}")
-
