@@ -9,17 +9,13 @@ import numpy as np
 
 from file_agent.chunking import Chunk
 
-
-DEFAULT_SEMANTIC_MODEL_NAME = (
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-)
+DEFAULT_SEMANTIC_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DEFAULT_RRF_K = 60
 DEFAULT_SEMANTIC_MIN_SCORE = 0.25
 
 
 class SemanticModel(Protocol):
-    def encode(self, sentences, normalize_embeddings: bool = True):
-        ...
+    def encode(self, sentences, normalize_embeddings: bool = True): ...
 
 
 @dataclass
@@ -171,9 +167,7 @@ def _bm25_score(
 
         doc_frequency = document_frequencies[token]
         idf = math.log(1 + (total_documents - doc_frequency + 0.5) / (doc_frequency + 0.5))
-        denominator = term_frequency + k1 * (
-            1 - b + b * document_length / avg_doc_length
-        )
+        denominator = term_frequency + k1 * (1 - b + b * document_length / avg_doc_length)
         score += idf * (term_frequency * (k1 + 1)) / denominator
 
     return score

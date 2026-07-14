@@ -13,3 +13,6 @@ data/private/
 .vscode/
 
 *.log
+
+scripts/
+CLAUDE.md

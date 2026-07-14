@@ -1,22 +1,16 @@
 from file_agent.llm.base import LLMClient
 from file_agent.retrieval import SearchResult
 
-
-NO_CONTEXT_MESSAGE = (
-    "No relevant context was found in the document to answer the question."
-)
+NO_CONTEXT_MESSAGE = "No relevant context was found in the document to answer the question."
 
 
 def build_context_from_results(results: list[SearchResult]) -> str:
     context_parts: list[str] = []
 
     for index, result in enumerate(results, start=1):
-        metadata = ", ".join(
-            f"{key}={value}" for key, value in result.chunk.metadata.items()
-        )
+        metadata = ", ".join(f"{key}={value}" for key, value in result.chunk.metadata.items())
         context_parts.append(
-            f"[Chunk {index} | score={result.score:g} | metadata: {metadata}]\n"
-            f"{result.chunk.text}"
+            f"[Chunk {index} | score={result.score:g} | metadata: {metadata}]\n{result.chunk.text}"
         )
 
     return "\n\n".join(context_parts)

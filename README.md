@@ -122,22 +122,36 @@ OpenAI-compatible server. Подробнее см. `docs/local_inference.md`.
 
 ## Установка
 
+Проект использует [uv](https://docs.astral.sh/uv/) для управления зависимостями.
+
 ```bash
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
+uv sync
+```
+
+Чтобы линт и форматирование запускались автоматически перед каждым коммитом,
+один раз установи git-хуки:
+
+```bash
+uv run pre-commit install
 ```
 
 ## Запуск тестов
 
 ```bash
-.\.venv\Scripts\python.exe -m pytest
+uv run pytest
+```
+
+## Линт и форматирование
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
 ```
 
 ## Запуск Streamlit
 
 ```bash
-.\.venv\Scripts\python.exe -m streamlit run app.py
+uv run streamlit run app.py
 ```
 
 ## Переменные окружения

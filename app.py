@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import tempfile
 from pathlib import Path
 
@@ -12,7 +12,6 @@ if str(SRC_PATH) not in sys.path:
 from file_agent.llm.factory import create_llm_client
 from file_agent.rag import answer_documents, chunk_documents, load_documents
 from file_agent.retrieval import search_chunks
-
 
 SUPPORTED_TYPES = ["md", "pdf", "html", "htm", "xlsx", "pptx"]
 TEXT_PREVIEW_LIMIT = 3000
@@ -47,14 +46,8 @@ if uploaded_files:
             )
 
             st.write(f"**Documents:** {len(documents)}")
-            st.write(
-                "**Files:** "
-                + ", ".join(document.file_name for document in documents)
-            )
-            st.write(
-                "**Blocks:** "
-                + str(sum(len(document.blocks) for document in documents))
-            )
+            st.write("**Files:** " + ", ".join(document.file_name for document in documents))
+            st.write("**Blocks:** " + str(sum(len(document.blocks) for document in documents)))
             st.write(f"**Chunks:** {len(chunks)}")
 
             st.text_area(
@@ -134,4 +127,3 @@ if uploaded_files:
                                         height=240,
                                         key=f"answer-source-{index}",
                                     )
-

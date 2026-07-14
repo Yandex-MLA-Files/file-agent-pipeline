@@ -1,4 +1,4 @@
-from file_agent.rag import answer_files, answer_documents
+from file_agent.rag import answer_documents, answer_files
 
 
 class DummyLLM:

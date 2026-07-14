@@ -53,9 +53,7 @@ def test_generate_calls_openai_compatible_chat_completions():
     assert args[0] == "http://localhost:8000/v1/chat/completions"
     assert kwargs["headers"]["Authorization"] == "Bearer token"
     assert kwargs["json"]["model"] == "test-model"
-    assert kwargs["json"]["messages"] == [
-        {"role": "user", "content": "Question"}
-    ]
+    assert kwargs["json"]["messages"] == [{"role": "user", "content": "Question"}]
     assert kwargs["json"]["temperature"] == 0.1
     assert kwargs["json"]["max_tokens"] == 128
 

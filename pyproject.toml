@@ -1,0 +1,38 @@
+[project]
+name = "file-agent-pipeline"
+version = "0.1.0"
+description = ""
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.58.0",
+    "PyMuPDF>=1.27.2.3",
+    "beautifulsoup4>=4.15.0",
+    "python-dotenv>=1.2.2",
+    "openpyxl>=3.1.5",
+    "python-pptx>=1.0.2",
+    "requests>=2.34.2",
+    "sentence-transformers>=3.3.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.14.0",
+    "pre-commit>=4.0.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"app.py" = ["E402"]

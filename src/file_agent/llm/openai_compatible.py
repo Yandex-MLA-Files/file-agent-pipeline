@@ -2,7 +2,6 @@ from typing import Any
 
 import requests
 
-
 DEFAULT_TIMEOUT_SECONDS = 60
 
 

@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 from file_agent.llm.base import LLMClient
 from file_agent.llm.openai_compatible import OpenAICompatibleClient
 
-
 DEFAULT_LLM_BACKEND = "yandex"
 DEFAULT_YANDEX_BASE_URL = "https://ai.api.cloud.yandex.net/v1"
 DEFAULT_YANDEX_MODEL = "qwen3.6-35b-a3b"

@@ -2,7 +2,7 @@
 
 ## О проекте
 
-`file-agent-pipeline` — учебный Python-проект для ML-стажировки. Он реализует
+`file-agent-pipeline` — ML Python-проект. Он реализует
 простой RAG-пайплайн поверх пользовательских файлов:
 
 ```text
@@ -150,27 +150,26 @@ Yandex AI Studio:
 Установка зависимостей в Windows:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
+uv sync
 ```
 
 Запуск всех тестов:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest
+uv run pytest
 ```
 
-Если виртуальное окружение уже активно:
+Проверка линтером и форматированием:
 
 ```powershell
-python -m pytest
+uv run ruff check .
+uv run ruff format --check .
 ```
 
 Запуск Streamlit:
 
 ```powershell
-.\.venv\Scripts\python.exe -m streamlit run app.py
+uv run streamlit run app.py
 ```
 
 Подробнее о локальном inference см. в `docs/local_inference.md`.
