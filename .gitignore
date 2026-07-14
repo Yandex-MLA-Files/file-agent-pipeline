@@ -12,4 +12,6 @@ data/private/
 .ipynb_checkpoints/
 .vscode/
 
+scripts/
+
 *.log
