@@ -1,58 +1,56 @@
-# Как мы работаем в команде
+# Contributing
 
-Короткий свод правил для совместной работы над `file-agent-pipeline`.
+This document summarizes the collaboration rules for `file-agent-pipeline`.
 
-## Основной цикл
+## Workflow
 
-Одна **issue** → одна **ветка** → один **PR**.
+Use one issue, one branch, and one pull request for each change.
 
-1. Заводим issue из шаблона (Задача или Баг), вешаем лейбл зоны
-   (`parser` / `retrieval` / `generation` / `evaluation` / `backend` / `frontend` / `devops`).
-2. Создаём ветку от актуального `main`.
-3. Делаем работу небольшими осмысленными коммитами.
-4. Открываем PR. В описании пишем `Closes #N` (issue закроется при мёрдже) или
-   `Part of #N`, если PR — лишь часть большой задачи и закрывать её рано.
-5. Ждём зелёный CI и минимум один аппрув, затем мёрджим.
+1. Create an issue from the task or bug template and apply the relevant area label (`parser`, `retrieval`, `generation`, `evaluation`, `backend`, `frontend`, or `devops`).
+2. Create a branch from the latest `main`.
+3. Make small, focused commits.
+4. Open a pull request. Add `Closes #N` when the PR completes the issue, or `Part of #N` when it is only one part of a larger task.
+5. Merge after CI passes and the PR has at least one approval.
 
-Напрямую в `main` не пушим — только через PR.
+Do not push directly to `main`.
 
-## Ветки
+## Branches
 
-Формат: `<тип>/<короткое-описание>`, например:
+Use `<type>/<short-description>`, for example:
 
 - `feature/pdf-parser`
 - `fix/xlsx-empty-sheet`
 - `chore/setup-ci`
 
-## Коммиты
+## Commits
 
-Стиль Conventional Commits (по возможности):
+Prefer Conventional Commits:
 
-- `feat:` — новая функциональность
-- `fix:` — исправление бага
-- `test:` — тесты
-- `docs:` — документация
-- `ci:` — настройка или изменение CI (GitHub Actions)
-- `chore:` — инфраструктура, зависимости, конфиги
+- `feat:` for new functionality;
+- `fix:` for bug fixes;
+- `test:` for test changes;
+- `docs:` for documentation;
+- `ci:` for CI changes;
+- `chore:` for infrastructure, dependencies, and configuration.
 
-Коммиты — маленькие и по смыслу, а не «всё сразу одним коммитом».
+Keep commits small and focused on one purpose.
 
-## Связь PR и issue
+## Pull requests and issues
 
-В **описании PR** одной строкой, как в PR-шаблоне:
+Put the issue reference in the pull request description:
 
-- `Closes #N` — issue закроется автоматически при мёрдже (синонимы: `Fixes` / `Resolves`).
-- `Part of #N` — просто ссылка без закрытия: для PR, который лишь часть.
+- `Closes #N` closes the issue when the PR is merged. `Fixes` and `Resolves` are equivalent.
+- `Part of #N` links the issue without closing it.
 
-В коммитах ключевые слова не дублируем — одно предсказуемое место (описание PR).
+Do not duplicate these keywords in commit messages.
 
-## Ревью
+## Reviews
 
-- PR не мёрджит автор без аппрува.
-- Держим PR небольшими — так их реально ревьюить.
-- Все замечания и обсуждения — в PR или в связанной issue.
+- Authors must not merge their own PR without approval.
+- Keep PRs small enough to review effectively.
+- Keep review feedback and discussion in the PR or linked issue.
 
-## Секреты
+## Secrets
 
-- `.env`, API-ключи, `folder_id` не коммитим (`.env` уже в `.gitignore`).
-- Коммитим только `.env.example` с плейсхолдерами.
+- Never commit `.env`, API keys, or folder identifiers.
+- Commit only `.env.example` with placeholder values.

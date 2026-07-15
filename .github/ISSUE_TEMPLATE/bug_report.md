@@ -1,30 +1,30 @@
 ---
-name: Баг
-about: Что-то работает не так, как ожидалось
+name: Bug report
+about: Something is not working as expected
 title: ""
 labels: ["bug"]
 assignees: []
 ---
 
-## Что происходит
-<!-- Описание проблемы -->
+## Problem
+<!-- Describe the problem. -->
 
 
-## Как воспроизвести
+## Steps to reproduce
 1.
 
-## Ожидаемое поведение
+## Expected behavior
 
 
-## Фактическое поведение
+## Actual behavior
 
 
-## Окружение
-- ОС:
-- Python:
-- Ветка / коммит:
+## Environment
+- OS:
+- Python version:
+- Branch or commit:
 
-## Логи / трейсбек
+## Logs or traceback
 ```text
 
 ```

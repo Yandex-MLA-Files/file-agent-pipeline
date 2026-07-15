@@ -1,103 +1,92 @@
 # AGENTS.md
 
-## О проекте
+## Project overview
 
-`file-agent-pipeline` — ML Python-проект. Он реализует
-простой RAG-пайплайн поверх пользовательских файлов:
+`file-agent-pipeline` is a Python ML project that implements a small RAG pipeline over user-provided files:
 
 ```text
-файлы
-  -> парсинг
+files
+  -> parsing
   -> Document / Block
   -> chunking
   -> retrieval
   -> QA prompt
   -> LLM
-  -> ответ и источники
+  -> answer and sources
 ```
 
-Пользователь может загрузить один или несколько документов, просмотреть
-извлечённый текст, найти релевантные chunks и получить ответ LLM с источниками.
+Users can upload one or more documents, preview extracted text, find relevant chunks, and generate an LLM answer with source metadata.
 
-## Текущее состояние
+## Current capabilities
 
-Реализовано:
+- A shared `Document` / `Block` representation.
+- Markdown, PDF, HTML, XLSX, and PPTX parsers.
+- Document chunking.
+- BM25 retrieval.
+- Semantic retrieval with `sentence-transformers`.
+- Reciprocal Rank Fusion (RRF) for combining BM25 and semantic rankings.
+- A QA prompt layer and end-to-end RAG orchestration.
+- An `LLMClient` adapter built on the official OpenAI Python SDK.
+- Yandex AI Studio and local OpenAI-compatible LLM backends.
+- A Streamlit UI for multi-file upload, preview, search, and answer generation.
+- Pytest coverage for the main layers.
 
-- единое представление `Document` / `Block`;
-- парсинг Markdown, PDF, HTML, XLSX и PPTX;
-- разбиение документов на chunks;
-- BM25 retrieval;
-- semantic retrieval через `sentence-transformers`;
-- объединение результатов BM25 и semantic search через RRF;
-- QA prompt layer и общий RAG-слой;
-- OpenAI-compatible LLM-клиент;
-- два LLM backend: Yandex AI Studio и локальный OpenAI-compatible endpoint;
-- Streamlit-интерфейс с загрузкой нескольких файлов, preview, поиском и генерацией
-  ответа;
-- pytest-тесты для основных слоёв.
+Supported extensions: `.md`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.pptx`.
 
-Поддерживаемые расширения: `.md`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.pptx`.
-
-## Структура проекта
+## Repository layout
 
 ```text
-app.py                         # Streamlit-интерфейс
+app.py                         # Streamlit UI
 src/file_agent/
-  document.py                 # Document и Block
-  pipeline.py                 # выбор парсера по расширению
-  chunking.py                 # разбиение документов на chunks
-  retrieval.py                # BM25, semantic search и RRF
-  qa.py                       # сбор контекста и QA prompt
-  rag.py                      # полный RAG-пайплайн
-  parsers/                    # парсеры поддерживаемых форматов
-  llm/                        # интерфейс, клиент и фабрика LLM
-tests/                        # pytest-тесты
-docs/local_inference.md       # запуск локального LLM endpoint
+  document.py                 # Document and Block models
+  pipeline.py                 # Parser selection by extension
+  chunking.py                 # Document chunking
+  retrieval.py                # BM25, semantic search, and RRF
+  qa.py                       # Context assembly and QA prompt
+  rag.py                      # End-to-end RAG orchestration
+  parsers/                    # Supported file parsers
+  llm/                        # LLM interface, adapter, and factory
+tests/                        # Pytest suite
+docs/local_inference.md       # Local LLM endpoint setup
 ```
 
-## Архитектурные правила
+## Architecture rules
 
-- Держать парсинг, retrieval, QA и интеграцию с LLM отдельными слоями.
-- Все парсеры должны возвращать единое представление `Document` с набором
-  `Block`.
-- Сохранять доступные метаданные:
-  - `page` для PDF;
-  - `slide` для PPTX;
-  - `sheet` для XLSX;
-  - `block_type` для типа блока;
-  - имя исходного файла и прочие полезные координаты источника.
-- Выбор парсера по расширению держать в `src/file_agent/pipeline.py`.
-- Работу с LLM выполнять только через интерфейс `LLMClient`.
-- Настройки конкретных backend держать в `src/file_agent/llm/factory.py` и
-  переменных окружения.
-- Не добавлять сложные абстракции без практической необходимости. Предпочитать
-  простой читаемый код с type hints.
-- Для нового парсера или нового поведения добавлять тесты.
-- Тесты не должны выполнять реальные запросы к облачным или локальным LLM.
-  Сетевое взаимодействие проверять через mocks/fakes.
+- Keep parsing, retrieval, QA, and LLM integration as separate layers.
+- Every parser must return the shared `Document` representation containing `Block` objects.
+- Preserve available source metadata, including:
+  - `page_number` for PDF;
+  - `slide_number` for PPTX;
+  - `sheet_name` for XLSX;
+  - `block_type` for the block kind;
+  - the source file name and other useful source coordinates.
+- Keep parser selection by extension in `src/file_agent/pipeline.py`.
+- Access LLMs only through the `LLMClient` interface.
+- Keep backend-specific configuration in `src/file_agent/llm/factory.py` and environment variables.
+- Avoid complex abstractions without a practical need. Prefer simple, readable code with type hints.
+- Add tests for new parsers and new behavior.
+- Tests must not call real cloud or local LLM endpoints. Mock or fake all network interactions.
 
-## Ограничения текущего этапа
+## Current-stage exclusions
 
-Пока не добавлять без отдельной задачи:
+Do not add the following without a separate task:
 
-- LangChain и LangGraph;
-- OCR и VLM;
-- сложную агентную архитектуру;
-- отдельную vector database или FAISS;
-- анализ изображений из PPTX;
-- вычисление Excel-формул.
+- LangChain or LangGraph;
+- OCR or VLM support;
+- complex agent architecture;
+- a standalone vector database or FAISS;
+- image analysis for PPTX files;
+- Excel formula evaluation.
 
-Для XLSX используется `data_only=True`: парсер читает сохранённые значения формул,
-но сам формулы не вычисляет.
+The XLSX parser uses `data_only=True`: it reads cached formula values but does not calculate formulas.
 
-## LLM и переменные окружения
+## LLM configuration
 
-Секреты и идентификаторы нельзя хардкодить. Настоящий `.env` нельзя коммитить;
-при изменении конфигурации нужно актуализировать `.env.example`.
+Never hardcode secrets or identifiers. Do not commit a real `.env` file. Update `.env.example` whenever configuration changes.
 
-Общие настройки:
+Shared setting:
 
-- `LLM_BACKEND` — `yandex` или `local`.
+- `LLM_BACKEND`: `yandex` or `local`.
 
 Yandex AI Studio:
 
@@ -106,69 +95,64 @@ Yandex AI Studio:
 - `YANDEX_MODEL`;
 - `YANDEX_BASE_URL`.
 
-Локальный OpenAI-compatible backend:
+Local OpenAI-compatible backend:
 
 - `LOCAL_LLM_BASE_URL`;
 - `LOCAL_LLM_API_KEY`;
 - `LOCAL_LLM_MODEL`.
 
-Не выполнять реальные API-запросы в тестах и не добавлять рабочие ключи в код,
-тестовые данные, логи или документацию.
+Never make real API requests in tests or add working credentials to code, fixtures, logs, or documentation.
 
-## Стек
+## Stack
 
 - Python 3.11+;
 - Streamlit;
 - PyMuPDF;
 - BeautifulSoup;
-- Markdown;
 - openpyxl;
 - python-pptx;
 - sentence-transformers;
 - openai;
 - pytest.
 
-## Правила внесения изменений
+## Change guidelines
 
-Перед изменением изучить соответствующий модуль и существующие тесты. Сохранять
-обратную совместимость, если задача явно не требует другого поведения.
+Before editing, inspect the relevant module and existing tests. Preserve backward compatibility unless the task explicitly requires a behavior change.
 
-После изменения:
+After editing:
 
-- добавить или обновить тесты для затронутого поведения;
-- запустить как минимум релевантные тесты;
-- по возможности запустить весь test suite;
-- обновить `README.md`, `.env.example` или `docs/`, если изменились интерфейс,
-  конфигурация, поддерживаемые форматы или команды запуска.
+- add or update tests for changed behavior;
+- run at least the relevant tests;
+- run the full test suite when practical;
+- update `README.md`, `.env.example`, or `docs/` when interfaces, configuration, supported formats, or run commands change.
 
-Не коммитить временные файлы, кэш, модели, пользовательские документы, `.env` и
-другие секреты.
+Do not commit temporary files, caches, models, user documents, `.env`, or other secrets.
 
-## Команды
+## Commands
 
-Установка зависимостей в Windows:
+Install dependencies:
 
 ```powershell
 uv sync
 ```
 
-Запуск всех тестов:
+Run all tests:
 
 ```powershell
 uv run pytest
 ```
 
-Проверка линтером и форматированием:
+Check linting and formatting:
 
 ```powershell
 uv run ruff check .
 uv run ruff format --check .
 ```
 
-Запуск Streamlit:
+Run Streamlit:
 
 ```powershell
 uv run streamlit run app.py
 ```
 
-Подробнее о локальном inference см. в `docs/local_inference.md`.
+See `docs/local_inference.md` for local inference setup.
