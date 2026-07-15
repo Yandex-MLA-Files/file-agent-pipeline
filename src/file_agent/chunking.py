@@ -1,76 +1,91 @@
+import uuid
 from dataclasses import dataclass, field
-from typing import Any
-
-from file_agent.document import Block, Document
-
+from typing import Any, Dict, List
+from .document import Document, Block, BlockType
 
 @dataclass
 class Chunk:
     id: str
     text: str
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Сериализация чанка для экспорта в CSV/JSON или сохранения в Vector DB"""
+        return {
+            "id": self.id,
+            "text": self.text,
+            "metadata": self.metadata
+        }
 
-def chunk_document(
-    document: Document,
-    max_chars: int = 1000,
-    overlap: int = 100,
-) -> list[Chunk]:
-    if max_chars <= 0:
-        raise ValueError("max_chars must be greater than 0")
-    if overlap < 0:
-        raise ValueError("overlap must be greater than or equal to 0")
-    if overlap >= max_chars:
-        raise ValueError("overlap must be smaller than max_chars")
+class DocumentChunker:
+    def __init__(self, max_chunk_size: int = 1000, chunk_overlap: int = 100):
+        self.max_chunk_size = max_chunk_size
+        self.chunk_overlap = chunk_overlap
 
-    chunks: list[Chunk] = []
-    for block in document.blocks:
-        chunks.extend(_chunk_block(document, block, max_chars, overlap))
+    def chunk_document(self, doc: Document) -> List[Chunk]:
+        """
+        Разбивает документ на чанки, сохраняя сквозные метаданные 
+        для последующей фильтрации.
+        """
+        chunks = []
+        
+        doc_level_metadata = {
+            "file_name": doc.file_name,
+            "file_type": doc.file_type,
+            "parsing_method": doc.metadata.get("parsing_method", "unknown"),
+            "total_pages": doc.metadata.get("total_pages", 0)
+        }
 
-    return chunks
+        # Разбиение длинных блоков
+        for block in doc.blocks:
+            block_text = block.text
+            
+            if len(block_text) <= self.max_chunk_size:
+                chunk = self._create_chunk(block, block_text, doc_level_metadata)
+                chunks.append(chunk)
+            else:
+                if block.block_type == BlockType.TABLE:
+                    # таблицы не разбиваются или разбиваются только по строкам 
+                    chunk = self._create_chunk(block, block_text, doc_level_metadata)
+                    chunks.append(chunk)
+                else:
+                    # разбиение текста с overlap
+                    start_idx = 0
+                    chunk_idx = 0
+                    while start_idx < len(block_text):
+                        end_idx = start_idx + self.max_chunk_size
+                        chunk_text = block_text[start_idx:end_idx]
+                        
+                        sub_metadata = doc_level_metadata.copy()
+                        sub_metadata["chunk_index_in_block"] = chunk_idx
+                        sub_metadata["is_truncated"] = end_idx < len(block_text)
+                        
+                        chunk = self._create_chunk(block, chunk_text, sub_metadata)
+                        chunks.append(chunk)
+                        
+                        start_idx = end_idx - self.chunk_overlap
+                        chunk_idx += 1
 
+        return chunks
 
-def _chunk_block(
-    document: Document,
-    block: Block,
-    max_chars: int,
-    overlap: int,
-) -> list[Chunk]:
-    if not block.text:
-        return []
+    def _create_chunk(self, block: Block, text: str, doc_metadata: Dict[str, Any]) -> Chunk:
+        """Создает чанк, объединяя метаданные документа и конкретного блока"""
+        chunk_id = f"chunk_{uuid.uuid4().hex[:8]}"
+        
+        combined_metadata = doc_metadata.copy()
+        combined_metadata.update({
+            "block_id": block.id,
+            "block_type": block.block_type.value,
+            "page_number": block.page_number,
+            "bbox": block.bbox,
+            "has_vlm_description": bool(block.vlm_description)
+        })
+        
+        if block.vlm_description:
+            combined_metadata["vlm_description"] = block.vlm_description
 
-    chunks: list[Chunk] = []
-    step = max_chars - overlap
-    start = 0
-    chunk_index = 1
-
-    while start < len(block.text):
-        end = start + max_chars
-        chunk_text = block.text[start:end]
-        metadata = _build_chunk_metadata(document, block)
-
-        chunks.append(
-            Chunk(
-                id=f"{block.id}-chunk-{chunk_index}",
-                text=chunk_text,
-                metadata=metadata,
-            )
+        return Chunk(
+            id=chunk_id,
+            text=text,
+            metadata=combined_metadata
         )
-
-        start += step
-        chunk_index += 1
-
-    return chunks
-
-
-def _build_chunk_metadata(document: Document, block: Block) -> dict[str, Any]:
-    metadata: dict[str, Any] = {
-        "source_file": block.metadata.get("source_file", document.file_name),
-        "block_id": block.id,
-        "block_type": block.type,
-    }
-
-    if "page_number" in block.metadata:
-        metadata["page_number"] = block.metadata["page_number"]
-
-    return metadata
