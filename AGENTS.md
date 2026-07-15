@@ -110,7 +110,6 @@ Yandex AI Studio:
 
 - `LOCAL_LLM_BASE_URL`;
 - `LOCAL_LLM_API_KEY`;
-- `LOCAL_LLM_AUTH_SCHEME`;
 - `LOCAL_LLM_MODEL`.
 
 Не выполнять реальные API-запросы в тестах и не добавлять рабочие ключи в код,
@@ -126,7 +125,7 @@ Yandex AI Studio:
 - openpyxl;
 - python-pptx;
 - sentence-transformers;
-- requests;
+- openai;
 - pytest.
 
 ## Правила внесения изменений

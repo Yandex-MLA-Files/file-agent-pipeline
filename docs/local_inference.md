@@ -1,7 +1,9 @@
 # Local LLM inference
 
-The application does not import vLLM or SGLang directly. It calls a local
-OpenAI-compatible HTTP endpoint through `OpenAICompatibleClient`.
+The application does not import vLLM or SGLang directly. `OpenAILLMClient`
+uses the official OpenAI Python SDK to call a local OpenAI-compatible HTTP
+endpoint. A blank `LOCAL_LLM_API_KEY` is supported for servers without
+authentication.
 
 ## vLLM
 

@@ -66,7 +66,7 @@ src/file_agent/
 
   llm/
     base.py
-    openai_compatible.py
+    openai_client.py
     factory.py
 ```
 
@@ -77,10 +77,11 @@ src/file_agent/
 ```python
 class LLMClient(Protocol):
     def generate(self, prompt: str) -> str:
-        ...
+        raise NotImplementedError
 ```
 
-`OpenAICompatibleClient` ходит в endpoint вида:
+`OpenAILLMClient` адаптирует официальный Python SDK `openai` к интерфейсу
+`LLMClient`. SDK отправляет запросы в endpoint вида:
 
 ```text
 {base_url}/chat/completions
@@ -113,7 +114,6 @@ LLM_BACKEND=local
 
 LOCAL_LLM_BASE_URL=http://localhost:8000/v1
 LOCAL_LLM_API_KEY=
-LOCAL_LLM_AUTH_SCHEME=Bearer
 LOCAL_LLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct
 ```
 
