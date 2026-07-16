@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 
 from file_agent.document import Document
@@ -11,6 +12,10 @@ from file_agent.parsers.docling_parser import DoclingParser
 from file_agent.parsers.enhancer import DocumentEnhancer
 from file_agent.vlm.openai_compatible import OpenAICompatibleVLMClient
 from file_agent.vlm.base import MockVLMClient
+
+from dotenv import load_dotenv
+load_dotenv()
+
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +34,9 @@ def parse_file(
             # инициализация VLM клиента (здесь можно читать URL из .env)
             # пример для локального Ollama: base_url="http://localhost:11434/v1", model="qwen2.5-vl:7b"
             vlm_client = OpenAICompatibleVLMClient(
-                base_url="http://localhost:11434/v1", 
-                model="qwen2.5-vl:7b", 
-                api_key="ollama"
+                base_url=os.getenv("VLM_BASE_URL", "http://localhost:11434/v1"),
+                model=os.getenv("VLM_MODEL", "qwen2.5-vl:7b"),
+                api_key=os.getenv("VLM_API_KEY", "dummy")
             )
             
             # Graceful Degradation: проверка доступности VLM

@@ -28,7 +28,12 @@ class DoclingParser(BaseParser):
         for item, level in docling_doc.iterate_items():
             block_type = self._map_docling_type_to_block_type(item.label)
             try:
-                content = docling_doc.export_to_markdown(item) 
+                if hasattr(item, 'text') and item.text:
+                    content = item.text
+                elif hasattr(item, 'export_to_markdown'):
+                    content = item.export_to_markdown()
+                else:
+                    content = str(item)
             except Exception:
                 content = str(item.text) if hasattr(item, 'text') else ""
             

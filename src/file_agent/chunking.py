@@ -25,7 +25,7 @@ class DocumentChunker:
     def chunk_document(self, doc: Document) -> List[Chunk]:
         """
         Разбиение документа на чанки, сохраняя сквозные метаданные 
-        для последующей фильтрации.
+        для последующей фильтрации в RAG.
         """
         chunks = []
         
