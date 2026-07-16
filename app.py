@@ -17,6 +17,9 @@ from file_agent.rag import (
     index_documents,
     load_documents,
 )
+from file_agent.telemetry import configure_telemetry
+
+configure_telemetry()
 
 SUPPORTED_TYPES = ["md", "txt", "pdf", "docx", "html", "htm", "xlsx", "pptx"]
 TEXT_PREVIEW_LIMIT = 3000
