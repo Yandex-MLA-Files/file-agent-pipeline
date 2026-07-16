@@ -66,6 +66,22 @@ def answer_indexed_documents(
     top_k: int = 5,
 ) -> RAGResponse:
     results = retriever.search(query=question, top_k=top_k)
+    return answer_with_results(
+        question=question,
+        results=results,
+        llm_client=llm_client,
+        documents_count=documents_count,
+        chunks_count=chunks_count,
+    )
+
+
+def answer_with_results(
+    question: str,
+    results: list[SearchResult],
+    llm_client: LLMClient,
+    documents_count: int,
+    chunks_count: int,
+) -> RAGResponse:
     answer = answer_question_with_context(
         question=question,
         results=results,

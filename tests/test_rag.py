@@ -1,7 +1,9 @@
+from file_agent.chunking import Chunk
 from file_agent.rag import (
     answer_documents,
     answer_files,
     answer_indexed_documents,
+    answer_with_results,
 )
 from file_agent.retrieval import SearchResult
 
@@ -110,5 +112,35 @@ def test_answer_indexed_documents_does_not_reindex_chunks():
     )
 
     assert retriever.index_calls == 1
+    assert retriever.search_calls == [("Question", 5)]
     assert response.documents_count == 2
     assert response.chunks_count == 10
+
+
+def test_answer_with_results_uses_precomputed_search_results():
+    llm_client = DummyLLM()
+    results = [
+        SearchResult(
+            chunk=Chunk(
+                id="chunk-1",
+                text="Precomputed context",
+                metadata={"source_file": "notes.md"},
+            ),
+            score=0.75,
+        )
+    ]
+
+    response = answer_with_results(
+        question="What is the context?",
+        results=results,
+        llm_client=llm_client,
+        documents_count=1,
+        chunks_count=1,
+    )
+
+    assert response.answer == "Generated answer"
+    assert response.sources is results
+    assert response.documents_count == 1
+    assert response.chunks_count == 1
+    assert len(llm_client.prompts) == 1
+    assert "Precomputed context" in llm_client.prompts[0]

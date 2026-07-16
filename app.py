@@ -13,7 +13,7 @@ if str(SRC_PATH) not in sys.path:
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.factory import create_llm_client
 from file_agent.rag import (
-    answer_indexed_documents,
+    answer_with_results,
     index_documents,
     load_documents,
 )
@@ -27,6 +27,8 @@ RETRIEVAL_STATE_KEYS = (
     "indexed_chunks",
     "indexed_text",
     "lancedb_retriever",
+    "search_cache_key",
+    "search_results",
 )
 
 
@@ -115,12 +117,25 @@ else:
     )
     generate_answer = st.button("Generate answer")
     results = []
+    normalized_query = query.strip()
 
-    if query.strip():
-        results = retriever.search(
-            query=query,
-            top_k=int(top_k),
+    if normalized_query:
+        search_cache_key = (
+            files_fingerprint,
+            normalized_query,
+            int(top_k),
         )
+        if (
+            st.session_state.get("search_cache_key") != search_cache_key
+            or "search_results" not in st.session_state
+        ):
+            st.session_state["search_results"] = retriever.search(
+                query=normalized_query,
+                top_k=int(top_k),
+            )
+            st.session_state["search_cache_key"] = search_cache_key
+
+        results = st.session_state["search_results"]
 
         if not results:
             st.info("No matching chunks found.")
@@ -141,17 +156,16 @@ else:
                     )
 
     if generate_answer:
-        if not query.strip():
+        if not normalized_query:
             st.warning("Enter a question before generating an answer.")
         else:
             try:
-                response = answer_indexed_documents(
-                    question=query,
+                response = answer_with_results(
+                    question=normalized_query,
+                    results=results,
                     llm_client=create_llm_client(),
-                    retriever=retriever,
                     documents_count=len(documents),
                     chunks_count=len(chunks),
-                    top_k=int(top_k),
                 )
             except Exception as exc:
                 st.error(f"Could not generate answer: {exc}")
