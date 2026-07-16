@@ -1,8 +1,8 @@
 from file_agent.chunking import Chunk
-from file_agent.retrieval import search_chunks
+from file_agent.lancedb_retriever import LanceDBRetriever
 
 
-class FakeSemanticModel:
+class FakeEmbeddingModel:
     def __init__(self, vectors):
         self.vectors = vectors
         self.calls = []
@@ -12,106 +12,24 @@ class FakeSemanticModel:
         return [self.vectors[sentence] for sentence in sentences]
 
 
-def test_search_chunks_returns_relevant_chunks_with_bm25():
-    chunks = [
-        Chunk(id="chunk-1", text="Python parses markdown files"),
-        Chunk(id="chunk-2", text="Streamlit renders a local demo"),
-    ]
-
-    results = search_chunks("python markdown", chunks, use_semantic=False)
-
-    assert [result.chunk.id for result in results] == ["chunk-1"]
-    assert results[0].score > 0
-
-
-def test_search_chunks_does_not_return_irrelevant_chunks_with_bm25():
-    chunks = [
-        Chunk(id="chunk-1", text="PDF parser extracts text"),
-        Chunk(id="chunk-2", text="HTML parser removes scripts"),
-    ]
-
-    results = search_chunks("spreadsheet cells", chunks, use_semantic=False)
-
-    assert results == []
-
-
-def test_search_chunks_top_k_limits_results():
-    chunks = [
-        Chunk(id="chunk-1", text="python"),
-        Chunk(id="chunk-2", text="python"),
-        Chunk(id="chunk-3", text="python"),
-    ]
-
-    results = search_chunks("python", chunks, top_k=2, use_semantic=False)
-
-    assert len(results) == 2
-    assert [result.chunk.id for result in results] == ["chunk-1", "chunk-2"]
-
-
-def test_search_chunks_sorts_bm25_results_by_score():
-    chunks = [
-        Chunk(id="chunk-1", text="python"),
-        Chunk(id="chunk-2", text="python markdown html"),
-        Chunk(id="chunk-3", text="python markdown"),
-    ]
-
-    results = search_chunks("python markdown html", chunks, use_semantic=False)
-
-    assert [result.chunk.id for result in results] == [
-        "chunk-2",
-        "chunk-3",
-        "chunk-1",
-    ]
-
-
-def test_search_chunks_can_return_semantic_matches_without_keyword_overlap():
-    chunks = [
-        Chunk(id="chunk-1", text="automobile engine"),
-        Chunk(id="chunk-2", text="banana fruit"),
-    ]
-    semantic_model = FakeSemanticModel(
-        {
-            "vehicle question": [1.0, 0.0],
-            "automobile engine": [1.0, 0.0],
-            "banana fruit": [0.0, 1.0],
-        }
-    )
-
-    results = search_chunks(
-        "vehicle question",
-        chunks,
-        semantic_model=semantic_model,
-    )
-
-    assert [result.chunk.id for result in results] == ["chunk-1"]
-    assert semantic_model.calls == [
-        (
-            ["vehicle question", "automobile engine", "banana fruit"],
-            True,
-        )
-    ]
-
-
-def test_search_chunks_uses_rrf_to_combine_bm25_and_semantic_rankings():
+def test_lancedb_retriever_combines_bm25_and_semantic_results_with_rrf():
     chunks = [
         Chunk(id="lexical", text="python code"),
         Chunk(id="semantic", text="automobile engine"),
         Chunk(id="both", text="python automobile"),
     ]
-    semantic_model = FakeSemanticModel(
+    model = FakeEmbeddingModel(
         {
-            "python vehicle": [1.0, 0.0],
             "python code": [0.0, 1.0],
             "automobile engine": [1.0, 0.0],
             "python automobile": [1.0, 0.0],
+            "python vehicle": [1.0, 0.0],
         }
     )
+    retriever = LanceDBRetriever(embedding_model=model)
 
-    results = search_chunks(
-        "python vehicle",
-        chunks,
-        semantic_model=semantic_model,
-    )
+    retriever.index(chunks)
+    results = retriever.search("python vehicle")
 
     assert results[0].chunk.id == "both"
     assert {result.chunk.id for result in results} == {
@@ -119,3 +37,92 @@ def test_search_chunks_uses_rrf_to_combine_bm25_and_semantic_rankings():
         "semantic",
         "both",
     }
+    assert results[0].score > 0
+
+
+def test_lancedb_retriever_returns_semantic_match_without_keyword_overlap():
+    chunks = [
+        Chunk(id="vehicle", text="automobile engine"),
+        Chunk(id="fruit", text="banana fruit"),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "automobile engine": [1.0, 0.0],
+            "banana fruit": [0.0, 1.0],
+            "vehicle question": [1.0, 0.0],
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+    results = retriever.search("vehicle question")
+
+    assert [result.chunk.id for result in results] == ["vehicle"]
+
+
+def test_lancedb_retriever_uses_russian_stemming_for_bm25():
+    chunks = [
+        Chunk(id="document", text="Обработка документа", metadata={"source_file": "notes.md"}),
+        Chunk(id="other", text="Совсем другой текст"),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "Обработка документа": [1.0, 0.0],
+            "Совсем другой текст": [0.0, 1.0],
+            "документы": [-1.0, 0.0],
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+    results = retriever.search("документы")
+
+    assert [result.chunk.id for result in results] == ["document"]
+    assert results[0].chunk.metadata == {"source_file": "notes.md"}
+
+
+def test_lancedb_retriever_filters_irrelevant_vector_results():
+    chunks = [Chunk(id="parser", text="Python parser")]
+    model = FakeEmbeddingModel(
+        {
+            "Python parser": [1.0, 0.0],
+            "spreadsheet cells": [-1.0, 0.0],
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+
+    assert retriever.search("spreadsheet cells") == []
+
+
+def test_lancedb_retriever_honors_top_k_and_clear():
+    chunks = [
+        Chunk(id="first", text="python first"),
+        Chunk(id="second", text="python second"),
+        Chunk(id="third", text="python third"),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "python first": [1.0, 0.0],
+            "python second": [1.0, 0.0],
+            "python third": [1.0, 0.0],
+            "python": [1.0, 0.0],
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+    assert len(retriever.search("python", top_k=2)) == 2
+
+    retriever.clear()
+    assert retriever.search("python") == []
+
+
+def test_lancedb_retriever_handles_empty_inputs_without_loading_model():
+    retriever = LanceDBRetriever(embedding_model=FakeEmbeddingModel({}))
+
+    retriever.index([])
+
+    assert retriever.search("") == []
+    assert retriever.search("query", top_k=0) == []

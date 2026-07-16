@@ -64,13 +64,9 @@ def _chunk_block(
 
 
 def _build_chunk_metadata(document: Document, block: Block) -> dict[str, Any]:
-    metadata: dict[str, Any] = {
-        "source_file": block.metadata.get("source_file", document.file_name),
-        "block_id": block.id,
-        "block_type": block.type,
-    }
-
-    if "page_number" in block.metadata:
-        metadata["page_number"] = block.metadata["page_number"]
+    metadata = dict(block.metadata)
+    metadata["source_file"] = metadata.get("source_file", document.file_name)
+    metadata["block_id"] = block.id
+    metadata["block_type"] = block.type
 
     return metadata
