@@ -1,12 +1,7 @@
-from typing import Protocol
-
+from file_agent.llm.base import LLMClient
 from file_agent.retrieval import SearchResult
 
 NO_CONTEXT_MESSAGE = "No relevant context was found in the document to answer the question."
-
-
-class LLMClient(Protocol):
-    def generate(self, prompt: str) -> str: ...
 
 
 def build_context_from_results(results: list[SearchResult]) -> str:
@@ -25,7 +20,9 @@ def build_qa_prompt(question: str, context: str) -> str:
     return (
         "Answer the question using only the context below.\n"
         "If the context does not contain enough information, say that the "
-        "document does not contain enough data to answer.\n\n"
+        "documents do not contain enough data to answer.\n"
+        "Keep the answer concise and mention relevant source metadata when "
+        "it is present in the context.\n\n"
         f"Context:\n{context}\n\n"
         f"Question:\n{question}\n\n"
         "Answer:"
