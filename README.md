@@ -21,6 +21,32 @@ The dataset input layer expects the columns `id`, `question`, `answer`, and
 `doc_ids`. Source files are downloaded from the dataset repository using the
 exact repository-relative paths stored in `doc_ids`.
 
+Run a one-row smoke test before starting the full generation:
+
+```bash
+uv run python generate_hf_dataset.py \
+  --dataset-id sandrik1271/RAG-QA-Dataset \
+  --config-name default \
+  --split train \
+  --revision e6db4819d8a100328378d5085fc5817688c0d663 \
+  --cache-dir /mnt/storage-1/file-agent-pipe/huggingface \
+  --output-dir /mnt/storage-1/file-agent-pipe/runs/smoke-001 \
+  --limit 1 \
+  --resume
+```
+
+For a full run, remove `--limit 1` and use a new output directory such as
+`/mnt/storage-1/file-agent-pipe/runs/full-001`. The `--resume` flag is safe on
+the first run and reuses matching row checkpoints after an interruption.
+
+The command reads LLM settings from `.env`. It writes per-row checkpoints,
+`answers.parquet`, the reloadable `hf_dataset/` directory, and
+`run_manifest.json`. The manifest records the dataset selection, row-content
+hash, model and retrieval parameters, prompt hash, and processed/resumed
+counts; it never stores API keys or Hugging Face tokens.
+
+The same pipeline can also be called from Python:
+
 ```python
 from file_agent.hf_batch import generate_hf_qa_records
 from file_agent.hf_dataset import load_qa_dataset

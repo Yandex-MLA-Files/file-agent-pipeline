@@ -55,7 +55,7 @@ def generate_hf_qa_records(
         resume=resume,
     )
 
-    parameters = _build_run_parameters(
+    parameters = build_generation_parameters(
         dataset_id=dataset_id,
         revision=revision,
         llm_client=llm_client,
@@ -121,7 +121,7 @@ def generate_hf_qa_records(
     )
 
 
-def _build_run_parameters(
+def build_generation_parameters(
     dataset_id: str,
     revision: str | None,
     llm_client: LLMClient,
