@@ -1,10 +1,12 @@
 from pathlib import Path
 
 from file_agent.document import Document
+from file_agent.parsers.docx_parser import DOCXParser
 from file_agent.parsers.html_parser import HTMLParser
 from file_agent.parsers.md_parser import MarkdownParser
 from file_agent.parsers.pdf_parser import PDFParser
 from file_agent.parsers.pptx_parser import PPTXParser
+from file_agent.parsers.txt_parser import TXTParser
 from file_agent.parsers.xlsx_parser import XLSXParser
 
 
@@ -14,6 +16,12 @@ def parse_file(file_path: str | Path) -> Document:
 
     if suffix == ".md":
         return MarkdownParser().parse(path)
+
+    if suffix == ".txt":
+        return TXTParser().parse(path)
+
+    if suffix == ".docx":
+        return DOCXParser().parse(path)
 
     if suffix == ".pdf":
         return PDFParser().parse(path)

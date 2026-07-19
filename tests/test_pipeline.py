@@ -1,5 +1,6 @@
 import fitz
 import pytest
+from docx import Document as DOCXDocument
 from openpyxl import Workbook
 from pptx import Presentation
 
@@ -32,6 +33,12 @@ def create_pptx(file_path):
     presentation.save(file_path)
 
 
+def create_docx(file_path):
+    document = DOCXDocument()
+    document.add_paragraph("Hello from DOCX")
+    document.save(file_path)
+
+
 def test_parse_file_uses_markdown_parser(tmp_path):
     file_path = tmp_path / "example.md"
     file_path.write_text("Hello from pipeline", encoding="utf-8")
@@ -41,6 +48,17 @@ def test_parse_file_uses_markdown_parser(tmp_path):
     assert document.file_name == "example.md"
     assert document.file_type == "md"
     assert document.blocks[0].text == "Hello from pipeline"
+
+
+def test_parse_file_uses_txt_parser(tmp_path):
+    file_path = tmp_path / "example.txt"
+    file_path.write_text("Hello from TXT", encoding="utf-8")
+
+    document = parse_file(file_path)
+
+    assert document.file_name == "example.txt"
+    assert document.file_type == "txt"
+    assert document.blocks[0].text == "Hello from TXT"
 
 
 def test_parse_file_uses_pdf_parser(tmp_path):
@@ -54,6 +72,17 @@ def test_parse_file_uses_pdf_parser(tmp_path):
     assert len(document.blocks) == 1
     assert "Hello from PDF" in document.blocks[0].text
     assert document.blocks[0].metadata["page_number"] == 1
+
+
+def test_parse_file_uses_docx_parser(tmp_path):
+    file_path = tmp_path / "example.docx"
+    create_docx(file_path)
+
+    document = parse_file(file_path)
+
+    assert document.file_name == "example.docx"
+    assert document.file_type == "docx"
+    assert document.blocks[0].text == "Hello from DOCX"
 
 
 def test_parse_file_uses_html_parser(tmp_path):
@@ -97,7 +126,7 @@ def test_parse_file_uses_pptx_parser(tmp_path):
 
 
 def test_parse_file_rejects_unsupported_extension(tmp_path):
-    file_path = tmp_path / "example.txt"
+    file_path = tmp_path / "example.csv"
     file_path.write_text("Unsupported", encoding="utf-8")
 
     with pytest.raises(ValueError, match="Unsupported file type"):
