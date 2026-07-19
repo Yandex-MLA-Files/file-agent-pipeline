@@ -24,9 +24,10 @@ exact repository-relative paths stored in `doc_ids`.
 ```python
 from file_agent.hf_dataset import (
     QADatasetRecord,
-    download_record_documents,
     load_qa_dataset,
 )
+from file_agent.hf_rag import process_hf_qa_record
+from file_agent.llm.factory import create_llm_client
 
 dataset = load_qa_dataset(
     dataset_id="sandrik1271/RAG-QA-Dataset",
@@ -35,11 +36,13 @@ dataset = load_qa_dataset(
     revision="e6db4819d8a100328378d5085fc5817688c0d663",
 )
 record = QADatasetRecord.from_row(dataset[0])
-document_paths = download_record_documents(
+generated_record = process_hf_qa_record(
     record=record,
     dataset_id="sandrik1271/RAG-QA-Dataset",
     revision="e6db4819d8a100328378d5085fc5817688c0d663",
+    llm_client=create_llm_client(),
 )
+output_row = generated_record.to_dict()
 ```
 
 ## Quality checks
