@@ -24,6 +24,7 @@ exact repository-relative paths stored in `doc_ids`.
 ```python
 from file_agent.hf_batch import generate_hf_qa_records
 from file_agent.hf_dataset import load_qa_dataset
+from file_agent.hf_output import save_generated_qa_dataset
 from file_agent.llm.factory import create_llm_client
 
 dataset = load_qa_dataset(
@@ -40,11 +41,21 @@ batch_result = generate_hf_qa_records(
     output_dir="runs/baseline-001",
     resume=True,
 )
+artifacts = save_generated_qa_dataset(
+    source_dataset=dataset,
+    records=batch_result.records,
+    output_dir="runs/baseline-001",
+)
 ```
 
 Each completed row is written atomically to the run's `checkpoints/`
 directory. Restarting with `resume=True` validates and reuses matching
 checkpoints, then continues from the first missing row.
+
+After the batch is complete, `save_generated_qa_dataset` validates every
+generated row against the source dataset and writes two final artifacts:
+`answers.parquet` for tabular tools and `hf_dataset/` for loading with
+`datasets.load_from_disk()`. Existing final artifacts are never overwritten.
 
 ## Quality checks
 
