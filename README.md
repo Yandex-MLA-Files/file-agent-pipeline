@@ -22,11 +22,8 @@ The dataset input layer expects the columns `id`, `question`, `answer`, and
 exact repository-relative paths stored in `doc_ids`.
 
 ```python
-from file_agent.hf_dataset import (
-    QADatasetRecord,
-    load_qa_dataset,
-)
-from file_agent.hf_rag import process_hf_qa_record
+from file_agent.hf_batch import generate_hf_qa_records
+from file_agent.hf_dataset import load_qa_dataset
 from file_agent.llm.factory import create_llm_client
 
 dataset = load_qa_dataset(
@@ -35,15 +32,19 @@ dataset = load_qa_dataset(
     split="train",
     revision="e6db4819d8a100328378d5085fc5817688c0d663",
 )
-record = QADatasetRecord.from_row(dataset[0])
-generated_record = process_hf_qa_record(
-    record=record,
+batch_result = generate_hf_qa_records(
+    dataset=dataset,
     dataset_id="sandrik1271/RAG-QA-Dataset",
     revision="e6db4819d8a100328378d5085fc5817688c0d663",
     llm_client=create_llm_client(),
+    output_dir="runs/baseline-001",
+    resume=True,
 )
-output_row = generated_record.to_dict()
 ```
+
+Each completed row is written atomically to the run's `checkpoints/`
+directory. Restarting with `resume=True` validates and reuses matching
+checkpoints, then continues from the first missing row.
 
 ## Quality checks
 

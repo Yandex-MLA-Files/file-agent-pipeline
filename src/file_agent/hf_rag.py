@@ -1,6 +1,8 @@
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from file_agent.hf_dataset import QADatasetRecord, download_record_documents
 from file_agent.lancedb_retriever import LanceDBRetriever
@@ -17,6 +19,38 @@ class RetrievedContext:
     text: str
     score: float
     metadata_json: str
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "RetrievedContext":
+        rank = value.get("rank")
+        score = value.get("score")
+        if not isinstance(rank, int) or isinstance(rank, bool) or rank <= 0:
+            raise ValueError("context rank must be a positive integer")
+        if not isinstance(score, (int, float)) or isinstance(score, bool):
+            raise ValueError("context score must be a number")
+
+        strings: dict[str, str] = {}
+        for field_name in ("chunk_id", "document_id", "text", "metadata_json"):
+            field_value = value.get(field_name)
+            if not isinstance(field_value, str) or not field_value.strip():
+                raise ValueError(f"context {field_name} must be a non-empty string")
+            strings[field_name] = field_value
+
+        try:
+            metadata = json.loads(strings["metadata_json"])
+        except json.JSONDecodeError as exc:
+            raise ValueError("context metadata_json must contain valid JSON") from exc
+        if not isinstance(metadata, dict):
+            raise ValueError("context metadata_json must contain a JSON object")
+
+        return cls(
+            rank=rank,
+            chunk_id=strings["chunk_id"],
+            document_id=strings["document_id"],
+            text=strings["text"],
+            score=float(score),
+            metadata_json=strings["metadata_json"],
+        )
 
     def to_dict(self) -> dict[str, str | int | float]:
         return {
@@ -38,7 +72,37 @@ class GeneratedQARecord:
     contexts: tuple[RetrievedContext, ...]
     answer: str
 
-    def to_dict(self) -> dict:
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "GeneratedQARecord":
+        source_record = QADatasetRecord.from_row(value)
+        answer_model = value.get("answer_model")
+        if not isinstance(answer_model, str) or not answer_model.strip():
+            raise ValueError("answer_model must be a non-empty string")
+
+        raw_contexts = value.get("contexts")
+        if not isinstance(raw_contexts, Sequence) or isinstance(raw_contexts, (str, bytes)):
+            raise ValueError("contexts must be a list")
+
+        contexts: list[RetrievedContext] = []
+        for raw_context in raw_contexts:
+            if not isinstance(raw_context, Mapping):
+                raise ValueError("contexts must contain objects")
+            contexts.append(RetrievedContext.from_dict(raw_context))
+
+        expected_ranks = list(range(1, len(contexts) + 1))
+        if [context.rank for context in contexts] != expected_ranks:
+            raise ValueError("context ranks must be consecutive and start at 1")
+
+        return cls(
+            id=source_record.id,
+            question=source_record.question,
+            doc_ids=source_record.doc_ids,
+            answer_model=answer_model,
+            contexts=tuple(contexts),
+            answer=source_record.answer,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "question": self.question,

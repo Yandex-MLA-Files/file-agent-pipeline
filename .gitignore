@@ -8,6 +8,7 @@ __pycache__/
 
 data/raw/
 data/private/
+runs/
 
 .ipynb_checkpoints/
 .vscode/
