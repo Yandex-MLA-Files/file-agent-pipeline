@@ -7,8 +7,8 @@ class FakeEmbeddingModel:
         self.vectors = vectors
         self.calls = []
 
-    def encode(self, sentences, normalize_embeddings=True):
-        self.calls.append((list(sentences), normalize_embeddings))
+    def encode(self, sentences):
+        self.calls.append(list(sentences))
         return [self.vectors[sentence] for sentence in sentences]
 
 
@@ -126,3 +126,13 @@ def test_lancedb_retriever_handles_empty_inputs_without_loading_model():
 
     assert retriever.search("") == []
     assert retriever.search("query", top_k=0) == []
+
+
+def test_lancedb_retriever_keeps_embeddings_unnormalized_for_cosine_search():
+    model = FakeEmbeddingModel({"document": [3.0, 4.0]})
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    embeddings = retriever._encode(["document"])
+
+    assert embeddings.tolist() == [[3.0, 4.0]]
+    assert model.calls == [["document"]]
