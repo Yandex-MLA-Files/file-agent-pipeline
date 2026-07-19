@@ -15,6 +15,33 @@ uv run streamlit run app.py
 
 Copy `.env.example` to `.env` and configure either Yandex AI Studio or a local OpenAI-compatible endpoint before generating answers. See [local inference setup](docs/local_inference.md) for local vLLM and SGLang examples.
 
+## Hugging Face QA datasets
+
+The dataset input layer expects the columns `id`, `question`, `answer`, and
+`doc_ids`. Source files are downloaded from the dataset repository using the
+exact repository-relative paths stored in `doc_ids`.
+
+```python
+from file_agent.hf_dataset import (
+    QADatasetRecord,
+    download_record_documents,
+    load_qa_dataset,
+)
+
+dataset = load_qa_dataset(
+    dataset_id="sandrik1271/RAG-QA-Dataset",
+    config_name="default",
+    split="train",
+    revision="e6db4819d8a100328378d5085fc5817688c0d663",
+)
+record = QADatasetRecord.from_row(dataset[0])
+document_paths = download_record_documents(
+    record=record,
+    dataset_id="sandrik1271/RAG-QA-Dataset",
+    revision="e6db4819d8a100328378d5085fc5817688c0d663",
+)
+```
+
 ## Quality checks
 
 ```bash
