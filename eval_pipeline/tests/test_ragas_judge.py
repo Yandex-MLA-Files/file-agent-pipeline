@@ -137,6 +137,40 @@ def test_prompts_are_localized_to_russian_not_ragas_defaults():
     assert _is_russian(context_recall.context_recall_prompt.examples[0][0].question)
 
 
+def test_nli_prompt_teaches_implicit_composition_inference():
+    # Regression for the second half of the same q0078 false negative: even
+    # after claim decomposition kept the "consists of X and Y" claim, NLI
+    # verification against a context that never says "состоит" literally
+    # (just lists parts by function) returned verdict 0. The third few-shot
+    # example teaches inferring composition from an enumeration alone.
+    judge = RagasJudge(model="test-model", llm=object())
+    answer_correctness = judge._metrics[1]
+
+    examples = answer_correctness.nli_prompt.examples
+    assert len(examples) == 3
+    nli_in, nli_out = examples[2]
+    assert "состоит" not in nli_in.context
+    assert nli_out.statements[0].verdict == 1
+
+
+def test_claim_decomposition_keeps_composition_claim_for_appositive_examples():
+    # Regression for a real false-negative found on the full run: a response
+    # like "TOGAF состоит из X (который делает A) и Y (который делает B)"
+    # decomposed into claims about what X/Y *do*, dropping the actual
+    # "consists of X and Y" claim -- so NLI verification had nothing to
+    # match against and answer_correctness scored 0 despite a correct
+    # answer. The third few-shot example teaches keeping the composition
+    # claim alongside the descriptive ones.
+    judge = RagasJudge(model="test-model", llm=object())
+    answer_correctness = judge._metrics[1]
+
+    examples = answer_correctness.claim_decomposition_prompt.examples
+    assert len(examples) == 3
+    claims = examples[2][1].claims
+    assert any("состоит из" in c for c in claims)
+    assert len(claims) == 3
+
+
 class _FakeLLMResult:
     def __init__(self, llm_output):
         self.llm_output = llm_output
