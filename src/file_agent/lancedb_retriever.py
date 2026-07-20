@@ -18,7 +18,7 @@ DEFAULT_TABLE_NAME = "chunks"
 
 
 class EmbeddingModel(Protocol):
-    def encode(self, sentences, normalize_embeddings: bool = True): ...
+    def encode(self, sentences): ...
 
 
 class LanceDBRetriever:
@@ -108,10 +108,7 @@ class LanceDBRetriever:
 
     def _encode(self, texts: list[str]) -> np.ndarray:
         model = self._embedding_model or _load_default_embedding_model()
-        try:
-            embeddings = model.encode(texts, normalize_embeddings=True)
-        except TypeError:
-            embeddings = model.encode(texts)
+        embeddings = model.encode(texts)
 
         if hasattr(embeddings, "detach"):
             embeddings = embeddings.detach().cpu().numpy()
@@ -124,7 +121,7 @@ class LanceDBRetriever:
         if array.shape[1] == 0:
             raise ValueError("Embedding model returned empty embeddings")
 
-        return _normalize_embeddings(array)
+        return array
 
     @staticmethod
     def _to_search_result(row: dict) -> SearchResult:
@@ -137,16 +134,6 @@ class LanceDBRetriever:
             ),
             score=float(row["_relevance_score"]),
         )
-
-
-def _normalize_embeddings(embeddings: np.ndarray) -> np.ndarray:
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    return np.divide(
-        embeddings,
-        norms,
-        out=np.zeros_like(embeddings),
-        where=norms != 0,
-    )
 
 
 @lru_cache(maxsize=1)
