@@ -1,10 +1,12 @@
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from datasets import Dataset, load_dataset
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub.errors import EntryNotFoundError
 
 REQUIRED_QA_COLUMNS = ("id", "question", "answer", "doc_ids")
 
@@ -105,15 +107,55 @@ def download_record_documents(
         download_kwargs["token"] = token
 
     local_paths: list[Path] = []
+    repo_files: list[str] | None = None
     for doc_id in record.doc_ids:
         _validate_repo_relative_path(doc_id)
-        downloaded_path = hf_hub_download(
-            filename=doc_id,
-            **download_kwargs,
-        )
+        try:
+            downloaded_path = hf_hub_download(
+                filename=doc_id,
+                **download_kwargs,
+            )
+        except EntryNotFoundError:
+            if repo_files is None:
+                repo_files = list_repo_files(
+                    repo_id=dataset_id,
+                    repo_type="dataset",
+                    revision=revision,
+                    token=token,
+                )
+
+            resolved_doc_id = _resolve_unicode_normalized_path(doc_id, repo_files)
+            if resolved_doc_id is None:
+                raise
+
+            _validate_repo_relative_path(resolved_doc_id)
+            downloaded_path = hf_hub_download(
+                filename=resolved_doc_id,
+                **download_kwargs,
+            )
         local_paths.append(Path(downloaded_path))
 
     return local_paths
+
+
+def _resolve_unicode_normalized_path(
+    requested_path: str,
+    repo_files: Sequence[str],
+) -> str | None:
+    normalized_requested_path = unicodedata.normalize("NFC", requested_path)
+    matches = [
+        repo_path
+        for repo_path in repo_files
+        if unicodedata.normalize("NFC", repo_path) == normalized_requested_path
+    ]
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple repository files match the Unicode-normalized doc_id: {requested_path}"
+        )
+    return matches[0]
 
 
 def _require_non_empty_string(

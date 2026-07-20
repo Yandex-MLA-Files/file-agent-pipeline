@@ -19,7 +19,8 @@ Copy `.env.example` to `.env` and configure either Yandex AI Studio or a local O
 
 The dataset input layer expects the columns `id`, `question`, `answer`, and
 `doc_ids`. Source files are downloaded from the dataset repository using the
-exact repository-relative paths stored in `doc_ids`.
+exact repository-relative paths stored in `doc_ids`. If an exact path is
+missing, a unique path that differs only in Unicode normalization is used.
 
 Run a one-row smoke test before starting the full generation:
 

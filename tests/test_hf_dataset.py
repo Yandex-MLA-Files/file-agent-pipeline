@@ -1,5 +1,8 @@
+import unicodedata
+
 import pytest
 from datasets import Dataset
+from huggingface_hub.errors import EntryNotFoundError
 
 from file_agent.hf_dataset import (
     QADatasetRecord,
@@ -126,6 +129,106 @@ def test_download_record_documents_uses_exact_doc_ids(monkeypatch, tmp_path):
             "token": "test-token",
         },
     ]
+
+
+def test_download_record_documents_resolves_unicode_normalization(monkeypatch, tmp_path):
+    requested_doc_id = unicodedata.normalize("NFD", "q0051/Чай.md")
+    repository_doc_id = unicodedata.normalize("NFC", "q0051/Чай.md")
+    record = QADatasetRecord(
+        id="q0051",
+        question="Question",
+        answer="Answer",
+        doc_ids=(requested_doc_id,),
+    )
+    download_calls = []
+    list_calls = []
+
+    def fake_hf_hub_download(**kwargs):
+        download_calls.append(kwargs)
+        if kwargs["filename"] == requested_doc_id:
+            raise EntryNotFoundError("missing")
+        file_path = tmp_path / "downloaded.md"
+        file_path.touch()
+        return str(file_path)
+
+    def fake_list_repo_files(**kwargs):
+        list_calls.append(kwargs)
+        return ["q0051/meta.json", repository_doc_id]
+
+    monkeypatch.setattr("file_agent.hf_dataset.hf_hub_download", fake_hf_hub_download)
+    monkeypatch.setattr("file_agent.hf_dataset.list_repo_files", fake_list_repo_files)
+
+    paths = download_record_documents(
+        record=record,
+        dataset_id="owner/rag-qa",
+        revision="commit-sha",
+        cache_dir=tmp_path / "cache",
+        token="test-token",
+    )
+
+    assert paths == [tmp_path / "downloaded.md"]
+    assert [call["filename"] for call in download_calls] == [
+        requested_doc_id,
+        repository_doc_id,
+    ]
+    assert list_calls == [
+        {
+            "repo_id": "owner/rag-qa",
+            "repo_type": "dataset",
+            "revision": "commit-sha",
+            "token": "test-token",
+        }
+    ]
+
+
+def test_download_record_documents_reraises_missing_non_matching_path(
+    monkeypatch,
+):
+    record = QADatasetRecord(
+        id="q0001",
+        question="Question",
+        answer="Answer",
+        doc_ids=("q0001/missing.md",),
+    )
+
+    def fake_hf_hub_download(**kwargs):
+        raise EntryNotFoundError("missing")
+
+    monkeypatch.setattr("file_agent.hf_dataset.hf_hub_download", fake_hf_hub_download)
+    monkeypatch.setattr(
+        "file_agent.hf_dataset.list_repo_files",
+        lambda **kwargs: ["q0001/different.md"],
+    )
+
+    with pytest.raises(EntryNotFoundError, match="missing"):
+        download_record_documents(record=record, dataset_id="owner/rag-qa")
+
+
+def test_download_record_documents_rejects_ambiguous_normalized_paths(
+    monkeypatch,
+):
+    requested_doc_id = unicodedata.normalize("NFD", "q0051/Чай.md")
+    record = QADatasetRecord(
+        id="q0051",
+        question="Question",
+        answer="Answer",
+        doc_ids=(requested_doc_id,),
+    )
+
+    def fake_hf_hub_download(**kwargs):
+        raise EntryNotFoundError("missing")
+
+    monkeypatch.setattr("file_agent.hf_dataset.hf_hub_download", fake_hf_hub_download)
+    monkeypatch.setattr(
+        "file_agent.hf_dataset.list_repo_files",
+        lambda **kwargs: [
+            unicodedata.normalize("NFC", "q0051/Чай.md"),
+            requested_doc_id,
+        ],
+    )
+
+    with pytest.raises(ValueError, match="Multiple repository files"):
+        download_record_documents(record=record, dataset_id="owner/rag-qa")
 
 
 @pytest.mark.parametrize(
