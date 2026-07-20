@@ -2,8 +2,6 @@ import os
 
 import pytest
 
-# Set before any test module can import ragas, so telemetry is off for the
-# whole test run regardless of import order within a given test file.
 os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
 
 

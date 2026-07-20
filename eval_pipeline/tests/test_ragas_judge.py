@@ -13,8 +13,6 @@ from ragas.metrics import (
 
 from eval.judge.ragas_judge import RagasJudge, _TokenUsageCallback, _usage_cost
 
-# score = row index (from user_input's trailing digit) + a per-metric offset,
-# so each (row, metric) cell is independently verifiable.
 _METRIC_OFFSETS = {
     "faithfulness": 0.01,
     "answer_correctness": 0.02,

@@ -1,14 +1,3 @@
-"""Load and validate a run file — a table shaped like (X, y_ref, y_hyp, ...).
-
-Expected schema: id, question (X), answer_model (y_hyp), contexts (list[str],
-whatever), answer (y_ref) — see REQUIRED_COLUMNS below.
-
-Where the run file came from is not this package's concern: it does not
-call any RAG pipeline and does not know anything about the dataset the
-questions were sourced from. Judge and Report work with any run file that
-matches the schema below, regardless of how it was produced.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -30,12 +19,7 @@ class RunValidationError(Exception):
 
 
 def load_run(path: str | Path) -> pd.DataFrame:
-    """Load a run file (.parquet or .csv) and validate its schema.
 
-    Raises RunValidationError if the file is missing, required columns are
-    missing, there are empty/duplicate ids, or contexts is not a list of
-    strings.
-    """
     path = Path(path)
     if not path.exists():
         raise RunValidationError(f"file not found: {path}")

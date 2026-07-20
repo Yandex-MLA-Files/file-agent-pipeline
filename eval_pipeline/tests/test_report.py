@@ -41,8 +41,7 @@ def test_report_pattern_matching_nothing_is_not_an_error():
 
 
 def test_save_report_serializes_numpy_int64(tmp_path):
-    # reproduces the exact bug: a metric column that ends up int64-dtype
-    # (platform/numpy-version dependent) must still serialize to JSON fine.
+
     import json
 
     import numpy as np

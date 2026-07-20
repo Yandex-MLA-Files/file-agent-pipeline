@@ -1,85 +1,3 @@
-"""LLM-as-judge over RAGAS (https://docs.ragas.io).
-
-Reuses the same 3 environment variables the hand-rolled judge used before:
-JUDGE_BASE_URL, JUDGE_API_KEY, JUDGE_MODEL — any OpenAI-compatible chat
-endpoint. Switching providers is still just a matter of changing these three
-variables.
-
-Metric choice is deliberately LLM-only (no embeddings model configured or
-available):
-  - faithfulness            -> ragas Faithfulness
-  - answer_correctness      -> ragas FactualCorrectness (claim-level
-                                precision/recall/F1 against the reference).
-                                Ragas' own `answer_correctness` metric mixes
-                                this with an embeddings-based semantic
-                                similarity term; FactualCorrectness alone
-                                avoids the embeddings dependency entirely.
-  - answer_relevancy         -> ragas AspectCritic with a custom definition.
-                                Ragas' own `answer_relevancy` (ResponseRelevancy)
-                                needs embeddings (it compares a
-                                model-generated question back to the original
-                                via cosine similarity). AspectCritic is an
-                                LLM-only binary judge instead — same "on-topic
-                                regardless of correctness" criterion the old
-                                hand-written RELEVANCY_PROMPT used, just
-                                phrased as a yes/no aspect. Consequence: this
-                                metric is 0/1, not continuous, unlike the
-                                other four.
-  - context_precision        -> ragas LLMContextPrecisionWithReference
-  - context_recall            -> ragas LLMContextRecall
-
-Both of those context metrics have LLM-only variants in ragas (no embeddings
-needed), unlike their legacy ragas counterparts.
-
-All 5 prompts (instructions + few-shot examples) are overridden below with
-hand-translated Russian versions -- ragas ships these in English by default,
-which does not match this dataset's language (question/answer_model/
-contexts/answer are Russian). Passing `language="russian"` to a metric
-constructor (e.g. FactualCorrectness) does NOT do this automatically --
-verified directly: it's stored as metadata but the bundled few-shot examples
-stay English regardless. Ragas does have a real mechanism for this
-(`PydanticPrompt.adapt(target_language=..., llm=...)`, which asks the LLM to
-translate the examples at runtime) but that costs an extra LLM call per
-prompt object on every judge construction. Translating once, by hand, here
-is simpler and has zero runtime cost. If ragas' default English examples
-change in a future version, `_localize_prompts_to_russian()` below will
-silently keep using the old (translated) wording -- not auto-synced,
-revisit if that matters.
-
-Version pins (see eval_pipeline/pyproject.toml) work around two live ragas
-packaging issues, not stylistic preferences:
-  - ragas==0.4.3 crashes on `import ragas` (unconditionally imports
-    ChatVertexAI from a langchain_community path that no longer exists).
-    https://github.com/vibrantlabsai/ragas/issues/2745 -- pinned to
-    ragas<0.4 instead.
-  - langchain-community >=0.4 dropped the vertexai integration ragas 0.3.x
-    still imports at module load time, so the same crash resurfaces even on
-    ragas 0.3.9 unless langchain-community is also pinned <0.4.
-
-This module uses `ragas.llms.LangchainLLMWrapper`, which ragas marks
-deprecated in favor of `llm_factory` (an Instructor-based wrapper returning
-`InstructorBaseRagasLLM`). It's used anyway because the metric classes above
-type their `llm` field as `Optional[BaseRagasLLM]`, and `InstructorBaseRagasLLM`
-is not a subclass of `BaseRagasLLM` in ragas 0.3.9 -- passing an
-instructor-wrapped LLM to these metrics does not work. Revisit this once
-ragas reconciles the two LLM interfaces.
-
-Cost logging: every evaluate() call appends one line to a usage log (path:
-JUDGE_USAGE_LOG_PATH env var, default "usage_log.jsonl") with token counts
-and the resulting cost. Ragas has a built-in mechanism for this
-(ragas.cost.get_token_usage_for_openai + token_usage_parser=...), but it only
-tracks input/output tokens; the configured provider (Yandex Cloud AI Studio)
-prices cached tokens separately from regular input tokens, which that helper
-doesn't expose. _TokenUsageCallback below reads the same raw per-call
-`llm_output["token_usage"]` dict directly via ragas' own `callbacks=` hook
-instead, so cached tokens can be billed at their own rate. Prices are the
-Yandex Cloud rate for the currently configured model as of 2026-07-20 (RUB
-per 1K tokens); override via JUDGE_PRICE_PER_1K_INPUT_TOKENS /
-_OUTPUT_TOKENS / _CACHED_TOKENS if the model or provider changes. Yandex
-also prices tool-call tokens separately, not tracked here since this judge
-only ever makes plain completions -- no tool/function calling.
-"""
-
 from __future__ import annotations
 
 import json
@@ -88,10 +6,6 @@ import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 
-# Ragas phones home usage telemetry by default; this is an internal QA
-# dataset, not something to send to a third party, and disabling it also
-# removes a per-call network round trip that otherwise slows every score.
-# setdefault so a caller's own env setting still wins.
 os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
 
 import pandas as pd
@@ -109,7 +23,6 @@ from ragas.metrics import (
     LLMContextRecall,
 )
 from ragas.metrics.base import Metric, ModeMetric
-from ragas.run_config import RunConfig
 
 from eval.judge.base import Judge
 
@@ -118,12 +31,6 @@ DEFAULT_PRICE_PER_1K_OUTPUT_TOKENS = 0.5
 DEFAULT_PRICE_PER_1K_CACHED_TOKENS = 0.075
 
 DEFAULT_USAGE_LOG_PATH = "usage_log.jsonl"
-
-# Ragas defaults to 16 concurrent LLM calls (RunConfig.max_workers); Yandex
-# Cloud AI Studio's account quota caps concurrent generation sessions at 10
-# (ai.textGenerationCompletionSessionsCount.count), so the default causes
-# spurious 429 RateLimitErrors under load. Stay safely under that ceiling.
-DEFAULT_MAX_CONCURRENCY = 8
 
 RELEVANCY_DEFINITION = (
     "Отвечает ли ответ прямо и конкретно на суть заданного вопроса, "
@@ -142,10 +49,7 @@ RUN_TO_RAGAS_COLUMNS = {
 
 
 def _result_column(metric: Metric) -> str:
-    # ragas.evaluate() keys ModeMetric results as "name(mode=...)" instead of
-    # plain "name" (FactualCorrectness is one -- its `mode` picks precision/
-    # recall/f1). Compute the same key rather than hardcoding it, so this
-    # doesn't silently break if `mode` changes.
+
     if isinstance(metric, ModeMetric):
         return f"{metric.name}(mode={metric.mode})"
     return metric.name
@@ -158,16 +62,7 @@ def _localize_prompts_to_russian(
     context_precision: LLMContextPrecisionWithReference,
     context_recall: LLMContextRecall,
 ) -> None:
-    """Overwrite ragas' default English instructions/few-shot examples with
-    hand-translated Russian ones, in place, on the metric instances built by
-    RagasJudge.__init__. See the module docstring for why.
 
-    `model_copy(update=...)` is used instead of constructing new Pydantic
-    model instances directly, so this doesn't need to import ragas' private
-    per-metric input/output classes (StatementGeneratorInput, QAC, ...) --
-    it just copies whatever class ragas already put there, with the text
-    fields swapped.
-    """
     # --- faithfulness: statement generation + NLI verification ---
     gen_in, gen_out = faithfulness.statement_generator_prompt.examples[0]
     faithfulness.statement_generator_prompt.instruction = (
@@ -360,9 +255,6 @@ def _localize_prompts_to_russian(
         ),
     ]
 
-    # --- answer_relevancy: AspectCritic has no few-shot examples of its
-    # own, just an instruction template with our RELEVANCY_DEFINITION
-    # interpolated in (already Russian) -- localize the wrapper text too.
     answer_relevancy.single_turn_prompt.instruction = (
         "Оцени входные данные на основе указанного критерия. Используй "
         "только «Да» (1) и «Нет» (0) как вердикт.\n"
@@ -577,12 +469,6 @@ def _localize_prompts_to_russian(
 
 
 class _TokenUsageCallback(BaseCallbackHandler):
-    """Accumulates token usage across every LLM call ragas makes in one
-    evaluate() run, read directly from each call's OpenAI-shaped
-    `llm_output["token_usage"]` -- see the module docstring for why this
-    isn't done via ragas' own token_usage_parser mechanism instead.
-    """
-
     def __init__(self) -> None:
         self.input_tokens = 0
         self.output_tokens = 0
@@ -650,10 +536,6 @@ def _build_default_llm(model: str) -> BaseRagasLLM:
 
 
 class RagasJudge(Judge):
-    """`llm` can be passed explicitly (for tests -- a fake BaseRagasLLM with no
-    network calls); by default it's built from JUDGE_BASE_URL/JUDGE_API_KEY/JUDGE_MODEL.
-    """
-
     metric_names = (
         "faithfulness",
         "answer_correctness",
@@ -673,9 +555,6 @@ class RagasJudge(Judge):
         self._model_name = model_name
         self.usage_log_path = usage_log_path or os.environ.get(
             "JUDGE_USAGE_LOG_PATH", DEFAULT_USAGE_LOG_PATH
-        )
-        self._run_config = RunConfig(
-            max_workers=int(os.environ.get("JUDGE_MAX_CONCURRENCY", DEFAULT_MAX_CONCURRENCY))
         )
         faithfulness = Faithfulness(name="faithfulness")
         answer_correctness = FactualCorrectness(name="answer_correctness")
@@ -706,7 +585,6 @@ class RagasJudge(Judge):
             metrics=self._metrics,
             llm=self.llm,
             callbacks=[usage_cb],
-            run_config=self._run_config,
             show_progress=False,
         )
         _log_usage(self.usage_log_path, usage_cb, len(run_df), self._model_name)

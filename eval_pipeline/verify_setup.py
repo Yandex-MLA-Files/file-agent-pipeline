@@ -1,14 +1,3 @@
-"""Sanity-check the eval pipeline.
-
-Run:
-    uv run python verify_setup.py
-
-Always checks: imports, loading and validating a run file (no credentials
-needed). If JUDGE_BASE_URL/JUDGE_API_KEY/JUDGE_MODEL are set, additionally
-runs one real RagasJudge call to confirm the model responds and its output
-parses correctly.
-"""
-
 import os
 import sys
 from pathlib import Path

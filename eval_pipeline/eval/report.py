@@ -12,17 +12,7 @@ def build_report(
     metric_names: tuple[str, ...],
     negative_example_pattern: str | None = None,
 ) -> dict:
-    """Aggregate per-metric scores into summary stats.
 
-    `negative_example_pattern` is an optional regex matched against
-    `answer` (the reference/ground-truth column) to additionally break
-    metrics down over "negative" examples (typically: questions with no
-    answer in the source document, where the model should admit it doesn't
-    know rather than confabulate). This is left as a caller-supplied
-    pattern rather than hardcoded, since how a dataset marks "no answer" —
-    and in what language — is specific to that dataset, not something this
-    package should assume.
-    """
     report: dict = {"n_examples": len(scored_df)}
 
     is_negative = None
@@ -48,16 +38,7 @@ def build_report(
 
 
 def _json_default(obj):
-    """Fallback for json.dump: convert numpy scalar types to native Python.
 
-    pandas aggregations (.mean()/.min()/.max()/...) return numpy scalar
-    types (np.float64, np.int64, np.bool_), and their exact type can differ
-    across platforms/numpy versions depending on column dtype inference.
-    np.float64 happens to subclass Python's float so it serializes fine on
-    its own, but np.int64 and np.bool_ do not — rather than chase down
-    which specific computation produced one on a given platform, handle
-    the whole class of numpy scalar types at the serialization boundary.
-    """
     import numpy as np
 
     if isinstance(obj, np.integer):
@@ -91,14 +72,7 @@ def append_run_log(
     judge_name: str,
     log_path: str | Path = "runs_log.jsonl",
 ) -> None:
-    """Append one summary line per run to a running history file.
 
-    Each `--out` directory only holds the latest report for that path --
-    rerun with the same `--out` and the previous report.json is gone. This
-    keeps a durable, append-only trail across runs (e.g. RAG v1 vs v2) so
-    they can be compared without having to remember to pick a unique --out
-    each time.
-    """
     import json
     from datetime import UTC, datetime
 
