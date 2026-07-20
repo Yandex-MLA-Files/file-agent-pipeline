@@ -5,7 +5,7 @@ Run:
 
 Always checks: imports, loading and validating a run file (no credentials
 needed). If JUDGE_BASE_URL/JUDGE_API_KEY/JUDGE_MODEL are set, additionally
-runs one real LLMJudge call to confirm the model responds and its output
+runs one real RagasJudge call to confirm the model responds and its output
 parses correctly.
 """
 
@@ -37,7 +37,7 @@ except RunValidationError as e:
     sys.exit(1)
 print(f"    OK, {len(run_df)} rows, schema is valid")
 
-print("3/3 Checking LLMJudge...")
+print("3/3 Checking RagasJudge...")
 required_env = ("JUDGE_BASE_URL", "JUDGE_API_KEY", "JUDGE_MODEL")
 if not all(os.environ.get(v) for v in required_env):
     print("    Skipped: JUDGE_BASE_URL / JUDGE_API_KEY / JUDGE_MODEL are not set.")
@@ -45,9 +45,9 @@ if not all(os.environ.get(v) for v in required_env):
     print("    To exercise a real judge call, set those 3 environment")
     print("    variables and run this script again.")
 else:
-    from eval.judge.llm_judge import LLMJudge
+    from eval.judge.ragas_judge import RagasJudge
 
-    judge = LLMJudge()
+    judge = RagasJudge()
     scored_df = judge.evaluate(run_df.head(1))  # 1 row — don't burn extra calls
     report = build_report(scored_df, judge.metric_names)
     save_report(report, scored_df, "verify_output")

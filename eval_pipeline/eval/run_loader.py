@@ -1,7 +1,7 @@
 """Load and validate a run file — a table shaped like (X, y_ref, y_hyp, ...).
 
-Expected schema: id, question (X), answer (y_hyp), contexts (list[str],
-whatever), ground_truth (y_ref) — see REQUIRED_COLUMNS below.
+Expected schema: id, question (X), answer_model (y_hyp), contexts (list[str],
+whatever), answer (y_ref) — see REQUIRED_COLUMNS below.
 
 Where the run file came from is not this package's concern: it does not
 call any RAG pipeline and does not know anything about the dataset the
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
-REQUIRED_COLUMNS = ("id", "question", "answer", "contexts", "ground_truth")
+REQUIRED_COLUMNS = ("id", "question", "answer_model", "contexts", "answer")
 
 
 @dataclass
@@ -32,19 +32,9 @@ class RunValidationError(Exception):
 def load_run(path: str | Path) -> pd.DataFrame:
     """Load a run file (.parquet or .csv) and validate its schema.
 
-    Parameters
-    ----------
-    path:
-        Path to the RAG pipeline's run output.
-
-    Returns
-    -------
-    A DataFrame with columns id, question, answer, contexts, ground_truth.
-
-    Raises
-    ------
-    RunValidationError if the file is missing, columns are missing, there
-    are empty/duplicate ids, or contexts is not a list of strings.
+    Raises RunValidationError if the file is missing, required columns are
+    missing, there are empty/duplicate ids, or contexts is not a list of
+    strings.
     """
     path = Path(path)
     if not path.exists():
@@ -90,6 +80,8 @@ def _validate_schema(df: pd.DataFrame) -> None:
             f"kept as a list."
         )
 
-    empty_answers = df["answer"].isnull().sum() + (df["answer"].astype(str).str.strip() == "").sum()
+    empty_answers = (
+        df["answer_model"].isnull().sum() + (df["answer_model"].astype(str).str.strip() == "").sum()
+    )
     if empty_answers > 0:
-        raise RunValidationError(f"{empty_answers} row(s) with an empty answer")
+        raise RunValidationError(f"{empty_answers} row(s) with an empty answer_model")

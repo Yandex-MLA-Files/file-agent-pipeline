@@ -12,21 +12,22 @@ def build_report(
     metric_names: tuple[str, ...],
     negative_example_pattern: str | None = None,
 ) -> dict:
-    """Compute mean/median/min/max per metric.
+    """Aggregate per-metric scores into summary stats.
 
     `negative_example_pattern` is an optional regex matched against
-    `ground_truth` to additionally break metrics down over "negative"
-    examples (typically: questions with no answer in the source document,
-    where the model should admit it doesn't know rather than confabulate).
-    This is left as a caller-supplied pattern rather than hardcoded, since
-    how a dataset marks "no answer" — and in what language — is specific to
-    that dataset, not something this package should assume.
+    `answer` (the reference/ground-truth column) to additionally break
+    metrics down over "negative" examples (typically: questions with no
+    answer in the source document, where the model should admit it doesn't
+    know rather than confabulate). This is left as a caller-supplied
+    pattern rather than hardcoded, since how a dataset marks "no answer" —
+    and in what language — is specific to that dataset, not something this
+    package should assume.
     """
     report: dict = {"n_examples": len(scored_df)}
 
     is_negative = None
     if negative_example_pattern is not None:
-        is_negative = scored_df["ground_truth"].str.contains(
+        is_negative = scored_df["answer"].str.contains(
             negative_example_pattern, case=False, na=False, regex=True
         )
         report["n_negative_examples"] = int(is_negative.sum())
@@ -80,3 +81,36 @@ def save_report(report: dict, scored_df: pd.DataFrame, out_dir: str | Path) -> P
 
     scored_df.to_parquet(out_dir / "scored.parquet", index=False)
     return out_dir / "report.json"
+
+
+def append_run_log(
+    report: dict,
+    metric_names: tuple[str, ...],
+    run_path: str | Path,
+    out_dir: str | Path,
+    judge_name: str,
+    log_path: str | Path = "runs_log.jsonl",
+) -> None:
+    """Append one summary line per run to a running history file.
+
+    Each `--out` directory only holds the latest report for that path --
+    rerun with the same `--out` and the previous report.json is gone. This
+    keeps a durable, append-only trail across runs (e.g. RAG v1 vs v2) so
+    they can be compared without having to remember to pick a unique --out
+    each time.
+    """
+    import json
+    from datetime import UTC, datetime
+
+    entry = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "run_file": str(run_path),
+        "out_dir": str(out_dir),
+        "judge": judge_name,
+        "n_examples": report["n_examples"],
+    }
+    for metric in metric_names:
+        entry[f"{metric}_mean"] = report[metric]["mean"]
+
+    with open(Path(log_path), "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")

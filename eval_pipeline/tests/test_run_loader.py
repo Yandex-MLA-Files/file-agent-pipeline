@@ -15,16 +15,16 @@ def _valid_df() -> pd.DataFrame:
             {
                 "id": "ex_001",
                 "question": "question one?",
-                "answer": "answer one",
+                "answer_model": "answer one",
                 "contexts": ["chunk 1", "chunk 2"],
-                "ground_truth": "reference one",
+                "answer": "reference one",
             },
             {
                 "id": "ex_002",
                 "question": "question two?",
-                "answer": "answer two",
+                "answer_model": "answer two",
                 "contexts": ["chunk 3"],
-                "ground_truth": "reference two",
+                "answer": "reference two",
             },
         ]
     )
@@ -43,7 +43,7 @@ def test_missing_file_raises(tmp_path):
 
 
 def test_missing_column_raises(tmp_path):
-    df = _valid_df().drop(columns=["ground_truth"])
+    df = _valid_df().drop(columns=["answer"])
     path = tmp_path / "run.parquet"
     df.to_parquet(path, index=False)
     with pytest.raises(RunValidationError, match="missing required columns"):
@@ -68,10 +68,10 @@ def test_contexts_as_string_raises(tmp_path):
         load_run(path)
 
 
-def test_empty_answer_raises(tmp_path):
+def test_empty_answer_model_raises(tmp_path):
     df = _valid_df()
-    df.loc[0, "answer"] = ""
+    df.loc[0, "answer_model"] = ""
     path = tmp_path / "run.parquet"
     df.to_parquet(path, index=False)
-    with pytest.raises(RunValidationError, match="empty answer"):
+    with pytest.raises(RunValidationError, match="empty answer_model"):
         load_run(path)

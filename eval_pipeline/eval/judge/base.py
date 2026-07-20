@@ -1,11 +1,3 @@
-"""Abstract judge interface.
-
-A concrete implementation (RAGAS, DeepEval, a custom prompt, ...) plugs in
-here without changes to the runner or the report: they only depend on
-Judge.evaluate() taking a run-shaped DataFrame and returning one with
-metric columns added.
-"""
-
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -14,8 +6,6 @@ import pandas as pd
 
 
 class Judge(ABC):
-    """Base interface for any judge (RAGAS, DeepEval, a custom prompt, ...)."""
-
     #: names of the metric columns this judge adds to the DataFrame
     metric_names: tuple[str, ...] = ()
 

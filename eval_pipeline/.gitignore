@@ -5,4 +5,12 @@ __pycache__/
 *.egg-info/
 .venv/
 verify_output/
+reports/
 .env
+usage_log.jsonl
+runs_log.jsonl
+
+# Real run data dropped in ad hoc for a given evaluation run -- not a
+# committed fixture (sample_run.parquet is the one used by verify_setup.py
+# and README examples, keep that tracked).
+answers*.parquet
