@@ -19,8 +19,11 @@ def build_context_from_results(results: list[SearchResult]) -> str:
 def build_qa_prompt(question: str, context: str) -> str:
     return (
         "Answer the question using only the context below.\n"
+        "Write the answer only in the same language as the question.\n"
         "If the context does not contain enough information, say that the "
         "documents do not contain enough data to answer.\n"
+        "For tables and side-by-side comparisons, preserve which facts belong "
+        "to each entity and do not reverse their relationships.\n"
         "Keep the answer concise and mention relevant source metadata when "
         "it is present in the context.\n\n"
         f"Context:\n{context}\n\n"
