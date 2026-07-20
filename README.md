@@ -1,6 +1,6 @@
 # File Agent Pipeline
 
-A lightweight Python RAG application for answering questions about user-provided files. It parses documents, splits extracted text into chunks, retrieves relevant context with BM25 and semantic search, and generates source-grounded answers through an OpenAI-compatible LLM endpoint.
+A Python RAG application for answering questions about user-provided files. It parses documents, splits extracted text into chunks, retrieves relevant context with BM25 and semantic search, and generates source-grounded answers through an OpenAI-compatible LLM endpoint.
 
 Supported formats: Markdown, PDF, HTML, XLSX, and PPTX.
 

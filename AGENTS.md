@@ -22,9 +22,7 @@ Users can upload one or more documents, preview extracted text, find relevant ch
 - A shared `Document` / `Block` representation.
 - Markdown, PDF, HTML, XLSX, and PPTX parsers.
 - Document chunking.
-- BM25 retrieval.
-- Semantic retrieval with `sentence-transformers`.
-- Reciprocal Rank Fusion (RRF) for combining BM25 and semantic rankings.
+- In-memory LanceDB hybrid retrieval combining BM25 full-text search, semantic vector search, and reciprocal rank fusion (RRF).
 - A QA prompt layer and end-to-end RAG orchestration.
 - An `LLMClient` adapter built on the official OpenAI Python SDK.
 - Yandex AI Studio and local OpenAI-compatible LLM backends.
@@ -41,7 +39,8 @@ src/file_agent/
   document.py                 # Document and Block models
   pipeline.py                 # Parser selection by extension
   chunking.py                 # Document chunking
-  retrieval.py                # BM25, semantic search, and RRF
+  retrieval.py                # Shared Retriever interface and SearchResult
+  lancedb_retriever.py        # In-memory LanceDB hybrid retrieval
   qa.py                       # Context assembly and QA prompt
   rag.py                      # End-to-end RAG orchestration
   parsers/                    # Supported file parsers
@@ -53,6 +52,7 @@ docs/local_inference.md       # Local LLM endpoint setup
 ## Architecture rules
 
 - Keep parsing, retrieval, QA, and LLM integration as separate layers.
+- Access retrieval through the `Retriever` interface and keep LanceDB-specific code in `lancedb_retriever.py`.
 - Every parser must return the shared `Document` representation containing `Block` objects.
 - Preserve available source metadata, including:
   - `page_number` for PDF;
@@ -112,6 +112,7 @@ Never make real API requests in tests or add working credentials to code, fixtur
 - openpyxl;
 - python-pptx;
 - sentence-transformers;
+- LanceDB;
 - openai;
 - pytest.
 

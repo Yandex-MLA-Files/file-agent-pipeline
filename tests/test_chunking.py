@@ -71,6 +71,34 @@ def test_chunk_metadata_is_preserved():
     }
 
 
+def test_chunk_metadata_preserves_format_specific_coordinates():
+    document = Document(
+        file_name="slides.pptx",
+        file_type="pptx",
+        blocks=[
+            Block(
+                id="slide-2",
+                text="Slide text",
+                type="slide",
+                metadata={
+                    "slide_number": 2,
+                    "sheet_name": "Summary",
+                },
+            )
+        ],
+    )
+
+    chunks = chunk_document(document, max_chars=100, overlap=10)
+
+    assert chunks[0].metadata == {
+        "source_file": "slides.pptx",
+        "block_id": "slide-2",
+        "block_type": "slide",
+        "slide_number": 2,
+        "sheet_name": "Summary",
+    }
+
+
 def test_overlap_must_be_smaller_than_max_chars():
     document = Document(file_name="notes.md", file_type="md", blocks=[])
 

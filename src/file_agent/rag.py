@@ -4,10 +4,11 @@ from pathlib import Path
 
 from file_agent.chunking import Chunk, chunk_document
 from file_agent.document import Document
+from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.base import LLMClient
 from file_agent.pipeline import parse_file
 from file_agent.qa import answer_question_with_context
-from file_agent.retrieval import SearchResult, SemanticModel, search_chunks
+from file_agent.retrieval import Retriever, SearchResult
 
 
 @dataclass
@@ -41,6 +42,60 @@ def chunk_documents(
     return chunks
 
 
+def index_documents(
+    documents: list[Document],
+    retriever: Retriever,
+    max_chars: int = 1000,
+    overlap: int = 100,
+) -> list[Chunk]:
+    chunks = chunk_documents(
+        documents=documents,
+        max_chars=max_chars,
+        overlap=overlap,
+    )
+    retriever.index(chunks)
+    return chunks
+
+
+def answer_indexed_documents(
+    question: str,
+    llm_client: LLMClient,
+    retriever: Retriever,
+    documents_count: int,
+    chunks_count: int,
+    top_k: int = 5,
+) -> RAGResponse:
+    results = retriever.search(query=question, top_k=top_k)
+    return answer_with_results(
+        question=question,
+        results=results,
+        llm_client=llm_client,
+        documents_count=documents_count,
+        chunks_count=chunks_count,
+    )
+
+
+def answer_with_results(
+    question: str,
+    results: list[SearchResult],
+    llm_client: LLMClient,
+    documents_count: int,
+    chunks_count: int,
+) -> RAGResponse:
+    answer = answer_question_with_context(
+        question=question,
+        results=results,
+        llm_client=llm_client,
+    )
+
+    return RAGResponse(
+        answer=answer,
+        sources=results,
+        documents_count=documents_count,
+        chunks_count=chunks_count,
+    )
+
+
 def answer_files(
     file_paths: Iterable[str | Path],
     question: str,
@@ -48,8 +103,7 @@ def answer_files(
     top_k: int = 5,
     max_chars: int = 1000,
     overlap: int = 100,
-    semantic_model: SemanticModel | None = None,
-    use_semantic: bool = True,
+    retriever: Retriever | None = None,
 ) -> RAGResponse:
     documents = load_documents(file_paths)
     return answer_documents(
@@ -59,8 +113,7 @@ def answer_files(
         top_k=top_k,
         max_chars=max_chars,
         overlap=overlap,
-        semantic_model=semantic_model,
-        use_semantic=use_semantic,
+        retriever=retriever,
     )
 
 
@@ -71,30 +124,20 @@ def answer_documents(
     top_k: int = 5,
     max_chars: int = 1000,
     overlap: int = 100,
-    semantic_model: SemanticModel | None = None,
-    use_semantic: bool = True,
+    retriever: Retriever | None = None,
 ) -> RAGResponse:
-    chunks = chunk_documents(
+    active_retriever = retriever or LanceDBRetriever()
+    chunks = index_documents(
         documents=documents,
+        retriever=active_retriever,
         max_chars=max_chars,
         overlap=overlap,
     )
-    results = search_chunks(
-        query=question,
-        chunks=chunks,
-        top_k=top_k,
-        semantic_model=semantic_model,
-        use_semantic=use_semantic,
-    )
-    answer = answer_question_with_context(
+    return answer_indexed_documents(
         question=question,
-        results=results,
         llm_client=llm_client,
-    )
-
-    return RAGResponse(
-        answer=answer,
-        sources=results,
+        retriever=active_retriever,
         documents_count=len(documents),
         chunks_count=len(chunks),
+        top_k=top_k,
     )
