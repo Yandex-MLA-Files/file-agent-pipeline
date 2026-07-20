@@ -53,9 +53,10 @@ def test_build_qa_prompt_contains_question_and_context():
 
     assert "What is the document about?" in prompt
     assert "Document context" in prompt
-    assert "using only the context" in prompt
-    assert "only in the same language as the question" in prompt
-    assert "do not reverse their relationships" in prompt
+    assert "используя только приведённый ниже контекст" in prompt
+    assert "ответ только на том же языке, что и вопрос" in prompt
+    assert "не меняйте отношения местами" in prompt
+    assert prompt.endswith("Ответ только на языке вопроса:")
 
 
 def test_answer_question_with_context_calls_llm_client_generate():
