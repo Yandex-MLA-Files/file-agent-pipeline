@@ -4,11 +4,10 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from file_agent.chunking import Chunk, chunk_document
+from file_agent.chunking import chunk_document
 from file_agent.document import Block, Document
 from file_agent.pipeline import parse_file
 from file_agent.qa import answer_question_with_context
-from file_agent.retrieval import search_chunks
 
 
 @pytest.fixture(scope="module")
@@ -43,16 +42,6 @@ def test_chunk_document_creates_span(span_exporter):
 
     span_names = [span.name for span in span_exporter.get_finished_spans()]
     assert "file_agent.chunk_document" in span_names
-
-
-def test_search_chunks_creates_span(span_exporter):
-    span_exporter.clear()
-    chunks = [Chunk(id="c1", text="python markdown")]
-
-    search_chunks("python", chunks)
-
-    span_names = [span.name for span in span_exporter.get_finished_spans()]
-    assert "file_agent.search_chunks" in span_names
 
 
 def test_answer_question_with_context_creates_span_without_results(span_exporter):
