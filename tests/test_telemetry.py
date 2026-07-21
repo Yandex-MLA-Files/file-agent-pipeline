@@ -3,6 +3,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from file_agent.chunking import Chunk, chunk_document
 from file_agent.document import Block, Document
@@ -142,3 +143,18 @@ def test_answer_indexed_documents_creates_span(span_exporter):
 
     span_names = [span.name for span in span_exporter.get_finished_spans()]
     assert "file_agent.answer_indexed_documents" in span_names
+
+
+def test_parse_file_records_error_status_on_exception(tmp_path, span_exporter):
+    span_exporter.clear()
+    file_path = tmp_path / "note.xyz"
+    file_path.write_text("unsupported")
+
+    with pytest.raises(ValueError):
+        parse_file(file_path)
+
+    spans = span_exporter.get_finished_spans()
+    parse_span = next(span for span in spans if span.name == "file_agent.parse_file")
+
+    assert parse_span.status.status_code == StatusCode.ERROR
+    assert any(event.name == "exception" for event in parse_span.events)

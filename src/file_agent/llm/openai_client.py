@@ -1,4 +1,10 @@
+import logging
+
 from openai import OpenAI
+
+from file_agent.telemetry import tracer
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAILLMClient:
@@ -18,18 +24,36 @@ class OpenAILLMClient:
             raise ValueError("model is required")
 
     def generate(self, prompt: str) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-        )
+        with tracer.start_as_current_span("file_agent.llm_generate") as span:
+            span.set_attribute("file_agent.model", self.model)
+            span.set_attribute("file_agent.prompt_length", len(prompt))
 
-        if not response.choices:
-            raise ValueError("LLM returned an empty response")
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
 
-        text = response.choices[0].message.content
-        if not text or not text.strip():
-            raise ValueError("LLM returned an empty response")
+            if not response.choices:
+                raise ValueError("LLM returned an empty response")
 
-        return text.strip()
+            text = response.choices[0].message.content
+            if not text or not text.strip():
+                raise ValueError("LLM returned an empty response")
+
+            text = text.strip()
+            span.set_attribute("file_agent.response_length", len(text))
+
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                span.set_attribute("file_agent.prompt_tokens", usage.prompt_tokens)
+                span.set_attribute("file_agent.completion_tokens", usage.completion_tokens)
+
+            logger.info(
+                "LLM %s generated %d char(s) response (%d char(s) prompt)",
+                self.model,
+                len(text),
+                len(prompt),
+            )
+            return text
