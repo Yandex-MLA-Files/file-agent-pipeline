@@ -1,92 +1,159 @@
 # AGENTS.md
 
-## Проект
+## Project overview
 
-Это Python-проект для ML-стажировки.
+`file-agent-pipeline` is a Python ML project that implements a small RAG pipeline over user-provided files:
 
-Цель проекта — построить пайплайн для работы с файлами:
-пользователь загружает файл и задаёт вопрос, а система извлекает содержимое файла
-и позже отвечает на вопрос с помощью LLM.
+```text
+files
+  -> parsing
+  -> Document / Block
+  -> chunking
+  -> retrieval
+  -> QA prompt
+  -> LLM
+  -> answer and sources
+```
 
-Поддерживаемые форматы в будущем:
-- PDF
-- PPTX
-- XLSX
-- Markdown
-- HTML
+Users can upload one or more documents, preview extracted text, find relevant chunks, and generate an LLM answer with source metadata.
 
-## Текущая цель MVP
+## Current capabilities
 
-Базовый MVP уже реализован:
+- A shared `Document` / `Block` representation.
+- Markdown, PDF, HTML, XLSX, and PPTX parsers.
+- Document chunking.
+- In-memory LanceDB hybrid retrieval combining BM25 full-text search, semantic vector search, and reciprocal rank fusion (RRF).
+- A QA prompt layer and end-to-end RAG orchestration.
+- An `LLMClient` adapter built on the official OpenAI Python SDK.
+- Yandex AI Studio and local OpenAI-compatible LLM backends.
+- A Streamlit UI for multi-file upload, preview, search, and answer generation.
+- Pytest coverage for the main layers.
 
-парсинг Markdown, PDF, HTML;
-единое представление Document / Block;
-chunking;
-простой keyword retrieval по chunks;
-Streamlit-интерфейс для загрузки файла, просмотра preview извлечённого текста и поиска по chunks;
-LLM QA prompt layer через абстрактный llm_client.
+Supported extensions: `.md`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.pptx`.
 
-Сейчас мы ждём доступ к Yandex Cloud / YandexGPT API.
+## Repository layout
 
-Пока доступа нет, нужно продолжать развивать проект без реальных API-запросов.
+```text
+app.py                         # Streamlit UI
+src/file_agent/
+  document.py                 # Document and Block models
+  pipeline.py                 # Parser selection by extension
+  chunking.py                 # Document chunking
+  retrieval.py                # Shared Retriever interface and SearchResult
+  lancedb_retriever.py        # In-memory LanceDB hybrid retrieval
+  qa.py                       # Context assembly and QA prompt
+  rag.py                      # End-to-end RAG orchestration
+  parsers/                    # Supported file parsers
+  llm/                        # LLM interface, adapter, and factory
+tests/                        # Pytest suite
+docs/local_inference.md       # Local LLM endpoint setup
+```
 
-Разрешено делать:
+## Architecture rules
 
-подготовить YandexGPTClient без реальных запросов в тестах;
-использовать mock-тесты для YandexGPTClient;
-добавить FakeLLM-режим для проверки полного пайплайна без внешнего API;
-добавить новые парсеры, например XLSXParser и PPTXParser;
-улучшать Streamlit-интерфейс;
-улучшать README.md;
-добавлять тесты;
-улучшать обработку ошибок.
+- Keep parsing, retrieval, QA, and LLM integration as separate layers.
+- Access retrieval through the `Retriever` interface and keep LanceDB-specific code in `lancedb_retriever.py`.
+- Every parser must return the shared `Document` representation containing `Block` objects.
+- Preserve available source metadata, including:
+  - `page_number` for PDF;
+  - `slide_number` for PPTX;
+  - `sheet_name` for XLSX;
+  - `block_type` for the block kind;
+  - the source file name and other useful source coordinates.
+- Keep parser selection by extension in `src/file_agent/pipeline.py`.
+- Access LLMs only through the `LLMClient` interface.
+- Keep backend-specific configuration in `src/file_agent/llm/factory.py` and environment variables.
+- Avoid complex abstractions without a practical need. Prefer simple, readable code with type hints.
+- Add tests for new parsers and new behavior.
+- Tests must not call real cloud or local LLM endpoints. Mock or fake all network interactions.
 
-Пока не делать:
+## Current-stage exclusions
 
-не выполнять реальные запросы к YandexGPT в pytest;
-не хардкодить API-ключи, folder_id или model_uri;
-не коммитить .env;
-не добавлять LangChain;
-не добавлять LangGraph;
-не добавлять OCR;
-не добавлять VLM;
-не добавлять embeddings / FAISS;
-не делать сложную агентную архитектуру.
+Do not add the following without a separate task:
 
-Для переменных окружения использовать:
+- LangChain or LangGraph;
+- OCR or VLM support;
+- complex agent architecture;
+- a standalone vector database or FAISS;
+- image analysis for PPTX files;
+- Excel formula evaluation.
 
-YANDEX_API_KEY;
-YANDEX_FOLDER_ID;
-YANDEX_MODEL.
+The XLSX parser uses `data_only=True`: it reads cached formula values but does not calculate formulas.
 
-Файл .env.example можно коммитить, настоящий .env коммитить нельзя.
+## LLM configuration
 
-## Стек
+Never hardcode secrets or identifiers. Do not commit a real `.env` file. Update `.env.example` whenever configuration changes.
 
-- Python 3.11+
-- Streamlit для демо-интерфейса
-- PyMuPDF для парсинга PDF
-- BeautifulSoup для парсинга HTML
-- markdown для Markdown-файлов
-- pytest для тестов
+Shared setting:
 
-## Архитектурные правила
+- `LLM_BACKEND`: `yandex` or `local`.
 
-- Логику парсинга файлов держать отдельно от логики LLM.
-- Все файлы приводить к единому представлению Document.
-- Сохранять метаданные, если они доступны:
-  - page для PDF
-  - slide для PPTX
-  - sheet для XLSX
-  - block_type для типа блока
-- Не усложнять архитектуру раньше времени.
-- Писать простой и читаемый код.
-- Использовать type hints.
-- Для каждого парсера добавлять тесты.
+Yandex AI Studio:
 
-## Команды
+- `YANDEX_API_KEY`;
+- `YANDEX_FOLDER_ID`;
+- `YANDEX_MODEL`;
+- `YANDEX_BASE_URL`.
 
-Запуск тестов:
+Local OpenAI-compatible backend:
 
-```bash
-pytest
+- `LOCAL_LLM_BASE_URL`;
+- `LOCAL_LLM_API_KEY`;
+- `LOCAL_LLM_MODEL`.
+
+Never make real API requests in tests or add working credentials to code, fixtures, logs, or documentation.
+
+## Stack
+
+- Python 3.11+;
+- Streamlit;
+- PyMuPDF;
+- BeautifulSoup;
+- openpyxl;
+- python-pptx;
+- sentence-transformers;
+- LanceDB;
+- openai;
+- pytest.
+
+## Change guidelines
+
+Before editing, inspect the relevant module and existing tests. Preserve backward compatibility unless the task explicitly requires a behavior change.
+
+After editing:
+
+- add or update tests for changed behavior;
+- run at least the relevant tests;
+- run the full test suite when practical;
+- update `README.md`, `.env.example`, or `docs/` when interfaces, configuration, supported formats, or run commands change.
+
+Do not commit temporary files, caches, models, user documents, `.env`, or other secrets.
+
+## Commands
+
+Install dependencies:
+
+```powershell
+uv sync
+```
+
+Run all tests:
+
+```powershell
+uv run pytest
+```
+
+Check linting and formatting:
+
+```powershell
+uv run ruff check .
+uv run ruff format --check .
+```
+
+Run Streamlit:
+
+```powershell
+uv run streamlit run app.py
+```
+
+See `docs/local_inference.md` for local inference setup.
