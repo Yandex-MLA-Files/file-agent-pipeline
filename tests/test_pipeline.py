@@ -43,17 +43,18 @@ def test_parse_file_uses_markdown_parser(tmp_path):
     assert document.blocks[0].text == "Hello from pipeline"
 
 
-def test_parse_file_uses_pdf_parser(tmp_path):
+def test_parse_file_parses_pdf(tmp_path):
     file_path = tmp_path / "example.pdf"
     create_pdf(file_path, "Hello from PDF")
 
+    # PDFs go through Docling by default; if Docling is unavailable the pipeline
+    # gracefully falls back to the PyMuPDF parser. Both paths must recover the text.
     document = parse_file(file_path)
 
     assert document.file_name == "example.pdf"
     assert document.file_type == "pdf"
-    assert len(document.blocks) == 1
-    assert "Hello from PDF" in document.blocks[0].text
-    assert document.blocks[0].metadata["page_number"] == 1
+    assert document.blocks
+    assert any("Hello from PDF" in block.text for block in document.blocks)
 
 
 def test_parse_file_uses_html_parser(tmp_path):
