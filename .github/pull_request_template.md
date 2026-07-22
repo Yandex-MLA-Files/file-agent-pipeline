@@ -1,25 +1,25 @@
 <!--
-  Заголовок PR — человекочитаемый, в стиле Conventional Commits:
-  feat: ..., fix: ..., test: ..., docs: ..., chore: ...
+Use a human-readable PR title following Conventional Commits when possible:
+feat: ..., fix: ..., test: ..., docs: ..., chore: ...
 -->
 
-## Что сделано
-<!-- Кратко: что и зачем меняется в этом PR -->
+## Summary
+<!-- Briefly explain what changes and why. -->
 
 
-## Связанная issue
-<!-- Выбери нужное и удали лишнее: -->
-Closes #      <!-- issue закроется при мёрдже -->
-Part of #     <!-- ссылка без закрытия (для подзадач) -->
+## Related issue
+<!-- Keep the relevant line and remove the other one. -->
+Closes #      <!-- Closes the issue when the PR is merged. -->
+Part of #     <!-- Links a larger issue without closing it. -->
 
-## Как проверить
-<!-- Шаги, команды или скриншоты, по которым ревьюер убедится, что всё работает -->
+## Verification
+<!-- Add commands, steps, or screenshots that let a reviewer verify the change. -->
 - [ ]
 
-## Чеклист
-- [ ] Указана связанная issue (`Closes #N` или `Part of #N` выше)
-- [ ] Работал в отдельной ветке, а не в `main`
-- [ ] Локально проходят `ruff check` и `ruff format --check`
-- [ ] Локально проходит `pytest`
-- [ ] Не коммитил `.env`, ключи, `folder_id`
-- [ ] Обновил README / доки, если менялось поведение
+## Checklist
+- [ ] A related issue is linked with `Closes #N` or `Part of #N`
+- [ ] Work was completed on a separate branch, not directly on `main`
+- [ ] `ruff check` and `ruff format --check` pass locally
+- [ ] `pytest` passes locally
+- [ ] No `.env`, API keys, or folder identifiers are committed
+- [ ] README or other documentation is updated when behavior changes

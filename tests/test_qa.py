@@ -8,7 +8,7 @@ from file_agent.qa import (
 from file_agent.retrieval import SearchResult
 
 
-class FakeLLMClient:
+class DummyLLMClient:
     def __init__(self):
         self.prompts: list[str] = []
 
@@ -57,7 +57,7 @@ def test_build_qa_prompt_contains_question_and_context():
 
 
 def test_answer_question_with_context_calls_llm_client_generate():
-    llm_client = FakeLLMClient()
+    llm_client = DummyLLMClient()
     results = [
         SearchResult(
             chunk=Chunk(
@@ -82,7 +82,7 @@ def test_answer_question_with_context_calls_llm_client_generate():
 
 
 def test_answer_question_with_context_skips_llm_when_results_empty():
-    llm_client = FakeLLMClient()
+    llm_client = DummyLLMClient()
 
     answer = answer_question_with_context(
         question="What does the project do?",
