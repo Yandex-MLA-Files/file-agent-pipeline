@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-from file_agent.document import Block, Document
+from file_agent.document import Block, BlockType, Document
 
 
 @dataclass
@@ -9,6 +9,14 @@ class Chunk:
     id: str
     text: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the chunk for export (CSV/JSON) or storage in a vector DB."""
+        return {
+            "id": self.id,
+            "text": self.text,
+            "metadata": self.metadata,
+        }
 
 
 def chunk_document(
@@ -39,6 +47,17 @@ def _chunk_block(
     if not block.text:
         return []
 
+    # Keep structured tables intact: splitting Markdown tables mid-row would
+    # break their layout and make them useless for retrieval and rendering.
+    if block.block_type == BlockType.TABLE:
+        return [
+            Chunk(
+                id=f"{block.id}-chunk-1",
+                text=block.text,
+                metadata=_build_chunk_metadata(document, block),
+            )
+        ]
+
     chunks: list[Chunk] = []
     step = max_chars - overlap
     start = 0
@@ -68,5 +87,15 @@ def _build_chunk_metadata(document: Document, block: Block) -> dict[str, Any]:
     metadata["source_file"] = metadata.get("source_file", document.file_name)
     metadata["block_id"] = block.id
     metadata["block_type"] = block.type
+
+    # Structural fields are only populated by rich parsers (e.g. Docling). When
+    # present they are propagated so retrieval can filter and trace results by
+    # page, region (bbox) or visual modality.
+    if block.page_number is not None:
+        metadata.setdefault("page_number", block.page_number)
+    if block.bbox is not None:
+        metadata.setdefault("bbox", block.bbox)
+    if block.vlm_description:
+        metadata["vlm_description"] = block.vlm_description
 
     return metadata
