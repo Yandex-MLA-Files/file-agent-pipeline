@@ -10,7 +10,6 @@ REQUIRED_COLUMNS = ("id", "question", "answer_model", "contexts", "answer")
 
 @dataclass
 class RunValidationError(Exception):
-
     message: str
 
     def __str__(self) -> str:

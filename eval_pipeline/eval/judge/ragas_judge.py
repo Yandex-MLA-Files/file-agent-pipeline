@@ -70,7 +70,7 @@ def _match_response_language_to_input(
     context_precision: LLMContextPrecisionWithReference,
     context_recall: LLMContextRecall,
 ) -> None:
-    
+
     faithfulness.statement_generator_prompt.instruction += _LANGUAGE_MATCH_INSTRUCTION
     faithfulness.nli_statements_prompt.instruction += _LANGUAGE_MATCH_INSTRUCTION
     answer_correctness.claim_decomposition_prompt.instruction += _LANGUAGE_MATCH_INSTRUCTION
@@ -236,7 +236,7 @@ class RagasJudge(Judge):
         self.max_retries = int(os.environ.get("JUDGE_MAX_RETRIES", DEFAULT_MAX_RETRIES))
         faithfulness = Faithfulness(name="faithfulness")
         answer_correctness = FactualCorrectness(name="answer_correctness", mode="recall")
-   
+
         answer_relevancy = ResponseRelevancy(name="answer_relevancy", strictness=1)
         context_precision = LLMContextPrecisionWithReference(name="context_precision")
         context_recall = LLMContextRecall(name="context_recall")
@@ -256,7 +256,7 @@ class RagasJudge(Judge):
         dataset = EvaluationDataset.from_pandas(ragas_df)
 
         usage_cb = _TokenUsageCallback()
-        
+
         result = ragas_evaluate(
             dataset,
             metrics=self._metrics,
