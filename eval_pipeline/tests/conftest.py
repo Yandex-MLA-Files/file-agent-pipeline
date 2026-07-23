@@ -11,3 +11,5 @@ def _isolate_usage_log(tmp_path, monkeypatch):
     # it at a per-test tmp file so tests never write into the project's real
     # usage_log.jsonl.
     monkeypatch.setenv("JUDGE_USAGE_LOG_PATH", str(tmp_path / "usage_log.jsonl"))
+    # Same for the per-row judge trace log.
+    monkeypatch.setenv("JUDGE_TRACE_LOG_PATH", str(tmp_path / "judge_trace_log.jsonl"))

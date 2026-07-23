@@ -27,11 +27,11 @@ except RunValidationError as e:
 print(f"    OK, {len(run_df)} rows, schema is valid")
 
 print("3/3 Checking RagasJudge...")
-required_env = ("JUDGE_BASE_URL", "JUDGE_API_KEY", "JUDGE_MODEL")
+required_env = ("JUDGE_BASE_URL", "JUDGE_API_KEY", "JUDGE_MODEL", "JUDGE_EMBEDDING_MODEL")
 if not all(os.environ.get(v) for v in required_env):
-    print("    Skipped: JUDGE_BASE_URL / JUDGE_API_KEY / JUDGE_MODEL are not set.")
+    print(f"    Skipped: {', '.join(required_env)} are not all set.")
     print("    The base pipeline (loading + validation) works.")
-    print("    To exercise a real judge call, set those 3 environment")
+    print(f"    To exercise a real judge call, set those {len(required_env)} environment")
     print("    variables and run this script again.")
 else:
     from eval.judge.ragas_judge import RagasJudge

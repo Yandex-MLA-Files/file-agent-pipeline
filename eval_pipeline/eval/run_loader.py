@@ -10,7 +10,6 @@ REQUIRED_COLUMNS = ("id", "question", "answer_model", "contexts", "answer")
 
 @dataclass
 class RunValidationError(Exception):
-    """The run file does not match the expected schema."""
 
     message: str
 

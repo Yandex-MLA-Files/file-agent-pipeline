@@ -43,6 +43,16 @@ LangChain and LangGraph are in the dependency tree as of `ragas_judge.py`
 transitively. They're not used directly anywhere in this project's own code;
 this exception covers only what RAGAS itself requires.
 
+Embeddings: discussed and approved for one narrow use -- `RagasJudge`'s
+`answer_relevancy` metric (`ResponseRelevancy`) needs an embeddings model
+(`JUDGE_EMBEDDING_MODEL`) to compare judge-generated questions against the
+real one. Runs locally via `sentence-transformers` (new project dependency,
+pulls in `torch`/`transformers`), not through the judge LLM's API -- no
+external embeddings call, no extra cost. This does NOT extend to the main
+RAG pipeline (parsing/chunking/retrieval) -- adding embeddings/FAISS there
+is still a separate decision
+that needs its own discussion.
+
 Environment variables: `YANDEX_API_KEY`, `YANDEX_FOLDER_ID`, `YANDEX_MODEL`.
 
 ## Stack

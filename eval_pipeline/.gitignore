@@ -6,9 +6,9 @@ __pycache__/
 .venv/
 verify_output/
 reports/
+out/
 .env
-usage_log.jsonl
-runs_log.jsonl
+logs/
 
 # Real run data dropped in ad hoc for a given evaluation run -- not a
 # committed fixture (sample_run.parquet is the one used by verify_setup.py

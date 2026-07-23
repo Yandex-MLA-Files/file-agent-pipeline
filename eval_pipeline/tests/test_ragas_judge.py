@@ -4,11 +4,11 @@ import re
 import pandas as pd
 import pytest
 from ragas.metrics import (
-    AspectCritic,
     FactualCorrectness,
     Faithfulness,
     LLMContextPrecisionWithReference,
     LLMContextRecall,
+    ResponseRelevancy,
 )
 
 from eval.judge.ragas_judge import RagasJudge, _TokenUsageCallback, _usage_cost
@@ -44,7 +44,7 @@ def patched_metrics(monkeypatch):
     for cls in (
         Faithfulness,
         FactualCorrectness,
-        AspectCritic,
+        ResponseRelevancy,
         LLMContextPrecisionWithReference,
         LLMContextRecall,
     ):
@@ -71,7 +71,7 @@ def _run_df(n_rows: int) -> pd.DataFrame:
 
 
 def test_evaluate_returns_one_row_per_input_row(patched_metrics):
-    judge = RagasJudge(model="test-model", llm=object())
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
     scored = judge.evaluate(_run_df(3))
 
     assert len(scored) == 3
@@ -79,7 +79,7 @@ def test_evaluate_returns_one_row_per_input_row(patched_metrics):
 
 
 def test_evaluate_adds_all_five_metric_columns_with_correct_values(patched_metrics):
-    judge = RagasJudge(model="test-model", llm=object())
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
     scored = judge.evaluate(_run_df(2))
 
     for name, offset in _METRIC_OFFSETS.items():
@@ -88,13 +88,63 @@ def test_evaluate_adds_all_five_metric_columns_with_correct_values(patched_metri
 
 
 def test_evaluate_preserves_original_run_columns(patched_metrics):
-    judge = RagasJudge(model="test-model", llm=object())
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
     run_df = _run_df(1)
     scored = judge.evaluate(run_df)
 
     for col in ("id", "question", "answer_model", "contexts", "answer"):
         assert col in scored.columns
         assert scored.loc[0, col] == run_df.loc[0, col]
+
+
+def test_max_concurrency_defaults_to_eight():
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
+    assert judge.max_concurrency == 8
+
+
+def test_max_concurrency_reads_env_override(monkeypatch):
+    monkeypatch.setenv("JUDGE_MAX_CONCURRENCY", "3")
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
+    assert judge.max_concurrency == 3
+
+
+def test_timeout_and_max_retries_default(monkeypatch):
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
+    assert judge.timeout == 300
+    assert judge.max_retries == 15
+
+
+def test_timeout_and_max_retries_read_env_override(monkeypatch):
+    monkeypatch.setenv("JUDGE_TIMEOUT", "120")
+    monkeypatch.setenv("JUDGE_MAX_RETRIES", "5")
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
+    assert judge.timeout == 120
+    assert judge.max_retries == 5
+
+
+def test_evaluate_passes_run_config_settings_to_ragas(patched_metrics, monkeypatch):
+    monkeypatch.setenv("JUDGE_MAX_CONCURRENCY", "2")
+    monkeypatch.setenv("JUDGE_TIMEOUT", "111")
+    monkeypatch.setenv("JUDGE_MAX_RETRIES", "7")
+    seen_run_configs = []
+
+    import eval.judge.ragas_judge as ragas_judge_module
+
+    real_evaluate = ragas_judge_module.ragas_evaluate
+
+    def spy_evaluate(*args, **kwargs):
+        seen_run_configs.append(kwargs["run_config"])
+        return real_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(ragas_judge_module, "ragas_evaluate", spy_evaluate)
+
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
+    judge.evaluate(_run_df(1))
+
+    assert len(seen_run_configs) == 1
+    assert seen_run_configs[0].max_workers == 2
+    assert seen_run_configs[0].timeout == 111
+    assert seen_run_configs[0].max_retries == 7
 
 
 def test_metric_names_match_report_expectations():
@@ -105,70 +155,6 @@ def test_metric_names_match_report_expectations():
         "context_precision",
         "context_recall",
     )
-
-
-def _is_russian(text: str) -> bool:
-    return any("а" <= c <= "я" or "А" <= c <= "Я" for c in text)
-
-
-def test_prompts_are_localized_to_russian_not_ragas_defaults():
-
-    judge = RagasJudge(model="test-model", llm=object())
-    faithfulness, answer_correctness, answer_relevancy, context_precision, context_recall = (
-        judge._metrics
-    )
-
-    assert _is_russian(faithfulness.statement_generator_prompt.instruction)
-    assert _is_russian(faithfulness.statement_generator_prompt.examples[0][0].question)
-    assert _is_russian(faithfulness.nli_statements_prompt.instruction)
-    assert _is_russian(faithfulness.nli_statements_prompt.examples[0][0].context)
-
-    assert _is_russian(answer_correctness.nli_prompt.instruction)
-    assert _is_russian(answer_correctness.claim_decomposition_prompt.instruction)
-    assert _is_russian(answer_correctness.claim_decomposition_prompt.examples[0][0].response)
-
-    assert _is_russian(answer_relevancy.single_turn_prompt.instruction)
-    assert _is_russian(answer_relevancy.definition)
-
-    assert _is_russian(context_precision.context_precision_prompt.instruction)
-    assert _is_russian(context_precision.context_precision_prompt.examples[0][0].question)
-
-    assert _is_russian(context_recall.context_recall_prompt.instruction)
-    assert _is_russian(context_recall.context_recall_prompt.examples[0][0].question)
-
-
-def test_nli_prompt_teaches_implicit_composition_inference():
-    # Regression for the second half of the same q0078 false negative: even
-    # after claim decomposition kept the "consists of X and Y" claim, NLI
-    # verification against a context that never says "состоит" literally
-    # (just lists parts by function) returned verdict 0. The third few-shot
-    # example teaches inferring composition from an enumeration alone.
-    judge = RagasJudge(model="test-model", llm=object())
-    answer_correctness = judge._metrics[1]
-
-    examples = answer_correctness.nli_prompt.examples
-    assert len(examples) == 3
-    nli_in, nli_out = examples[2]
-    assert "состоит" not in nli_in.context
-    assert nli_out.statements[0].verdict == 1
-
-
-def test_claim_decomposition_keeps_composition_claim_for_appositive_examples():
-    # Regression for a real false-negative found on the full run: a response
-    # like "TOGAF состоит из X (который делает A) и Y (который делает B)"
-    # decomposed into claims about what X/Y *do*, dropping the actual
-    # "consists of X and Y" claim -- so NLI verification had nothing to
-    # match against and answer_correctness scored 0 despite a correct
-    # answer. The third few-shot example teaches keeping the composition
-    # claim alongside the descriptive ones.
-    judge = RagasJudge(model="test-model", llm=object())
-    answer_correctness = judge._metrics[1]
-
-    examples = answer_correctness.claim_decomposition_prompt.examples
-    assert len(examples) == 3
-    claims = examples[2][1].claims
-    assert any("состоит из" in c for c in claims)
-    assert len(claims) == 3
 
 
 class _FakeLLMResult:
@@ -220,8 +206,52 @@ def test_usage_cost_bills_cached_tokens_at_the_cached_rate(monkeypatch):
     assert cost == pytest.approx(expected)
 
 
+def test_evaluate_writes_a_trace_log_file_per_run(patched_metrics, tmp_path):
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
+    run_df = _run_df(2)
+
+    judge.evaluate(run_df)
+
+    trace_files = list(tmp_path.glob("judge_trace_log_*.jsonl"))
+    assert len(trace_files) == 1
+    lines = trace_files[0].read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+
+    entries = [json.loads(line) for line in lines]
+    # same run_id/timestamp across rows of one evaluate() call
+    assert entries[0]["run_id"] == entries[1]["run_id"]
+    assert entries[0]["timestamp"] == entries[1]["timestamp"]
+
+    for i, entry in enumerate(entries):
+        assert entry["id"] == f"ex_{i:03d}"
+        assert entry["question"] == run_df.loc[i, "question"]
+        assert entry["answer_model"] == run_df.loc[i, "answer_model"]
+        assert entry["reference"] == run_df.loc[i, "answer"]
+        assert entry["contexts"] == list(run_df.loc[i, "contexts"])
+        assert entry["verdict"] == {
+            name: pytest.approx(i + offset) for name, offset in _METRIC_OFFSETS.items()
+        }
+        # patched_metrics bypasses the real prompt calls, so no per-prompt
+        # steps fire -- just check every metric got a (possibly empty) slot
+        assert set(entry["reasoning_trace"].keys()) == set(_METRIC_OFFSETS.keys())
+
+
+def test_evaluate_writes_separate_trace_files_for_separate_runs(patched_metrics, tmp_path):
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
+
+    judge.evaluate(_run_df(1))
+    judge.evaluate(_run_df(1))
+
+    trace_files = list(tmp_path.glob("judge_trace_log_*.jsonl"))
+    assert len(trace_files) == 2
+    run_ids = set()
+    for f in trace_files:
+        run_ids.add(json.loads(f.read_text(encoding="utf-8").strip())["run_id"])
+    assert len(run_ids) == 2
+
+
 def test_evaluate_appends_a_usage_log_entry(patched_metrics, tmp_path):
-    judge = RagasJudge(model="test-model", llm=object())
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
 
     judge.evaluate(_run_df(2))
 

@@ -14,5 +14,5 @@ data/private/
 
 *.log
 
-scripts/
+/scripts/
 CLAUDE.md

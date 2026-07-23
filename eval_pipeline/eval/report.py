@@ -1,4 +1,3 @@
-"""Aggregate judge scores into a report."""
 
 from __future__ import annotations
 
@@ -86,5 +85,7 @@ def append_run_log(
     for metric in metric_names:
         entry[f"{metric}_mean"] = report[metric]["mean"]
 
-    with open(Path(log_path), "a", encoding="utf-8") as f:
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
