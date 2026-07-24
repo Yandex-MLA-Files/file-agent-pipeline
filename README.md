@@ -15,8 +15,9 @@ bounding boxes, a generated table of contents, and a uniform Markdown export via
 - **OCR is decided automatically.** Before parsing, each PDF page is analyzed
   locally (text density and image coverage) to decide whether it needs OCR, so
   born-digital pages stay fast and only scanned/image pages are OCR'd. OCR uses
-  EasyOCR (reads Cyrillic and Latin — documents are often Russian); languages are
-  set via `OCR_LANGS` (default `ru,en`). Override the decision with
+  EasyOCR by default (reads Cyrillic and Latin — documents are often Russian;
+  languages via `OCR_LANGS`, default `ru,en`); set `OCR_ENGINE=rapidocr` for a
+  faster offline Latin-only engine. Override the decision with
   `parse_file(path, enable_ocr="on" | "off")`.
 - **Figures can be described by a VLM.** With `parse_file(path, enable_vlm=True)`,
   figures and diagrams are cropped and sent to an OpenAI-compatible vision model;
@@ -35,8 +36,9 @@ unrelated sections:
 1. blocks are grouped into **sections** (a heading plus its body), so a heading
    always opens a chunk and never dangles at the end of the previous one;
 2. whole sections are **packed together up to a size budget** (small adjacent
-   sections merge), oversized sections are split block by block, and tables are
-   kept whole.
+   sections merge), oversized sections are split block by block, small tables are
+   kept whole while large ones are split by rows (repeating the header), and each
+   continuation chunk keeps its section heading as a breadcrumb.
 
 Each chunk records the section it belongs to, all sections it covers, page
 numbers, block ids and any VLM description for filtering and tracing.

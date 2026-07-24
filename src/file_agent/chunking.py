@@ -152,7 +152,12 @@ class _Chunker:
             nonlocal buffer, buffer_len
             if not buffer:
                 return
-            self._emit(buffer, section=heading, sections=[heading] if heading else [])
+            self._emit(
+                buffer,
+                section=heading,
+                sections=[heading] if heading else [],
+                prepend_heading=True,
+            )
             buffer = self._overlap_seed(buffer)
             buffer_len = sum(len(b.text) + len(_SEPARATOR) for b in buffer)
 
@@ -193,9 +198,20 @@ class _Chunker:
 
     def _emit_oversized(self, block: Block, text: str, heading: str | None) -> None:
         sections = [heading] if heading else []
-        if block.block_type == BlockType.TABLE or len(text) <= self._max_chars:
-            self._emit([block], section=heading, sections=sections, text=text)
+
+        if block.block_type == BlockType.TABLE:
+            # Keep small tables whole; split large ones by rows so each piece fits
+            # an embedding window, repeating the header row for standalone meaning.
+            for piece in self._split_table(text):
+                self._emit(
+                    [block], section=heading, sections=sections, text=piece, prepend_heading=True
+                )
             return
+
+        if len(text) <= self._max_chars:
+            self._emit([block], section=heading, sections=sections, text=text, prepend_heading=True)
+            return
+
         step = self._max_chars - self._overlap
         start = 0
         while start < len(text):
@@ -204,8 +220,42 @@ class _Chunker:
                 section=heading,
                 sections=sections,
                 text=text[start : start + self._max_chars],
+                prepend_heading=True,
             )
             start += step
+
+    def _split_table(self, text: str) -> list[str]:
+        if len(text) <= self._max_chars:
+            return [text]
+
+        lines = text.split("\n")
+        header_lines: list[str] = []
+        body = lines
+        # A Markdown table header is a row followed by a separator like |---|:--|.
+        if len(lines) >= 2 and "|" in lines[0] and set(lines[1].strip()) <= set("|-: "):
+            header_lines = lines[:2]
+            body = lines[2:]
+        header = "\n".join(header_lines)
+
+        pieces: list[str] = []
+        current: list[str] = []
+        current_len = len(header)
+        for row in body:
+            row_len = len(row) + 1
+            if current and current_len + row_len > self._max_chars:
+                pieces.append(self._join_table(header, current))
+                current = []
+                current_len = len(header)
+            current.append(row)
+            current_len += row_len
+        if current:
+            pieces.append(self._join_table(header, current))
+        return pieces or [text]
+
+    @staticmethod
+    def _join_table(header: str, rows: list[str]) -> str:
+        body = "\n".join(rows)
+        return f"{header}\n{body}" if header else body
 
     def _emit(
         self,
@@ -213,8 +263,13 @@ class _Chunker:
         section: str | None,
         sections: list[str],
         text: str | None = None,
+        prepend_heading: bool = False,
     ) -> None:
         chunk_text = text if text is not None else _SEPARATOR.join(b.text for b in blocks if b.text)
+        # Give continuation chunks of a long section their heading as context, so
+        # every chunk is self-describing for retrieval (a "breadcrumb").
+        if prepend_heading and section and section not in chunk_text:
+            chunk_text = f"{section}\n\n{chunk_text}"
         self._chunks.append(
             Chunk(
                 id=f"{blocks[0].id}-chunk-{self._index}",

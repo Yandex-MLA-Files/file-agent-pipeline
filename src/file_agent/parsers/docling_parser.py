@@ -66,41 +66,57 @@ class DoclingParser(BaseParser):
         langs = [code.strip() for code in raw.split(",") if code.strip()]
         return langs or ["ru", "en"]
 
+    @staticmethod
+    def _ocr_engine() -> str:
+        return os.getenv("OCR_ENGINE", "easyocr").strip().lower()
+
     @classmethod
     def _configure_ocr(cls, pipeline_options, ocr_full_page: bool) -> None:
-        """Select an OCR engine that can read the target languages.
+        """Select the OCR engine.
 
-        EasyOCR is preferred because it reads Cyrillic as well as Latin — the
-        documents here are frequently Russian, and RapidOCR's bundled models only
-        recognize Latin/CJK. Languages come from the ``OCR_LANGS`` env var
-        (default ``ru,en``). If EasyOCR is unavailable we fall back to RapidOCR
-        (offline, models bundled) and finally to Docling's default engine.
-        ``force_full_page_ocr`` re-OCRs the whole page (needed for genuine scans);
-        otherwise only bitmap regions without a text layer are OCR'd.
+        Default is **EasyOCR**: it reads Cyrillic as well as Latin (documents are
+        frequently Russian), while RapidOCR's bundled models only recognize
+        Latin/CJK. EasyOCR is accurate but slow on CPU, so ``OCR_ENGINE=rapidocr``
+        switches to the faster offline engine for Latin-only material. Languages
+        come from ``OCR_LANGS`` (default ``ru,en``). ``force_full_page_ocr``
+        re-OCRs the whole page (genuine scans); otherwise only bitmap regions
+        without a text layer are OCR'd.
         """
         langs = cls._ocr_languages()
+        preferred = cls._ocr_engine()
+        order = ["rapidocr", "easyocr"] if preferred == "rapidocr" else ["easyocr", "rapidocr"]
 
-        try:
-            from docling.datamodel.pipeline_options import EasyOcrOptions
+        for engine in order:
+            options = cls._make_ocr_options(engine, langs)
+            if options is not None:
+                cls._set_full_page_ocr(options, ocr_full_page)
+                pipeline_options.ocr_options = options
+                return
 
-            options = EasyOcrOptions(lang=langs)
-            cls._set_full_page_ocr(options, ocr_full_page)
-            pipeline_options.ocr_options = options
-            return
-        except Exception:  # pragma: no cover - EasyOCR not installed
-            logger.debug("EasyOCR unavailable; trying RapidOCR.")
-
-        try:
-            from docling.datamodel.pipeline_options import RapidOcrOptions
-
-            options = RapidOcrOptions()
-            cls._set_full_page_ocr(options, ocr_full_page)
-            pipeline_options.ocr_options = options
-            return
-        except Exception:  # pragma: no cover - RapidOCR not installed
-            logger.debug("RapidOCR unavailable; using Docling's default OCR engine.")
-
+        logger.debug("No configurable OCR engine available; using Docling's default.")
         cls._set_full_page_ocr(pipeline_options.ocr_options, ocr_full_page)
+
+    @staticmethod
+    def _make_ocr_options(engine: str, langs: list[str]):
+        try:
+            if engine == "easyocr":
+                from docling.datamodel.pipeline_options import EasyOcrOptions
+
+                return EasyOcrOptions(lang=langs)
+            if engine == "rapidocr":
+                from docling.datamodel.pipeline_options import RapidOcrOptions
+
+                return RapidOcrOptions()
+        except Exception:  # pragma: no cover - engine not installed
+            logger.debug("OCR engine %s unavailable.", engine)
+        return None
+
+    @staticmethod
+    def _set_full_page_ocr(options, ocr_full_page: bool) -> None:
+        try:
+            options.force_full_page_ocr = ocr_full_page
+        except Exception:  # pragma: no cover - depends on Docling version
+            pass
 
     @staticmethod
     def _set_full_page_ocr(options, ocr_full_page: bool) -> None:

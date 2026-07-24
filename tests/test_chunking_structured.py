@@ -2,26 +2,46 @@ from file_agent.chunking import chunk_document
 from file_agent.document import Block, BlockType, Document
 
 
-def test_table_block_is_not_split():
-    long_table = "| a | b |\n| - | - |\n" + "\n".join(f"| {i} | {i} |" for i in range(500))
+def test_small_table_is_kept_whole():
+    table = "| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |"
     document = Document(
         file_name="doc.pdf",
         file_type="pdf",
         blocks=[
-            Block(
-                id="t1",
-                text=long_table,
-                type="table",
-                block_type=BlockType.TABLE,
-                page_number=3,
-            )
+            Block(id="t1", text=table, type="table", block_type=BlockType.TABLE, page_number=3)
         ],
     )
 
-    chunks = chunk_document(document, max_chars=100, overlap=10)
+    chunks = chunk_document(document, max_chars=1000, overlap=100)
 
     assert len(chunks) == 1
-    assert chunks[0].text == long_table
+    assert chunks[0].text == table
+    assert chunks[0].metadata["block_type"] == "table"
+    assert chunks[0].metadata["page_number"] == 3
+
+
+def test_large_table_is_split_by_rows_with_header():
+    header = "| a | b |\n| - | - |"
+    rows = [f"| {i} | {i * i} |" for i in range(500)]
+    long_table = header + "\n" + "\n".join(rows)
+    document = Document(
+        file_name="doc.pdf",
+        file_type="pdf",
+        blocks=[
+            Block(id="t1", text=long_table, type="table", block_type=BlockType.TABLE, page_number=3)
+        ],
+    )
+
+    chunks = chunk_document(document, max_chars=200, overlap=20)
+
+    # A huge table is split so each piece fits an embedding window ...
+    assert len(chunks) > 1
+    assert all(len(chunk.text) <= 260 for chunk in chunks)
+    # ... every piece repeats the header row, and all rows are preserved.
+    assert all("| a | b |" in chunk.text for chunk in chunks)
+    joined = "\n".join(chunk.text for chunk in chunks)
+    assert "| 0 | 0 |" in joined
+    assert "| 499 | 249001 |" in joined
     assert chunks[0].metadata["block_type"] == "table"
     assert chunks[0].metadata["page_number"] == 3
 

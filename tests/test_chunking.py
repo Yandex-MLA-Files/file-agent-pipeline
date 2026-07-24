@@ -141,6 +141,29 @@ def test_heading_is_recorded_as_section():
     assert chunks[0].metadata["section"] == "Overview"
 
 
+def test_long_section_repeats_heading_in_each_chunk():
+    from file_agent.document import BlockType
+
+    heading = Block(id="h1", text="Deep Section", type="heading", block_type=BlockType.HEADING)
+    body = [
+        Block(
+            id=f"p{i}",
+            text=f"Paragraph {i} with enough words to fill up some space here. ",
+            type="text",
+            block_type=BlockType.TEXT,
+        )
+        for i in range(20)
+    ]
+    document = Document(file_name="doc.pdf", file_type="pdf", blocks=[heading, *body])
+
+    chunks = chunk_document(document, max_chars=300, overlap=50)
+
+    assert len(chunks) > 1
+    # Every continuation chunk carries the heading as a breadcrumb for retrieval.
+    assert all("Deep Section" in chunk.text for chunk in chunks)
+    assert all(chunk.metadata["section"] == "Deep Section" for chunk in chunks)
+
+
 def test_overlap_must_be_smaller_than_max_chars():
     document = Document(file_name="notes.md", file_type="md", blocks=[])
 
