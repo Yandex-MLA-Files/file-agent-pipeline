@@ -27,28 +27,45 @@ class Chunk:
         }
 
 
+@dataclass
+class _Section:
+    """A heading and the blocks that belong to it (its reading-order body)."""
+
+    heading: str | None
+    blocks: list[Block]
+
+    @property
+    def text(self) -> str:
+        return _SEPARATOR.join(b.text for b in self.blocks if b.text)
+
+
 def chunk_document(
     document: Document,
     max_chars: int = DEFAULT_MAX_CHARS,
     overlap: int = DEFAULT_OVERLAP,
+    min_chars: int | None = None,
 ) -> list[Chunk]:
-    """Split a document into retrieval-sized chunks.
+    """Split a document into retrieval-sized, section-coherent chunks.
 
     Structured parsers (e.g. Docling) emit many small blocks — a heading, a
     short paragraph, a caption. Turning each block into its own chunk starves
-    retrieval: the top-k results become a handful of tiny fragments carrying
-    almost no context. Instead we *pack* consecutive blocks together up to
-    ``max_chars`` so every chunk is a coherent, reasonably sized passage:
+    retrieval: the top-k results become a handful of tiny fragments with almost
+    no context. Merging blocks blindly is not enough either: it mixes unrelated
+    sections into one chunk and mislabels it with a trailing heading.
 
-    - short blocks are merged (a heading naturally stays with the section text
-      that follows it);
-    - a block larger than ``max_chars`` is split into overlapping windows;
-    - tables are emitted as their own chunk so their Markdown layout survives;
-    - consecutive packed chunks overlap by whole trailing blocks (up to
-      ``overlap`` characters) to preserve continuity across boundaries.
+    So chunking works in two levels:
 
-    Structural metadata (page numbers, block ids, bounding box, section title,
-    VLM descriptions) is carried into each chunk for filtering and tracing.
+    1. Blocks are grouped into **sections** (a heading plus its body), which
+       guarantees a heading always opens a chunk and never dangles at the end.
+    2. Whole sections are packed together up to ``max_chars`` (small adjacent
+       slides/sections merge), flushing once a chunk reaches ``min_chars`` so
+       chunks stay coherent instead of greedily spanning the whole document. A
+       section larger than ``max_chars`` is packed block-by-block, and a single
+       oversized block is split into overlapping windows. Tables are kept whole.
+
+    Each chunk records ``section`` (the heading it starts under), ``sections``
+    (all headings it covers), page numbers, block ids and any VLM description,
+    so retrieval results stay filterable and traceable.
     """
     if max_chars <= 0:
         raise ValueError("max_chars must be greater than 0")
@@ -57,70 +74,109 @@ def chunk_document(
     if overlap >= max_chars:
         raise ValueError("overlap must be smaller than max_chars")
 
-    packer = _BlockPacker(document, max_chars, overlap)
-    for block in document.blocks:
-        packer.add(block)
-    return packer.finish()
+    if min_chars is None:
+        min_chars = max(1, max_chars // 3)
+    min_chars = min(min_chars, max_chars)
+
+    chunker = _Chunker(document, max_chars, overlap, min_chars)
+    for section in _group_sections(document.blocks):
+        chunker.add_section(section)
+    return chunker.finish()
 
 
-class _BlockPacker:
-    def __init__(self, document: Document, max_chars: int, overlap: int) -> None:
+def _group_sections(blocks: list[Block]) -> list[_Section]:
+    sections: list[_Section] = []
+    current = _Section(heading=None, blocks=[])
+    for block in blocks:
+        if block.block_type == BlockType.HEADING and block.text.strip():
+            if current.blocks:
+                sections.append(current)
+            current = _Section(heading=block.text.strip(), blocks=[block])
+        else:
+            current.blocks.append(block)
+    if current.blocks:
+        sections.append(current)
+    return sections
+
+
+class _Chunker:
+    def __init__(self, document: Document, max_chars: int, overlap: int, min_chars: int) -> None:
         self._document = document
         self._max_chars = max_chars
         self._overlap = overlap
+        self._min_chars = min_chars
         self._chunks: list[Chunk] = []
         self._index = 1
-        self._buffer: list[Block] = []
+        self._buffer: list[_Section] = []
         self._buffer_len = 0
-        self._dirty = False  # buffer holds fresh (non-overlap) content
-        self._section: str | None = None
 
-    def add(self, block: Block) -> None:
-        text = block.text
-        if block.block_type == BlockType.HEADING and text.strip():
-            self._section = text.strip()
+    def add_section(self, section: _Section) -> None:
+        text = section.text
         if not text:
             return
 
-        # Tables and oversized blocks are emitted on their own so their layout
-        # is preserved and they never bloat a packed chunk.
-        if block.block_type == BlockType.TABLE or len(text) > self._max_chars:
-            self._flush(keep_overlap=False)
-            self._reset_buffer()
-            self._emit_standalone(block, text)
+        # A section too large for one chunk is packed block by block.
+        if len(text) > self._max_chars:
+            self._flush()
+            self._pack_blocks(section.blocks, section.heading)
             return
 
-        addition = len(text) + (len(_SEPARATOR) if self._buffer else 0)
-        if self._buffer and self._buffer_len + addition > self._max_chars:
-            self._flush(keep_overlap=True)
-            addition = len(text) + (len(_SEPARATOR) if self._buffer else 0)
+        would_exceed = self._buffer_len + len(_SEPARATOR) + len(text) > self._max_chars
+        if self._buffer and (self._buffer_len >= self._min_chars or would_exceed):
+            self._flush()
 
-        self._buffer.append(block)
-        self._buffer_len += addition
-        self._dirty = True
+        self._buffer.append(section)
+        self._buffer_len += len(text) + (len(_SEPARATOR) if len(self._buffer) > 1 else 0)
 
     def finish(self) -> list[Chunk]:
-        self._flush(keep_overlap=False)
+        self._flush()
         return self._chunks
 
     # -- internals ----------------------------------------------------------
 
-    def _flush(self, keep_overlap: bool) -> None:
-        if not self._buffer or not self._dirty:
+    def _flush(self) -> None:
+        if not self._buffer:
             return
+        blocks = [block for section in self._buffer for block in section.blocks]
+        headings = [section.heading for section in self._buffer if section.heading]
+        section = headings[0] if headings else None
+        self._emit(blocks, section=section, sections=headings)
+        self._buffer = []
+        self._buffer_len = 0
 
-        text = _SEPARATOR.join(block.text for block in self._buffer)
-        self._append(text, self._buffer)
-        self._dirty = False
+    def _pack_blocks(self, blocks: list[Block], heading: str | None) -> None:
+        buffer: list[Block] = []
+        buffer_len = 0
 
-        if keep_overlap:
-            self._buffer = self._overlap_seed(self._buffer)
-        else:
-            self._buffer = []
-        self._buffer_len = sum(len(b.text) + len(_SEPARATOR) for b in self._buffer)
+        def flush_buffer() -> None:
+            nonlocal buffer, buffer_len
+            if not buffer:
+                return
+            self._emit(buffer, section=heading, sections=[heading] if heading else [])
+            buffer = self._overlap_seed(buffer)
+            buffer_len = sum(len(b.text) + len(_SEPARATOR) for b in buffer)
+
+        for block in blocks:
+            text = block.text
+            if not text:
+                continue
+
+            if block.block_type == BlockType.TABLE or len(text) > self._max_chars:
+                flush_buffer()
+                buffer, buffer_len = [], 0
+                self._emit_oversized(block, text, heading)
+                continue
+
+            addition = len(text) + (len(_SEPARATOR) if buffer else 0)
+            if buffer and buffer_len + addition > self._max_chars:
+                flush_buffer()
+                addition = len(text) + (len(_SEPARATOR) if buffer else 0)
+            buffer.append(block)
+            buffer_len += addition
+
+        flush_buffer()
 
     def _overlap_seed(self, blocks: list[Block]) -> list[Block]:
-        """Keep trailing whole blocks (up to ``overlap`` chars) for continuity."""
         if self._overlap == 0:
             return []
         seed: list[Block] = []
@@ -131,38 +187,49 @@ class _BlockPacker:
                 break
             seed.insert(0, block)
             total += length + len(_SEPARATOR)
-        # Never carry the whole chunk forward, or it would be re-emitted verbatim.
-        if len(seed) == len(blocks):
+        if len(seed) == len(blocks):  # never carry the whole chunk forward
             seed = seed[1:]
         return seed
 
-    def _emit_standalone(self, block: Block, text: str) -> None:
+    def _emit_oversized(self, block: Block, text: str, heading: str | None) -> None:
+        sections = [heading] if heading else []
         if block.block_type == BlockType.TABLE or len(text) <= self._max_chars:
-            self._append(text, [block])
+            self._emit([block], section=heading, sections=sections, text=text)
             return
-
         step = self._max_chars - self._overlap
         start = 0
         while start < len(text):
-            self._append(text[start : start + self._max_chars], [block])
+            self._emit(
+                [block],
+                section=heading,
+                sections=sections,
+                text=text[start : start + self._max_chars],
+            )
             start += step
 
-    def _reset_buffer(self) -> None:
-        self._buffer = []
-        self._buffer_len = 0
-        self._dirty = False
-
-    def _append(self, text: str, blocks: list[Block]) -> None:
+    def _emit(
+        self,
+        blocks: list[Block],
+        section: str | None,
+        sections: list[str],
+        text: str | None = None,
+    ) -> None:
+        chunk_text = text if text is not None else _SEPARATOR.join(b.text for b in blocks if b.text)
         self._chunks.append(
             Chunk(
                 id=f"{blocks[0].id}-chunk-{self._index}",
-                text=text,
-                metadata=self._build_metadata(blocks),
+                text=chunk_text,
+                metadata=self._build_metadata(blocks, section, sections),
             )
         )
         self._index += 1
 
-    def _build_metadata(self, blocks: list[Block]) -> dict[str, Any]:
+    def _build_metadata(
+        self,
+        blocks: list[Block],
+        section: str | None,
+        sections: list[str],
+    ) -> dict[str, Any]:
         block_types: list[str] = []
         for block in blocks:
             value = block.block_type.value if block.block_type else block.type
@@ -192,8 +259,10 @@ class _BlockPacker:
         if pages:
             metadata["page_number"] = pages[0]
             metadata["page_numbers"] = pages
-        if self._section:
-            metadata["section"] = self._section
+        if section:
+            metadata["section"] = section
+        if sections:
+            metadata["sections"] = sections
         if len(blocks) == 1 and blocks[0].bbox is not None:
             metadata["bbox"] = blocks[0].bbox
         if descriptions:

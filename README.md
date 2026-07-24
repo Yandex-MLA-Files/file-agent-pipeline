@@ -14,9 +14,10 @@ bounding boxes, a generated table of contents, and a uniform Markdown export via
 
 - **OCR is decided automatically.** Before parsing, each PDF page is analyzed
   locally (text density and image coverage) to decide whether it needs OCR, so
-  born-digital pages stay fast and only scanned/image pages are OCR'd. OCR runs
-  through RapidOCR (ONNX models bundled in the wheel, so it works offline).
-  Override with `parse_file(path, enable_ocr="on" | "off")`.
+  born-digital pages stay fast and only scanned/image pages are OCR'd. OCR uses
+  EasyOCR (reads Cyrillic and Latin — documents are often Russian); languages are
+  set via `OCR_LANGS` (default `ru,en`). Override the decision with
+  `parse_file(path, enable_ocr="on" | "off")`.
 - **Figures can be described by a VLM.** With `parse_file(path, enable_vlm=True)`,
   figures and diagrams are cropped and sent to an OpenAI-compatible vision model;
   the description is folded into the searchable text. VLM is off by default and
@@ -27,12 +28,18 @@ extraction so parsing never hard-fails.
 
 ## Chunking
 
-Structured parsing yields many small blocks, so chunking **packs consecutive
-blocks up to a size budget** instead of emitting one chunk per block — otherwise
-retrieval returns a handful of tiny fragments with almost no context. Headings
-stay with their section text, tables are kept whole, oversized blocks are split
-into overlapping windows, and each chunk carries page numbers, block ids, the
-section title and any VLM description for filtering and tracing.
+Structured parsing yields many small blocks, so chunking works in two levels to
+avoid both extremes — one tiny chunk per block, and one giant chunk that mixes
+unrelated sections:
+
+1. blocks are grouped into **sections** (a heading plus its body), so a heading
+   always opens a chunk and never dangles at the end of the previous one;
+2. whole sections are **packed together up to a size budget** (small adjacent
+   sections merge), oversized sections are split block by block, and tables are
+   kept whole.
+
+Each chunk records the section it belongs to, all sections it covers, page
+numbers, block ids and any VLM description for filtering and tracing.
 
 ## Quick start
 

@@ -1,16 +1,24 @@
-from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
+from docling.datamodel.pipeline_options import EasyOcrOptions, PdfPipelineOptions
 
 from file_agent.parsers.docling_parser import DoclingParser
 
 
-def test_configure_ocr_prefers_rapidocr():
+def test_configure_ocr_prefers_easyocr_with_cyrillic(monkeypatch):
+    monkeypatch.delenv("OCR_LANGS", raising=False)
     options = PdfPipelineOptions()
 
     DoclingParser._configure_ocr(options, ocr_full_page=True)
 
-    # RapidOCR is bundled with its models and works offline, so it must be picked.
-    assert isinstance(options.ocr_options, RapidOcrOptions)
+    # EasyOCR reads Cyrillic (the documents are frequently Russian), so it wins.
+    assert isinstance(options.ocr_options, EasyOcrOptions)
+    assert "ru" in options.ocr_options.lang and "en" in options.ocr_options.lang
     assert options.ocr_options.force_full_page_ocr is True
+
+
+def test_ocr_languages_come_from_env(monkeypatch):
+    monkeypatch.setenv("OCR_LANGS", "de, fr")
+
+    assert DoclingParser._ocr_languages() == ["de", "fr"]
 
 
 def test_docling_parser_builds_with_ocr_enabled():
