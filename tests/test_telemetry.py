@@ -158,3 +158,98 @@ def test_parse_file_records_error_status_on_exception(tmp_path, span_exporter):
 
     assert parse_span.status.status_code == StatusCode.ERROR
     assert any(event.name == "exception" for event in parse_span.events)
+
+
+def _make_text_pdf(path):
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Hello from a real PDF page with a text layer.")
+    doc.save(path)
+    doc.close()
+
+
+def test_analyze_pdf_creates_span(tmp_path, span_exporter):
+    from file_agent.parsers.routing import analyze_pdf
+
+    span_exporter.clear()
+    pdf_path = tmp_path / "routing.pdf"
+    _make_text_pdf(pdf_path)
+
+    analyze_pdf(pdf_path)
+
+    span_names = [span.name for span in span_exporter.get_finished_spans()]
+    assert "file_agent.analyze_pdf" in span_names
+
+
+def test_docling_parse_creates_span(tmp_path, span_exporter):
+    from file_agent.parsers.docling_parser import DoclingParser
+
+    span_exporter.clear()
+    pdf_path = tmp_path / "docling.pdf"
+    _make_text_pdf(pdf_path)
+
+    DoclingParser().parse(pdf_path)
+
+    span_names = [span.name for span in span_exporter.get_finished_spans()]
+    assert "file_agent.docling_parse" in span_names
+
+
+def test_enhance_document_creates_span(tmp_path, span_exporter):
+    from file_agent.document import Block, BlockType
+    from file_agent.document import Document as FADocument
+    from file_agent.parsers.enhancer import DocumentEnhancer
+    from file_agent.vlm.base import VLMClient
+
+    class StubVLMClient(VLMClient):
+        def describe_image(self, image, prompt: str) -> str:
+            return "stub description"
+
+    span_exporter.clear()
+    pdf_path = tmp_path / "enhance.pdf"
+    _make_text_pdf(pdf_path)
+
+    figure = Block(
+        id="f1",
+        text="",
+        type="figure",
+        block_type=BlockType.FIGURE,
+        page_number=1,
+        bbox=(50.0, 50.0, 200.0, 200.0),
+    )
+    document = FADocument(file_name="enhance.pdf", file_type="pdf", blocks=[figure])
+
+    DocumentEnhancer(vlm_client=StubVLMClient()).enhance(document, pdf_path)
+
+    span_names = [span.name for span in span_exporter.get_finished_spans()]
+    assert "file_agent.enhance_document" in span_names
+
+
+def test_vlm_describe_image_creates_span(span_exporter):
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from file_agent.vlm.openai_compatible import OpenAICompatibleVLMClient
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="fake description"))]
+            )
+
+    class FakeOpenAI:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    span_exporter.clear()
+    client = OpenAICompatibleVLMClient(base_url="http://unused", model="test-vlm")
+    client.client = FakeOpenAI()
+
+    image = Image.new("RGB", (10, 10))
+    description = client.describe_image(image, "describe this")
+
+    assert description == "fake description"
+    span_names = [span.name for span in span_exporter.get_finished_spans()]
+    assert "file_agent.vlm_describe_image" in span_names
