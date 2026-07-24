@@ -37,12 +37,7 @@ class DoclingParser(BaseParser):
             pipeline_options.do_ocr = do_ocr
             pipeline_options.do_table_structure = True
             if do_ocr:
-                # Force OCR over the entire page for genuine scans; otherwise let
-                # Docling OCR only the bitmap regions that lack a text layer.
-                try:
-                    pipeline_options.ocr_options.force_full_page_ocr = ocr_full_page
-                except Exception:  # pragma: no cover - depends on Docling version
-                    pass
+                self._configure_ocr(pipeline_options, ocr_full_page)
 
             pdf_format_option = PdfFormatOption(pipeline_options=pipeline_options)
 
@@ -63,6 +58,35 @@ class DoclingParser(BaseParser):
                 exc_info=True,
             )
             return DocumentConverter(allowed_formats=[InputFormat.PDF, InputFormat.DOCX])
+
+    @staticmethod
+    def _configure_ocr(pipeline_options, ocr_full_page: bool) -> None:
+        """Select an OCR engine that is actually installed.
+
+        RapidOCR ships its ONNX models inside the wheel, so it works offline and
+        needs no system binary — the safest default on Windows. If it is not
+        available we fall back to Docling's built-in default engine and only
+        tweak the full-page-OCR flag. ``force_full_page_ocr`` re-OCRs the whole
+        page (needed for genuine scans); otherwise only bitmap regions without a
+        text layer are OCR'd.
+        """
+        try:
+            from docling.datamodel.pipeline_options import RapidOcrOptions
+
+            options = RapidOcrOptions()
+            try:
+                options.force_full_page_ocr = ocr_full_page
+            except Exception:  # pragma: no cover - depends on Docling version
+                pass
+            pipeline_options.ocr_options = options
+            return
+        except Exception:  # pragma: no cover - RapidOCR not installed
+            logger.debug("RapidOCR unavailable; using Docling's default OCR engine.")
+
+        try:
+            pipeline_options.ocr_options.force_full_page_ocr = ocr_full_page
+        except Exception:  # pragma: no cover - depends on Docling version
+            pass
 
     def parse(self, file_path: Path) -> Document:
         path = Path(file_path)

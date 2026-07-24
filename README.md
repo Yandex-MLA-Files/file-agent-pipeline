@@ -14,8 +14,9 @@ bounding boxes, a generated table of contents, and a uniform Markdown export via
 
 - **OCR is decided automatically.** Before parsing, each PDF page is analyzed
   locally (text density and image coverage) to decide whether it needs OCR, so
-  born-digital pages stay fast and only scanned/image pages are OCR'd. Override
-  with `parse_file(path, enable_ocr="on" | "off")`.
+  born-digital pages stay fast and only scanned/image pages are OCR'd. OCR runs
+  through RapidOCR (ONNX models bundled in the wheel, so it works offline).
+  Override with `parse_file(path, enable_ocr="on" | "off")`.
 - **Figures can be described by a VLM.** With `parse_file(path, enable_vlm=True)`,
   figures and diagrams are cropped and sent to an OpenAI-compatible vision model;
   the description is folded into the searchable text. VLM is off by default and
@@ -23,6 +24,15 @@ bounding boxes, a generated table of contents, and a uniform Markdown export via
 
 If Docling cannot process a PDF, the pipeline falls back to a plain PyMuPDF text
 extraction so parsing never hard-fails.
+
+## Chunking
+
+Structured parsing yields many small blocks, so chunking **packs consecutive
+blocks up to a size budget** instead of emitting one chunk per block — otherwise
+retrieval returns a handful of tiny fragments with almost no context. Headings
+stay with their section text, tables are kept whole, oversized blocks are split
+into overlapping windows, and each chunk carries page numbers, block ids, the
+section title and any VLM description for filtering and tracing.
 
 ## Quick start
 

@@ -28,7 +28,8 @@ Users can upload one or more documents, preview extracted text, find relevant ch
   only for scanned/image pages, decided locally with no network calls.
 - Optional VLM description of figures/diagrams in PDFs (off by default, with
   graceful degradation when no VLM endpoint is reachable).
-- Document chunking that keeps tables intact and propagates structural metadata.
+- Chunking that packs small blocks into retrieval-sized passages (keeping tables
+  intact and headings with their section) and propagates structural metadata.
 - In-memory LanceDB hybrid retrieval combining BM25 full-text search, semantic vector search, and reciprocal rank fusion (RRF).
 - A QA prompt layer and end-to-end RAG orchestration.
 - An `LLMClient` adapter built on the official OpenAI Python SDK.
@@ -95,8 +96,9 @@ Do not add the following without a separate task:
 - image analysis for PPTX files;
 - Excel formula evaluation.
 
-OCR and VLM support are implemented for PDF only: OCR via Docling with automatic
-per-page routing, and VLM figure description via an OpenAI-compatible endpoint.
+OCR and VLM support are implemented for PDF only: OCR via Docling + RapidOCR
+(ONNX models bundled, works offline) with automatic per-page routing, and VLM
+figure description via an OpenAI-compatible endpoint.
 
 The XLSX parser uses `data_only=True`: it reads cached formula values but does not calculate formulas.
 
