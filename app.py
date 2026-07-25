@@ -173,17 +173,22 @@ else:
                     st.write("**Metadata:**")
                     st.json(metadata)
                     st.text_area(
-                        "Matched chunk",
+                        "Matched chunk (what was embedded and searched)",
                         value=result.chunk.text[:CHUNK_PREVIEW_LIMIT],
                         height=160,
                         key=f"chunk-result-{index}",
                     )
                     if passage:
                         st.text_area(
-                            "Passage sent to the LLM (parent context)",
+                            "Passage sent to the LLM (parent section of this chunk)",
                             value=passage[: CHUNK_PREVIEW_LIMIT * 2],
                             height=240,
                             key=f"chunk-context-{index}",
+                        )
+                    else:
+                        st.caption(
+                            "This chunk already covers its whole section, so it is "
+                            "sent to the LLM as is."
                         )
 
     if generate_answer:
