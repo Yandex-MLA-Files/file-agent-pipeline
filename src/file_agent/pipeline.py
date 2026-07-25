@@ -61,6 +61,20 @@ def parse_file(
 def _parse_structured(path: Path, enable_vlm: bool, enable_ocr: OcrMode) -> Document:
     do_ocr, ocr_full_page, analysis = _resolve_ocr_policy(path, enable_ocr)
 
+    # Make the decision observable: without this there is no way to tell whether
+    # OCR ran, since a document with a full text layer never starts an engine.
+    if do_ocr:
+        pages = analysis.ocr_page_numbers if analysis else []
+        logger.info(
+            "Parsing %s with OCR (%s of %s pages need it: %s)",
+            path.name,
+            len(pages),
+            len(analysis.pages) if analysis else "?",
+            pages or "forced",
+        )
+    else:
+        logger.info("Parsing %s without OCR (text layer present on every page)", path.name)
+
     try:
         document = DoclingParser(do_ocr=do_ocr, ocr_full_page=ocr_full_page).parse(path)
     except Exception:

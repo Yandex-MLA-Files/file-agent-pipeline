@@ -2,7 +2,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from file_agent.chunking import Chunk, chunk_document
+from file_agent.chunking import Chunk, chunk_document, get_embedding_tokenizer
 from file_agent.document import Document
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.base import LLMClient
@@ -28,6 +28,10 @@ def chunk_documents(
     max_chars: int = 1000,
     overlap: int = 100,
 ) -> list[Chunk]:
+    # Budget chunks in the retrieval encoder's own tokens so nothing is silently
+    # truncated when they are embedded; falls back to characters when the
+    # tokenizer cannot be loaded (e.g. offline).
+    tokenizer = get_embedding_tokenizer()
     chunks: list[Chunk] = []
 
     for document in documents:
@@ -36,6 +40,7 @@ def chunk_documents(
                 document=document,
                 max_chars=max_chars,
                 overlap=overlap,
+                tokenizer=tokenizer,
             )
         )
 

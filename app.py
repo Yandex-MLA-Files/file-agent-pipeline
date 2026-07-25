@@ -101,6 +101,26 @@ else:
     st.write("**Blocks:** " + str(sum(len(document.blocks) for document in documents)))
     st.write(f"**Chunks:** {len(chunks)}")
 
+    with st.expander("Parsing details"):
+        for document in documents:
+            metadata = document.metadata
+            analysis = metadata.get("page_analysis") or {}
+            ocr_pages = analysis.get("ocr_page_numbers") or []
+            st.write(f"**{document.file_name}**")
+            st.write(
+                f"- method: `{metadata.get('parsing_method', 'unknown')}`"
+                + (
+                    f" (OCR engine: `{metadata['ocr_engine']}`)"
+                    if metadata.get("ocr_engine")
+                    else ""
+                )
+            )
+            st.write(f"- pages: {metadata.get('total_pages', 0)}, OCR'd pages: {len(ocr_pages)}")
+            if ocr_pages:
+                st.write(f"- OCR page numbers: {ocr_pages}")
+            toc = metadata.get("table_of_contents") or []
+            st.write(f"- headings detected: {len(toc)}")
+
     st.text_area(
         "Extracted text",
         value=extracted_text[:TEXT_PREVIEW_LIMIT],

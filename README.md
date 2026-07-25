@@ -40,6 +40,14 @@ unrelated sections:
    kept whole while large ones are split by rows (repeating the header), and each
    continuation chunk keeps its section heading as a breadcrumb.
 
+The budget is measured in the **retrieval encoder's own tokens**, not characters:
+an embedding model truncates at a fixed token count (128 for the default
+multilingual MiniLM), and Russian text costs more tokens per character than
+English — so a character budget silently drops the tail of every chunk at index
+time and behaves differently per language. `chunk_documents()` loads the encoder's
+tokenizer automatically and falls back to characters when it is unavailable
+(offline). Splits happen on sentence boundaries, never mid-word.
+
 Each chunk records the section it belongs to, all sections it covers, page
 numbers, block ids and any VLM description for filtering and tracing.
 

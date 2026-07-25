@@ -1,6 +1,7 @@
 import logging
 import os
 import uuid
+import warnings
 from pathlib import Path
 
 from docling.datamodel.base_models import InputFormat
@@ -10,6 +11,21 @@ from file_agent.document import Block, BlockType, Document
 from file_agent.parsers.base import BaseParser
 
 logger = logging.getLogger(__name__)
+
+
+def _silence_ocr_backend_noise() -> None:
+    """Hide harmless third-party warnings raised by CPU-only OCR backends.
+
+    EasyOCR loads a quantized recognition model and a DataLoader configured for
+    GPUs, so on a CPU-only machine PyTorch emits a deprecation notice about
+    ``torch.quantize_per_tensor`` and a ``pin_memory`` notice on every run.
+    Neither affects OCR output; silencing them keeps real warnings visible.
+    """
+    warnings.filterwarnings("ignore", message=".*quantize_per_tensor.*", category=UserWarning)
+    warnings.filterwarnings("ignore", message=".*pin_memory.*", category=UserWarning)
+
+
+_silence_ocr_backend_noise()
 
 
 class DoclingParser(BaseParser):
@@ -24,10 +40,15 @@ class DoclingParser(BaseParser):
     :mod:`file_agent.parsers.routing`) and constructs the parser accordingly.
     """
 
+    #: OCR engine selected by the most recent :meth:`_configure_ocr` call.
+    active_ocr_engine: str | None = None
+
     def __init__(self, do_ocr: bool = False, ocr_full_page: bool = False) -> None:
         self.do_ocr = do_ocr
         self.ocr_full_page = ocr_full_page
+        type(self).active_ocr_engine = None
         self._converter = self._build_converter(do_ocr, ocr_full_page)
+        self.ocr_engine = type(self).active_ocr_engine if do_ocr else None
 
     def _build_converter(self, do_ocr: bool, ocr_full_page: bool) -> DocumentConverter:
         try:
@@ -91,9 +112,20 @@ class DoclingParser(BaseParser):
             if options is not None:
                 cls._set_full_page_ocr(options, ocr_full_page)
                 pipeline_options.ocr_options = options
+                cls.active_ocr_engine = engine
+                # Third-party engines log inconsistently (RapidOCR is chatty,
+                # EasyOCR is silent), so state the effective configuration
+                # ourselves — otherwise there is no way to tell OCR ran.
+                logger.info(
+                    "OCR enabled: engine=%s languages=%s full_page=%s",
+                    engine,
+                    ",".join(langs) if engine == "easyocr" else "built-in",
+                    ocr_full_page,
+                )
                 return
 
-        logger.debug("No configurable OCR engine available; using Docling's default.")
+        logger.warning("No configurable OCR engine available; using Docling's default.")
+        cls.active_ocr_engine = "docling-default"
         cls._set_full_page_ocr(pipeline_options.ocr_options, ocr_full_page)
 
     @staticmethod
@@ -110,13 +142,6 @@ class DoclingParser(BaseParser):
         except Exception:  # pragma: no cover - engine not installed
             logger.debug("OCR engine %s unavailable.", engine)
         return None
-
-    @staticmethod
-    def _set_full_page_ocr(options, ocr_full_page: bool) -> None:
-        try:
-            options.force_full_page_ocr = ocr_full_page
-        except Exception:  # pragma: no cover - depends on Docling version
-            pass
 
     @staticmethod
     def _set_full_page_ocr(options, ocr_full_page: bool) -> None:
@@ -161,6 +186,7 @@ class DoclingParser(BaseParser):
             blocks=blocks,
             metadata={
                 "parsing_method": "docling_ocr" if self.do_ocr else "docling",
+                "ocr_engine": self.ocr_engine,
                 "docling_markdown": native_markdown,
             },
         )

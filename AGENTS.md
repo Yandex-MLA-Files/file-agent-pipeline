@@ -28,10 +28,11 @@ Users can upload one or more documents, preview extracted text, find relevant ch
   only for scanned/image pages, decided locally with no network calls.
 - Optional VLM description of figures/diagrams in PDFs (off by default, with
   graceful degradation when no VLM endpoint is reachable).
-- Section-aware chunking: blocks are grouped by heading, then whole sections are
-  packed into retrieval-sized passages (large tables split by rows with a
-  repeated header, continuation chunks keep their heading as a breadcrumb),
-  propagating section titles, page numbers and other metadata.
+- Section-aware, token-budgeted chunking: blocks are grouped by heading, then
+  whole sections are packed up to the retrieval encoder's token window (large
+  tables split by rows with a repeated header, continuation chunks keep their
+  heading as a breadcrumb, splits land on sentence boundaries), propagating
+  section titles, page numbers and other metadata.
 - In-memory LanceDB hybrid retrieval combining BM25 full-text search, semantic vector search, and reciprocal rank fusion (RRF).
 - A QA prompt layer and end-to-end RAG orchestration.
 - An `LLMClient` adapter built on the official OpenAI Python SDK.
@@ -82,6 +83,10 @@ docs/local_inference.md       # Local LLM endpoint setup
 - Keep parser selection by extension in `src/file_agent/pipeline.py`.
 - Keep parsing offline by default: OCR is auto-routed locally and the VLM is
   opt-in, so `parse_file(path)` must never require a network service.
+- Keep chunk sizes aligned with the retrieval encoder's token window. Anything
+  longer is silently truncated when embedded, so budget chunks with the encoder's
+  tokenizer (see `get_embedding_tokenizer`) instead of raw character counts, and
+  revisit the budget whenever the embedding model changes.
 - Access LLMs only through the `LLMClient` interface.
 - Keep backend-specific configuration in `src/file_agent/llm/factory.py` and environment variables.
 - Avoid complex abstractions without a practical need. Prefer simple, readable code with type hints.
