@@ -120,6 +120,8 @@ else:
                 st.write(f"- OCR page numbers: {ocr_pages}")
             toc = metadata.get("table_of_contents") or []
             st.write(f"- headings detected: {len(toc)}")
+            if metadata.get("vlm_described_figures"):
+                st.write(f"- figures described by VLM: {metadata['vlm_described_figures']}")
 
     st.text_area(
         "Extracted text",
@@ -166,14 +168,23 @@ else:
                     f"Result {index} - score {result.score:g}",
                     expanded=index == 1,
                 ):
+                    metadata = dict(result.chunk.metadata)
+                    passage = metadata.pop("context", None)
                     st.write("**Metadata:**")
-                    st.json(result.chunk.metadata)
+                    st.json(metadata)
                     st.text_area(
-                        "Chunk text",
+                        "Matched chunk",
                         value=result.chunk.text[:CHUNK_PREVIEW_LIMIT],
-                        height=240,
+                        height=160,
                         key=f"chunk-result-{index}",
                     )
+                    if passage:
+                        st.text_area(
+                            "Passage sent to the LLM (parent context)",
+                            value=passage[: CHUNK_PREVIEW_LIMIT * 2],
+                            height=240,
+                            key=f"chunk-context-{index}",
+                        )
 
     if generate_answer:
         if not normalized_query:
@@ -200,11 +211,13 @@ else:
                             f"Source {index} - score {result.score:g}",
                             expanded=index == 1,
                         ):
+                            metadata = dict(result.chunk.metadata)
+                            passage = metadata.pop("context", None)
                             st.write("**Metadata:**")
-                            st.json(result.chunk.metadata)
+                            st.json(metadata)
                             st.text_area(
                                 "Source text",
-                                value=result.chunk.text[:CHUNK_PREVIEW_LIMIT],
+                                value=(passage or result.chunk.text)[: CHUNK_PREVIEW_LIMIT * 2],
                                 height=240,
                                 key=f"answer-source-{index}",
                             )

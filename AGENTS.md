@@ -30,9 +30,14 @@ Users can upload one or more documents, preview extracted text, find relevant ch
   graceful degradation when no VLM endpoint is reachable).
 - Section-aware, token-budgeted chunking: blocks are grouped by heading, then
   whole sections are packed up to the retrieval encoder's token window (large
-  tables split by rows with a repeated header, continuation chunks keep their
-  heading as a breadcrumb, splits land on sentence boundaries), propagating
-  section titles, page numbers and other metadata.
+  tables split by rows, continuation chunks keep their heading as a breadcrumb,
+  splits land on sentence boundaries), propagating section titles, page numbers
+  and other metadata.
+- Small-to-big retrieval: chunks are sized for the encoder, while each chunk
+  carries its parent passage in `metadata["context"]`, which is what the QA
+  prompt feeds to the LLM (deduplicated across chunks).
+- Optional VLM figure description with a selectable backend (`VLM_BACKEND`:
+  `off` / `smolvlm` local / `openai` endpoint) and a bounded per-document cost.
 - In-memory LanceDB hybrid retrieval combining BM25 full-text search, semantic vector search, and reciprocal rank fusion (RRF).
 - A QA prompt layer and end-to-end RAG orchestration.
 - An `LLMClient` adapter built on the official OpenAI Python SDK.
@@ -87,6 +92,13 @@ docs/local_inference.md       # Local LLM endpoint setup
   longer is silently truncated when embedded, so budget chunks with the encoder's
   tokenizer (see `get_embedding_tokenizer`) instead of raw character counts, and
   revisit the budget whenever the embedding model changes.
+- Keep what is embedded and what the LLM reads separate: chunk text is the
+  retrieval unit, `metadata["context"]` is the answer unit. Anything that widens
+  the answer context belongs in the parent passage, not in the chunk text.
+- Access VLMs only through `file_agent.vlm.factory.create_vlm_client()`, keep the
+  backend choice in environment variables, and keep figure description bounded
+  (largest figures first, tiny decorative images skipped) so cost stays
+  predictable.
 - Access LLMs only through the `LLMClient` interface.
 - Keep backend-specific configuration in `src/file_agent/llm/factory.py` and environment variables.
 - Avoid complex abstractions without a practical need. Prefer simple, readable code with type hints.

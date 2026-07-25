@@ -19,10 +19,19 @@ bounding boxes, a generated table of contents, and a uniform Markdown export via
   languages via `OCR_LANGS`, default `ru,en`); set `OCR_ENGINE=rapidocr` for a
   faster offline Latin-only engine. Override the decision with
   `parse_file(path, enable_ocr="on" | "off")`.
-- **Figures can be described by a VLM.** With `parse_file(path, enable_vlm=True)`,
-  figures and diagrams are cropped and sent to an OpenAI-compatible vision model;
-  the description is folded into the searchable text. VLM is off by default and
-  degrades gracefully when no endpoint is reachable.
+- **Figures can be described by a VLM.** Figures and diagrams are cropped and
+  described, and the description is folded into the searchable text. Off by
+  default; pick a backend with `VLM_BACKEND`:
+  - `smolvlm` — local SmolVLM-256M through transformers: no server, no API key,
+    ~500 MB one-time download, free. Cheapest working option, but a 256M model
+    reads only simple figures reliably; point `VLM_LOCAL_MODEL` at a larger
+    SmolVLM checkpoint for better captions.
+  - `openai` — any OpenAI-compatible vision endpoint (`VLM_BASE_URL` /
+    `VLM_MODEL`), e.g. a local Ollama `qwen2.5-vl:7b` (free, needs ~6 GB RAM) or
+    a hosted API. Use this when figure content actually matters.
+
+  Cost is bounded either way: at most `VLM_MAX_FIGURES` figures per document
+  (largest first) and tiny decorative images are skipped.
 
 If Docling cannot process a PDF, the pipeline falls back to a plain PyMuPDF text
 extraction so parsing never hard-fails.
@@ -47,6 +56,12 @@ English — so a character budget silently drops the tail of every chunk at inde
 time and behaves differently per language. `chunk_documents()` loads the encoder's
 tokenizer automatically and falls back to characters when it is unavailable
 (offline). Splits happen on sentence boundaries, never mid-word.
+
+Small encoder windows would starve the LLM of context, so retrieval is
+**small-to-big**: the encoder-sized chunk is what gets embedded and matched, and
+every piece of a split section or table carries its full parent passage in
+`metadata["context"]` — that passage (deduplicated across chunks) is what the QA
+prompt actually contains. Precise search and complete answers at the same time.
 
 Each chunk records the section it belongs to, all sections it covers, page
 numbers, block ids and any VLM description for filtering and tracing.

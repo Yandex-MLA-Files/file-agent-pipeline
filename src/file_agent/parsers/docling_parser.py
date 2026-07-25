@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import uuid
 import warnings
 from pathlib import Path
@@ -197,6 +198,11 @@ class DoclingParser(BaseParser):
 
     def _item_to_block(self, item, level, docling_doc, page_heights, path: Path) -> Block | None:
         label = getattr(item, "label", "")
+        label_lower = str(label).lower()
+        # Running headers/footers repeat on every page (paper title, page number)
+        # and only pollute chunks and retrieval; drop them at the source.
+        if "page_header" in label_lower or "page_footer" in label_lower:
+            return None
         block_type = self._map_label(str(label))
         content = self._extract_content(item, block_type, docling_doc)
         if content is None:
@@ -223,7 +229,7 @@ class DoclingParser(BaseParser):
         if block_type == BlockType.TABLE:
             markdown = self._export_item_markdown(item, docling_doc)
             if markdown:
-                return markdown
+                return self._normalize_table_markdown(markdown)
             # Keep the table block even if Markdown export is unavailable.
             return getattr(item, "text", None) or "[table]"
 
@@ -237,6 +243,30 @@ class DoclingParser(BaseParser):
             return ""
 
         return None
+
+    @staticmethod
+    def _normalize_table_markdown(markdown: str) -> str:
+        """Strip the alignment padding Docling puts into Markdown tables.
+
+        Docling pads every cell so the columns line up in a monospaced view. That
+        padding can triple a table's length without adding information: a row of
+        50 tokens can occupy 1000 characters, wasting chunk space and making
+        previews unreadable. Markdown does not need the padding to render.
+        """
+        lines: list[str] = []
+        for raw_line in markdown.splitlines():
+            stripped = raw_line.strip()
+            if not stripped.startswith("|"):
+                lines.append(raw_line)
+                continue
+
+            cells = [
+                re.sub(r"\s{2,}", " ", cell.strip()) for cell in stripped.strip("|").split("|")
+            ]
+            if cells and all(cell and set(cell) <= set("-: ") for cell in cells):
+                cells = ["---"] * len(cells)  # separator row
+            lines.append("| " + " | ".join(cells) + " |")
+        return "\n".join(lines)
 
     @staticmethod
     def _export_item_markdown(item, docling_doc) -> str | None:

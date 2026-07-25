@@ -21,6 +21,15 @@ _SEPARATOR = "\n\n"
 # Per-block Docling internals that are meaningless once blocks are packed together.
 _SKIP_BLOCK_METADATA = frozenset({"docling_label", "hierarchy_level"})
 
+# Upper bound for the parent passage stored in chunk metadata (small-to-big
+# retrieval): small chunks give precise embeddings, but the LLM answers from the
+# surrounding section, so each chunk carries its parent text up to this size.
+PARENT_CONTEXT_MAX_CHARS = 4000
+
+# A table header is repeated on every piece only while it stays this small a
+# share of the budget; a huge header would crowd out the actual data rows.
+HEADER_REPEAT_MAX_RATIO = 0.25
+
 # Sentence boundary: end punctuation (Latin or Cyrillic text) followed by space,
 # or an explicit line break. Used to avoid cutting a chunk mid-sentence.
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+|\n+")
@@ -293,6 +302,9 @@ class _Chunker:
 
     def _pack_blocks(self, blocks: list[Block], heading: str | None) -> None:
         limit = self._reserved_limit(heading)
+        # Small-to-big retrieval: every piece of this oversized section links back
+        # to the whole section text, which is what the LLM will actually read.
+        parent = self._bound_parent(_SEPARATOR.join(b.text for b in blocks if b.text))
         buffer: list[Block] = []
         buffer_size = 0
 
@@ -305,6 +317,7 @@ class _Chunker:
                 section=heading,
                 sections=[heading] if heading else [],
                 prepend_heading=True,
+                parent=parent,
             )
             buffer = self._overlap_seed(buffer)
             buffer_size = self._packed_size(buffer)
@@ -364,10 +377,25 @@ class _Chunker:
         else:
             pieces = self._split_text(text, limit)
 
+        # Always offer the whole block as parent context; _emit drops it when the
+        # piece already is the whole block, and keeps it when the safety net in
+        # _enforce_limit splits the block further.
+        parent = self._bound_parent(text)
         for piece in pieces:
             self._emit(
-                [block], section=heading, sections=sections, text=piece, prepend_heading=True
+                [block],
+                section=heading,
+                sections=sections,
+                text=piece,
+                prepend_heading=True,
+                parent=parent,
             )
+
+    @staticmethod
+    def _bound_parent(text: str) -> str:
+        if len(text) <= PARENT_CONTEXT_MAX_CHARS:
+            return text
+        return text[:PARENT_CONTEXT_MAX_CHARS] + " …"
 
     def _split_text(self, text: str, limit: int) -> list[str]:
         """Split oversized text on sentence boundaries, with sentence overlap."""
@@ -454,6 +482,54 @@ class _Chunker:
         if self._budget.size(text) <= limit:
             return [text]
 
+        header, rows = self._table_parts(text)
+        if not rows:
+            # Degenerate export (a header with no data rows, or one merged row):
+            # splitting it can only produce header fragments, so keep it whole.
+            # The parent context carries the full table to the LLM anyway.
+            return [text]
+
+        header_size = (self._budget.size(header) + self._line_size) if header else 0
+        # Repeating a header that eats most of the budget leaves no room for data
+        # rows — that is exactly how header-only fragments appear in wide tables.
+        repeat_header = bool(header) and header_size <= limit * HEADER_REPEAT_MAX_RATIO
+        prefix = header if repeat_header else ""
+        prefix_size = header_size if repeat_header else 0
+        row_limit = max(1, limit - prefix_size)
+
+        pieces: list[str] = []
+        current: list[str] = []
+        current_size = prefix_size
+        for row in rows:
+            row_size = self._budget.size(row) + (self._line_size if current else 0)
+            # A single very wide row (many columns) does not fit even alone: cut it
+            # on cell boundaries so no piece overflows the encoder window.
+            if row_size > row_limit:
+                if current:
+                    pieces.append(self._join_table(prefix, current))
+                    current, current_size = [], prefix_size
+                for part in self._split_row(row, row_limit):
+                    pieces.append(self._join_table(prefix, [part]))
+                continue
+
+            if current and current_size + row_size > limit:
+                pieces.append(self._join_table(prefix, current))
+                current = []
+                current_size = prefix_size
+            current.append(row)
+            current_size += row_size
+        if current:
+            pieces.append(self._join_table(prefix, current))
+
+        # Name the columns at least once when the header is too big to repeat.
+        if pieces and header and not repeat_header:
+            first = self._join_table(header, [pieces[0]])
+            if self._budget.size(first) <= limit:
+                pieces[0] = first
+        return pieces or [text]
+
+    def _table_parts(self, text: str) -> tuple[str, list[str]]:
+        """Return the Markdown header block and the rows that carry real data."""
         lines = text.split("\n")
         header_lines: list[str] = []
         body = lines
@@ -461,36 +537,15 @@ class _Chunker:
         if len(lines) >= 2 and "|" in lines[0] and set(lines[1].strip()) <= set("|-: "):
             header_lines = lines[:2]
             body = lines[2:]
-        header = "\n".join(header_lines)
-        # The header is re-joined to every piece with a newline, so it costs its
-        # own size plus that line break.
-        header_size = (self._budget.size(header) + self._line_size) if header else 0
-        row_limit = max(1, limit - header_size)
 
-        pieces: list[str] = []
-        current: list[str] = []
-        current_size = header_size
-        for row in body:
-            row_size = self._budget.size(row) + (self._line_size if current else 0)
-            # A single very wide row (many columns) does not fit even alone: cut it
-            # on cell boundaries so no piece overflows the encoder window.
-            if row_size > row_limit:
-                if current:
-                    pieces.append(self._join_table(header, current))
-                    current, current_size = [], header_size
-                for part in self._split_row(row, row_limit):
-                    pieces.append(self._join_table(header, [part]))
-                continue
-
-            if current and current_size + row_size > limit:
-                pieces.append(self._join_table(header, current))
-                current = []
-                current_size = header_size
-            current.append(row)
-            current_size += row_size
-        if current:
-            pieces.append(self._join_table(header, current))
-        return pieces or [text]
+        rows = [
+            row
+            for row in body
+            # Malformed extractions often carry rows of empty cells; they add
+            # tokens but no meaning, so drop them instead of emitting noise.
+            if any(cell.strip() for cell in row.split("|")) and not set(row.strip()) <= set("|-: ")
+        ]
+        return "\n".join(header_lines), rows
 
     def _split_row(self, row: str, limit: int) -> list[str]:
         cells = [cell for cell in row.split("|") if cell.strip()]
@@ -523,6 +578,7 @@ class _Chunker:
         sections: list[str],
         text: str | None = None,
         prepend_heading: bool = False,
+        parent: str | None = None,
     ) -> None:
         chunk_text = text if text is not None else _SEPARATOR.join(b.text for b in blocks if b.text)
         # Give continuation chunks of a long section their heading as context, so
@@ -533,11 +589,20 @@ class _Chunker:
         # Hard guarantee: never emit a chunk the encoder would truncate, whatever
         # the upstream heuristics produced (wide table rows, dense formulas, ...).
         for piece in self._enforce_limit(chunk_text, section if prepend_heading else None):
+            # Pieces without a single word or number (table rules, stray glyphs)
+            # carry no information and would only dilute the index.
+            if not any(char.isalnum() for char in piece):
+                continue
+            metadata = self._build_metadata(blocks, section, sections)
+            # Small-to-big retrieval: the piece is what gets embedded, the parent
+            # passage is what the LLM reads (see qa.build_context_from_results).
+            if parent and len(parent) > len(piece):
+                metadata["context"] = parent
             self._chunks.append(
                 Chunk(
                     id=f"{blocks[0].id}-chunk-{self._index}",
                     text=piece,
-                    metadata=self._build_metadata(blocks, section, sections),
+                    metadata=metadata,
                 )
             )
             self._index += 1
