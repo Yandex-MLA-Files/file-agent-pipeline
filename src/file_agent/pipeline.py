@@ -1,5 +1,4 @@
 import logging
-import os
 from pathlib import Path
 from typing import Literal
 
@@ -14,8 +13,7 @@ from file_agent.parsers.pdf_parser import PDFParser
 from file_agent.parsers.pptx_parser import PPTXParser
 from file_agent.parsers.routing import analyze_pdf
 from file_agent.parsers.xlsx_parser import XLSXParser
-from file_agent.vlm.base import MockVLMClient, VLMClient
-from file_agent.vlm.openai_compatible import OpenAICompatibleVLMClient
+from file_agent.vlm.factory import create_vlm_client
 
 load_dotenv()
 
@@ -30,13 +28,15 @@ OcrMode = Literal["auto", "on", "off"]
 
 def parse_file(
     file_path: str | Path,
-    enable_vlm: bool = False,
+    enable_vlm: bool | None = None,
     enable_ocr: OcrMode = "auto",
 ) -> Document:
     """Parse any supported file into a structured :class:`Document`.
 
-    :param enable_vlm: when True, figures/diagrams in PDFs are described by a VLM
-        (requires a reachable VLM endpoint; falls back to a mock otherwise).
+    :param enable_vlm: when True, figures/diagrams in PDFs are described by a VLM.
+        The default (None) defers to configuration: the ``VLM_BACKEND`` env var
+        selects a backend (``off`` / ``smolvlm`` / ``openai``), so the whole app
+        gains figure understanding without any code changes.
     :param enable_ocr: OCR policy for PDFs — ``"auto"`` lets the pipeline decide
         per page (see :mod:`file_agent.parsers.routing`), ``"on"`` forces OCR,
         ``"off"`` disables it. Ignored for formats that carry their own text.
@@ -58,8 +58,22 @@ def parse_file(
     raise ValueError(f"Unsupported file type: {suffix or '<no extension>'}")
 
 
-def _parse_structured(path: Path, enable_vlm: bool, enable_ocr: OcrMode) -> Document:
+def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) -> Document:
     do_ocr, ocr_full_page, analysis = _resolve_ocr_policy(path, enable_ocr)
+
+    # Make the decision observable: without this there is no way to tell whether
+    # OCR ran, since a document with a full text layer never starts an engine.
+    if do_ocr:
+        pages = analysis.ocr_page_numbers if analysis else []
+        logger.info(
+            "Parsing %s with OCR (%s of %s pages need it: %s)",
+            path.name,
+            len(pages),
+            len(analysis.pages) if analysis else "?",
+            pages or "forced",
+        )
+    else:
+        logger.info("Parsing %s without OCR (text layer present on every page)", path.name)
 
     try:
         document = DoclingParser(do_ocr=do_ocr, ocr_full_page=ocr_full_page).parse(path)
@@ -76,8 +90,8 @@ def _parse_structured(path: Path, enable_vlm: bool, enable_ocr: OcrMode) -> Docu
     if analysis is not None:
         document.metadata["page_analysis"] = analysis.summary()
 
-    if enable_vlm:
-        _enhance_with_vlm(document, path)
+    if enable_vlm is not False:
+        _enhance_with_vlm(document, path, forced=enable_vlm is True)
 
     return document
 
@@ -105,7 +119,7 @@ def _resolve_ocr_policy(path: Path, enable_ocr: OcrMode):
     return analysis.needs_ocr, analysis.scanned_ratio >= FULL_SCAN_RATIO, analysis
 
 
-def _enhance_with_vlm(document: Document, path: Path) -> None:
+def _enhance_with_vlm(document: Document, path: Path, forced: bool) -> None:
     if path.suffix.lower() != ".pdf":
         return
 
@@ -116,17 +130,14 @@ def _enhance_with_vlm(document: Document, path: Path) -> None:
     if not has_figures:
         return
 
-    enhancer = DocumentEnhancer(vlm_client=_build_vlm_client())
-    enhancer.enhance(document, path)
+    vlm_client = create_vlm_client()
+    if vlm_client is None:
+        if forced:
+            logger.warning(
+                "VLM requested but no backend configured; set VLM_BACKEND to "
+                "'smolvlm' (local, free) or 'openai' (endpoint via VLM_BASE_URL)."
+            )
+        return
 
-
-def _build_vlm_client() -> VLMClient:
-    try:
-        return OpenAICompatibleVLMClient(
-            base_url=os.getenv("VLM_BASE_URL", "http://localhost:11434/v1"),
-            model=os.getenv("VLM_MODEL", "qwen2.5-vl:7b"),
-            api_key=os.getenv("VLM_API_KEY", "dummy"),
-        )
-    except Exception:
-        logger.warning("Could not initialize the VLM client; using MockVLMClient.", exc_info=True)
-        return MockVLMClient()
+    logger.info("VLM enhancement: describing figures in %s", path.name)
+    DocumentEnhancer(vlm_client=vlm_client).enhance(document, path)
