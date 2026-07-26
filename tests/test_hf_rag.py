@@ -2,8 +2,13 @@ import json
 
 import pytest
 
+from file_agent.chunking import Chunk
 from file_agent.hf_dataset import QADatasetRecord
-from file_agent.hf_rag import process_hf_qa_record, process_qa_record
+from file_agent.hf_rag import (
+    process_hf_qa_record,
+    process_qa_record,
+    serialize_search_results,
+)
 from file_agent.qa import NO_CONTEXT_MESSAGE
 from file_agent.retrieval import SearchResult
 
@@ -85,17 +90,66 @@ def test_process_qa_record_generates_answer_and_serializes_exact_contexts(tmp_pa
     assert first_context.rank == 1
     assert first_context.document_id == "q0001/first.txt"
     assert first_context.text == "First retrieved context"
+    assert first_context.retrieval_text == "First retrieved context"
     assert first_context.score == 1.0
     assert json.loads(first_context.metadata_json)["dataset_record_id"] == "q0001"
     assert second_context.rank == 2
     assert second_context.document_id == "q0001/second.txt"
     assert second_context.text == "Second retrieved context"
+    assert second_context.retrieval_text == "Second retrieved context"
     assert second_context.score == 0.5
 
     prompt = llm_client.prompts[0]
     assert prompt.index(first_context.text) < prompt.index(second_context.text)
     assert "dataset_doc_id=q0001/first.txt" in prompt
     assert "dataset_doc_id=q0001/second.txt" in prompt
+
+
+def test_serialize_search_results_matches_small_to_big_llm_context():
+    parent = "Complete parent section shown to the LLM"
+    results = [
+        SearchResult(
+            chunk=Chunk(
+                id="chunk-1",
+                text="First retrieval fragment",
+                metadata={
+                    "context": parent,
+                    "dataset_doc_id": "doc-1.pdf",
+                    "page_number": 1,
+                },
+            ),
+            score=1.0,
+        ),
+        SearchResult(
+            chunk=Chunk(
+                id="chunk-2",
+                text="Second retrieval fragment",
+                metadata={
+                    "context": parent,
+                    "dataset_doc_id": "doc-1.pdf",
+                    "page_number": 1,
+                },
+            ),
+            score=0.8,
+        ),
+        SearchResult(
+            chunk=Chunk(
+                id="chunk-3",
+                text="Standalone passage",
+                metadata={"dataset_doc_id": "doc-2.pdf", "page_number": 2},
+            ),
+            score=0.5,
+        ),
+    ]
+
+    contexts = serialize_search_results(results)
+
+    assert [context.rank for context in contexts] == [1, 2]
+    assert contexts[0].text == parent
+    assert contexts[0].retrieval_text == "First retrieval fragment"
+    assert contexts[1].text == "Standalone passage"
+    assert contexts[1].retrieval_text == "Standalone passage"
+    assert "context" not in json.loads(contexts[0].metadata_json)
 
 
 def test_generated_record_converts_to_output_dictionary(tmp_path):

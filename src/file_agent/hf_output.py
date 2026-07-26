@@ -21,6 +21,7 @@ GENERATED_QA_FEATURES = Features(
                 "chunk_id": Value("string"),
                 "document_id": Value("string"),
                 "text": Value("string"),
+                "retrieval_text": Value("string"),
                 "score": Value("float64"),
                 "metadata_json": Value("string"),
             }

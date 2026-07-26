@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,12 +10,14 @@ from datasets import Dataset
 
 from file_agent.hf_dataset import QADatasetRecord, validate_qa_dataset
 from file_agent.hf_rag import GeneratedQARecord, process_hf_qa_record
+from file_agent.lancedb_retriever import DEFAULT_SEMANTIC_MODEL_NAME
 from file_agent.llm.base import LLMClient
 from file_agent.qa import build_qa_prompt
 from file_agent.retrieval import Retriever
 
-CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_SCHEMA_VERSION = 2
 CHECKPOINTS_DIRECTORY_NAME = "checkpoints"
+RAG_PIPELINE_VERSION = "section-token-small-to-big-v1"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -141,11 +144,29 @@ def build_generation_parameters(
         "temperature": _optional_scalar_attribute(llm_client, "temperature"),
         "max_tokens": _optional_scalar_attribute(llm_client, "max_tokens"),
         "retriever": _component_identifier(retriever) if retriever is not None else "default",
+        "rag_pipeline_version": RAG_PIPELINE_VERSION,
+        "embedding_model": os.getenv("EMBEDDING_MODEL") or DEFAULT_SEMANTIC_MODEL_NAME,
+        "ocr_engine": os.getenv("OCR_ENGINE", "easyocr").strip().lower(),
+        "ocr_langs": os.getenv("OCR_LANGS", "ru,en").strip(),
+        "vlm_backend": os.getenv("VLM_BACKEND", "off").strip().lower(),
+        "vlm_model": _vlm_model_identifier(),
         "top_k": top_k,
         "max_chars": max_chars,
         "overlap": overlap,
         "prompt_sha256": hashlib.sha256(prompt_template.encode("utf-8")).hexdigest(),
     }
+
+
+def _vlm_model_identifier() -> str | None:
+    backend = os.getenv("VLM_BACKEND", "off").strip().lower()
+    if backend == "smolvlm":
+        return os.getenv(
+            "VLM_LOCAL_MODEL",
+            "HuggingFaceTB/SmolVLM-256M-Instruct",
+        )
+    if backend == "openai":
+        return os.getenv("VLM_MODEL")
+    return None
 
 
 def _model_identifier(llm_client: LLMClient) -> str:

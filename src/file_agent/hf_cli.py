@@ -20,7 +20,7 @@ from file_agent.hf_output import GeneratedDatasetArtifacts, save_generated_qa_da
 from file_agent.llm.base import LLMClient
 from file_agent.llm.factory import create_llm_client
 
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 MANIFEST_FILE_NAME = "run_manifest.json"
 FINAL_ARTIFACT_NAMES = ("answers.parquet", "hf_dataset", MANIFEST_FILE_NAME)
 LOGGER = logging.getLogger(__name__)

@@ -128,7 +128,7 @@ def test_run_hf_dataset_generation_orchestrates_limited_run_and_writes_manifest(
     assert calls["save"]["records"] == result.batch.records
 
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["created_at_utc"] == "2026-07-19T10:00:00Z"
     assert manifest["dataset"] == {
         "id": "owner/rag-qa",
@@ -142,6 +142,7 @@ def test_run_hf_dataset_generation_orchestrates_limited_run_and_writes_manifest(
     }
     assert len(manifest["dataset"]["records_sha256"]) == 64
     assert manifest["generation"]["model_id"] == "fake/model"
+    assert manifest["generation"]["rag_pipeline_version"] == "section-token-small-to-big-v1"
     assert manifest["generation"]["top_k"] == 3
     assert manifest["generation"]["prompt_sha256"]
     assert manifest["generation"]["resume_requested"] is True

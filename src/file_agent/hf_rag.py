@@ -7,6 +7,7 @@ from typing import Any
 from file_agent.hf_dataset import QADatasetRecord, download_record_documents
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.base import LLMClient
+from file_agent.qa import select_context_passages
 from file_agent.rag import answer_indexed_documents, index_documents, load_documents
 from file_agent.retrieval import Retriever, SearchResult
 
@@ -17,6 +18,7 @@ class RetrievedContext:
     chunk_id: str
     document_id: str
     text: str
+    retrieval_text: str
     score: float
     metadata_json: str
 
@@ -30,7 +32,13 @@ class RetrievedContext:
             raise ValueError("context score must be a number")
 
         strings: dict[str, str] = {}
-        for field_name in ("chunk_id", "document_id", "text", "metadata_json"):
+        for field_name in (
+            "chunk_id",
+            "document_id",
+            "text",
+            "retrieval_text",
+            "metadata_json",
+        ):
             field_value = value.get(field_name)
             if not isinstance(field_value, str) or not field_value.strip():
                 raise ValueError(f"context {field_name} must be a non-empty string")
@@ -48,6 +56,7 @@ class RetrievedContext:
             chunk_id=strings["chunk_id"],
             document_id=strings["document_id"],
             text=strings["text"],
+            retrieval_text=strings["retrieval_text"],
             score=float(score),
             metadata_json=strings["metadata_json"],
         )
@@ -58,6 +67,7 @@ class RetrievedContext:
             "chunk_id": self.chunk_id,
             "document_id": self.document_id,
             "text": self.text,
+            "retrieval_text": self.retrieval_text,
             "score": self.score,
             "metadata_json": self.metadata_json,
         }
@@ -196,14 +206,16 @@ def serialize_search_results(
 ) -> tuple[RetrievedContext, ...]:
     contexts: list[RetrievedContext] = []
 
-    for rank, result in enumerate(results, start=1):
-        metadata = result.chunk.metadata
+    for rank, (result, passage) in enumerate(select_context_passages(results), start=1):
+        metadata = dict(result.chunk.metadata)
+        metadata.pop("context", None)
         contexts.append(
             RetrievedContext(
                 rank=rank,
                 chunk_id=result.chunk.id,
                 document_id=str(metadata.get("dataset_doc_id", "")),
-                text=result.chunk.text,
+                text=passage,
+                retrieval_text=result.chunk.text,
                 score=float(result.score),
                 metadata_json=json.dumps(
                     metadata,

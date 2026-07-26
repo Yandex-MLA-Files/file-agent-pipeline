@@ -37,6 +37,7 @@ def make_generated_records() -> tuple[GeneratedQARecord, ...]:
                     chunk_id="block-1-chunk-1",
                     document_id="q0001/first.txt",
                     text="First retrieved context",
+                    retrieval_text="First retrieved context",
                     score=0.75,
                     metadata_json=json.dumps({"page_number": 1}),
                 ),
@@ -74,6 +75,7 @@ def test_build_generated_qa_dataset_uses_explicit_schema_and_source_order():
             "chunk_id": "block-1-chunk-1",
             "document_id": "q0001/first.txt",
             "text": "First retrieved context",
+            "retrieval_text": "First retrieved context",
             "score": 0.75,
             "metadata_json": '{"page_number": 1}',
         }

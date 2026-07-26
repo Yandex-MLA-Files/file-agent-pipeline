@@ -101,6 +101,28 @@ else:
     st.write("**Blocks:** " + str(sum(len(document.blocks) for document in documents)))
     st.write(f"**Chunks:** {len(chunks)}")
 
+    with st.expander("Parsing details"):
+        for document in documents:
+            metadata = document.metadata
+            analysis = metadata.get("page_analysis") or {}
+            ocr_pages = analysis.get("ocr_page_numbers") or []
+            st.write(f"**{document.file_name}**")
+            st.write(
+                f"- method: `{metadata.get('parsing_method', 'unknown')}`"
+                + (
+                    f" (OCR engine: `{metadata['ocr_engine']}`)"
+                    if metadata.get("ocr_engine")
+                    else ""
+                )
+            )
+            st.write(f"- pages: {metadata.get('total_pages', 0)}, OCR'd pages: {len(ocr_pages)}")
+            if ocr_pages:
+                st.write(f"- OCR page numbers: {ocr_pages}")
+            toc = metadata.get("table_of_contents") or []
+            st.write(f"- headings detected: {len(toc)}")
+            if metadata.get("vlm_described_figures"):
+                st.write(f"- figures described by VLM: {metadata['vlm_described_figures']}")
+
     st.text_area(
         "Extracted text",
         value=extracted_text[:TEXT_PREVIEW_LIMIT],
@@ -146,14 +168,28 @@ else:
                     f"Result {index} - score {result.score:g}",
                     expanded=index == 1,
                 ):
+                    metadata = dict(result.chunk.metadata)
+                    passage = metadata.pop("context", None)
                     st.write("**Metadata:**")
-                    st.json(result.chunk.metadata)
+                    st.json(metadata)
                     st.text_area(
-                        "Chunk text",
+                        "Matched chunk (what was embedded and searched)",
                         value=result.chunk.text[:CHUNK_PREVIEW_LIMIT],
-                        height=240,
+                        height=160,
                         key=f"chunk-result-{index}",
                     )
+                    if passage:
+                        st.text_area(
+                            "Passage sent to the LLM (parent section of this chunk)",
+                            value=passage[: CHUNK_PREVIEW_LIMIT * 2],
+                            height=240,
+                            key=f"chunk-context-{index}",
+                        )
+                    else:
+                        st.caption(
+                            "This chunk already covers its whole section, so it is "
+                            "sent to the LLM as is."
+                        )
 
     if generate_answer:
         if not normalized_query:
@@ -180,11 +216,13 @@ else:
                             f"Source {index} - score {result.score:g}",
                             expanded=index == 1,
                         ):
+                            metadata = dict(result.chunk.metadata)
+                            passage = metadata.pop("context", None)
                             st.write("**Metadata:**")
-                            st.json(result.chunk.metadata)
+                            st.json(metadata)
                             st.text_area(
                                 "Source text",
-                                value=result.chunk.text[:CHUNK_PREVIEW_LIMIT],
+                                value=(passage or result.chunk.text)[: CHUNK_PREVIEW_LIMIT * 2],
                                 height=240,
                                 key=f"answer-source-{index}",
                             )
