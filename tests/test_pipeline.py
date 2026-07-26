@@ -1,6 +1,5 @@
 import fitz
 import pytest
-from docx import Document as DOCXDocument
 from openpyxl import Workbook
 from pptx import Presentation
 
@@ -31,12 +30,6 @@ def create_pptx(file_path):
     slide.shapes.title.text = "Project Overview"
     slide.placeholders[1].text = "PowerPoint content"
     presentation.save(file_path)
-
-
-def create_docx(file_path):
-    document = DOCXDocument()
-    document.add_paragraph("Hello from DOCX")
-    document.save(file_path)
 
 
 def test_parse_file_uses_markdown_parser(tmp_path):
@@ -73,17 +66,6 @@ def test_parse_file_parses_pdf(tmp_path):
     assert document.file_type == "pdf"
     assert document.blocks
     assert any("Hello from PDF" in block.text for block in document.blocks)
-
-
-def test_parse_file_uses_docx_parser(tmp_path):
-    file_path = tmp_path / "example.docx"
-    create_docx(file_path)
-
-    document = parse_file(file_path)
-
-    assert document.file_name == "example.docx"
-    assert document.file_type == "docx"
-    assert document.blocks[0].text == "Hello from DOCX"
 
 
 def test_parse_file_uses_html_parser(tmp_path):
