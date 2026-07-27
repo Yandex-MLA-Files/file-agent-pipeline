@@ -3,10 +3,8 @@ services:
     image: jaegertracing/all-in-one:1.60
     container_name: jaeger
     user: root
-    ports:
-      - "16686:16686" # UI
-      - "4317:4317" # OTLP gRPC
-      - "4318:4318" # OTLP HTTP
+    network_mode: host
+    restart: unless-stopped
     environment:
       - SPAN_STORAGE_TYPE=badger
       - BADGER_EPHEMERAL=false
@@ -14,6 +12,43 @@ services:
       - BADGER_DIRECTORY_KEY=/badger/key
     volumes:
       - jaeger_data:/badger
+
+  vllm:
+    image: vllm/vllm-openai:v0.7.3
+    container_name: file-agent-vllm
+    network_mode: host
+    restart: unless-stopped
+    shm_size: "64mb"
+    command:
+      - --model
+      - Qwen/Qwen2.5-7B-Instruct
+      - --dtype
+      - half
+      - --max-model-len
+      - "8192"
+      - --gpu-memory-utilization
+      - "0.90"
+      - --enforce-eager
+    volumes:
+      - /mnt/storage-1/file-agent-pipe/huggingface/vllm:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+
+  app:
+    build: .
+    container_name: file-agent-app
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - vllm
+      - jaeger
 
 volumes:
   jaeger_data:
