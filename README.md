@@ -29,32 +29,6 @@ uv run streamlit run app.py
 
 Local inference setup: [docs/local_inference.md](docs/local_inference.md).
 
-## Generate a Hugging Face dataset
-
-The input dataset must contain `id`, `question`, `answer`, and `doc_ids`.
-Files listed in `doc_ids` are downloaded from the same dataset repository.
-
-```bash
-uv run python generate_hf_dataset.py \
-  --dataset-id sandrik1271/RAG-QA-Dataset \
-  --output-dir runs/smoke-001 \
-  --limit 1 \
-  --resume
-```
-
-Remove `--limit 1` for a full run. Use a new output directory for each run.
-`--resume` continues an interrupted run from saved checkpoints.
-
-The output directory contains:
-
-- `answers.parquet` - final dataset;
-- `hf_dataset/` - dataset for `datasets.load_from_disk()`;
-- `run_manifest.json` - run parameters;
-- `checkpoints/` - intermediate results used by `--resume`.
-
-Remote server instructions:
-[docs/hf_dataset_generation.md](docs/hf_dataset_generation.md).
-
 ## Development
 
 ```bash
