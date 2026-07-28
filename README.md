@@ -10,6 +10,16 @@ RAG pipeline for answering questions about documents:
 PDF and DOCX parsing uses Docling. OCR is enabled automatically for scanned PDF
 pages. Optional VLM processing is disabled by default.
 
+LangGraph orchestrates two independent workflows:
+
+```text
+ingestion: files/documents -> parsing -> chunking -> indexing
+QA:        question -> retrieval -> answer generation -> response
+```
+
+Keeping ingestion separate lets the Streamlit application index uploaded files
+once and reuse the same in-memory LanceDB retriever for multiple questions.
+
 ## Setup
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).

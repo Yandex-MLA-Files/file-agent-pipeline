@@ -1,65 +1,70 @@
 from collections.abc import Iterable
-from dataclasses import dataclass
 from pathlib import Path
 
-from file_agent.chunking import Chunk, chunk_document, get_embedding_tokenizer
+from file_agent.chunking import Chunk
 from file_agent.document import Document
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.base import LLMClient
-from file_agent.pipeline import parse_file
-from file_agent.qa import answer_question_with_context
+from file_agent.rag_core import (
+    RAGResponse,
+    chunk_documents,
+    index_documents,
+    load_documents,
+)
+from file_agent.rag_graph import (
+    IngestionContext,
+    QAContext,
+    ingestion_graph,
+    qa_graph,
+)
 from file_agent.retrieval import Retriever, SearchResult
 
+__all__ = [
+    "RAGResponse",
+    "answer_documents",
+    "answer_files",
+    "answer_indexed_documents",
+    "answer_with_results",
+    "chunk_documents",
+    "index_documents",
+    "ingest_documents",
+    "ingest_files",
+    "load_documents",
+]
 
-@dataclass
-class RAGResponse:
-    answer: str
-    sources: list[SearchResult]
-    documents_count: int
-    chunks_count: int
 
-
-def load_documents(file_paths: Iterable[str | Path]) -> list[Document]:
-    return [parse_file(file_path) for file_path in file_paths]
-
-
-def chunk_documents(
-    documents: list[Document],
+def ingest_files(
+    file_paths: Iterable[str | Path],
+    retriever: Retriever,
     max_chars: int = 1000,
     overlap: int = 100,
-) -> list[Chunk]:
-    # Budget chunks in the retrieval encoder's own tokens so nothing is silently
-    # truncated when they are embedded; falls back to characters when the
-    # tokenizer cannot be loaded (e.g. offline).
-    tokenizer = get_embedding_tokenizer()
-    chunks: list[Chunk] = []
-
-    for document in documents:
-        chunks.extend(
-            chunk_document(
-                document=document,
-                max_chars=max_chars,
-                overlap=overlap,
-                tokenizer=tokenizer,
-            )
-        )
-
-    return chunks
+) -> tuple[list[Document], list[Chunk]]:
+    state = ingestion_graph.invoke(
+        {"file_paths": list(file_paths)},
+        context=IngestionContext(
+            retriever=retriever,
+            max_chars=max_chars,
+            overlap=overlap,
+        ),
+    )
+    return state["documents"], state["chunks"]
 
 
-def index_documents(
+def ingest_documents(
     documents: list[Document],
     retriever: Retriever,
     max_chars: int = 1000,
     overlap: int = 100,
 ) -> list[Chunk]:
-    chunks = chunk_documents(
-        documents=documents,
-        max_chars=max_chars,
-        overlap=overlap,
+    state = ingestion_graph.invoke(
+        {"documents": documents},
+        context=IngestionContext(
+            retriever=retriever,
+            max_chars=max_chars,
+            overlap=overlap,
+        ),
     )
-    retriever.index(chunks)
-    return chunks
+    return state["chunks"]
 
 
 def answer_indexed_documents(
@@ -70,14 +75,19 @@ def answer_indexed_documents(
     chunks_count: int,
     top_k: int = 5,
 ) -> RAGResponse:
-    results = retriever.search(query=question, top_k=top_k)
-    return answer_with_results(
-        question=question,
-        results=results,
-        llm_client=llm_client,
-        documents_count=documents_count,
-        chunks_count=chunks_count,
+    state = qa_graph.invoke(
+        {
+            "question": question,
+            "top_k": top_k,
+            "documents_count": documents_count,
+            "chunks_count": chunks_count,
+        },
+        context=QAContext(
+            llm_client=llm_client,
+            retriever=retriever,
+        ),
     )
+    return state["response"]
 
 
 def answer_with_results(
@@ -87,18 +97,16 @@ def answer_with_results(
     documents_count: int,
     chunks_count: int,
 ) -> RAGResponse:
-    answer = answer_question_with_context(
-        question=question,
-        results=results,
-        llm_client=llm_client,
+    state = qa_graph.invoke(
+        {
+            "question": question,
+            "results": results,
+            "documents_count": documents_count,
+            "chunks_count": chunks_count,
+        },
+        context=QAContext(llm_client=llm_client),
     )
-
-    return RAGResponse(
-        answer=answer,
-        sources=results,
-        documents_count=documents_count,
-        chunks_count=chunks_count,
-    )
+    return state["response"]
 
 
 def answer_files(
@@ -110,15 +118,20 @@ def answer_files(
     overlap: int = 100,
     retriever: Retriever | None = None,
 ) -> RAGResponse:
-    documents = load_documents(file_paths)
-    return answer_documents(
-        documents=documents,
-        question=question,
-        llm_client=llm_client,
-        top_k=top_k,
+    active_retriever = retriever or LanceDBRetriever()
+    documents, chunks = ingest_files(
+        file_paths=file_paths,
+        retriever=active_retriever,
         max_chars=max_chars,
         overlap=overlap,
-        retriever=retriever,
+    )
+    return answer_indexed_documents(
+        question=question,
+        llm_client=llm_client,
+        retriever=active_retriever,
+        documents_count=len(documents),
+        chunks_count=len(chunks),
+        top_k=top_k,
     )
 
 
@@ -132,7 +145,7 @@ def answer_documents(
     retriever: Retriever | None = None,
 ) -> RAGResponse:
     active_retriever = retriever or LanceDBRetriever()
-    chunks = index_documents(
+    chunks = ingest_documents(
         documents=documents,
         retriever=active_retriever,
         max_chars=max_chars,

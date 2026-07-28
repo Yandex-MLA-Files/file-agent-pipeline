@@ -9,7 +9,7 @@ from file_agent.hf_dataset import QADatasetRecord, download_record_documents
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.base import LLMClient
 from file_agent.qa import select_context_passages
-from file_agent.rag import answer_indexed_documents, index_documents, load_documents
+from file_agent.rag import answer_indexed_documents, ingest_documents, load_documents
 from file_agent.retrieval import Retriever, SearchResult
 
 DocumentLoader = Callable[[list[str | Path]], list[Document]]
@@ -180,7 +180,7 @@ def process_qa_record(
 
     active_retriever = retriever if retriever is not None else LanceDBRetriever()
     try:
-        chunks = index_documents(
+        chunks = ingest_documents(
             documents=documents,
             retriever=active_retriever,
             max_chars=max_chars,

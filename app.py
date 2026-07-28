@@ -14,8 +14,7 @@ from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.factory import create_llm_client
 from file_agent.rag import (
     answer_with_results,
-    index_documents,
-    load_documents,
+    ingest_files,
 )
 
 SUPPORTED_TYPES = ["md", "txt", "pdf", "docx", "html", "htm", "xlsx", "pptx"]
@@ -72,9 +71,8 @@ else:
                 file_paths.append(file_path)
 
             try:
-                documents = load_documents(file_paths)
                 retriever = LanceDBRetriever()
-                chunks = index_documents(documents, retriever)
+                documents, chunks = ingest_files(file_paths, retriever)
             except Exception as exc:
                 st.error(f"Could not parse or index uploaded files: {exc}")
                 st.stop()
