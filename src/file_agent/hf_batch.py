@@ -136,10 +136,15 @@ def _create_cached_document_loader() -> DocumentLoader:
         documents: list[Document] = []
 
         for file_path in file_paths:
-            cache_key = Path(file_path).resolve()
+            source_path = Path(file_path)
+            cache_key = source_path.resolve()
             cached_document = cache.get(cache_key)
             if cached_document is None:
-                cached_document = load_documents([cache_key])[0]
+                # Hugging Face snapshot files are symlinks to extensionless blob
+                # paths. Use the resolved path only as the cache identity and
+                # keep the original filename so parser selection still sees
+                # extensions such as .pdf and .docx.
+                cached_document = load_documents([source_path])[0]
                 cache[cache_key] = cached_document
             else:
                 LOGGER.info("Reusing parsed document from batch cache: %s", cache_key)

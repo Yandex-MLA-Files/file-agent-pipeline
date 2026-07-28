@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 from datasets import Dataset
@@ -115,6 +116,7 @@ def test_cached_document_loader_reuses_parsing_and_returns_isolated_copies(
     monkeypatch,
     tmp_path,
 ):
+    monkeypatch.chdir(tmp_path)
     document_path = tmp_path / "shared.txt"
     document_path.write_text("Shared document", encoding="utf-8")
     load_calls = []
@@ -140,11 +142,12 @@ def test_cached_document_loader_reuses_parsing_and_returns_isolated_copies(
     monkeypatch.setattr("file_agent.hf_batch.load_documents", fake_load_documents)
     loader = _create_cached_document_loader()
 
-    first_document = loader([document_path])[0]
+    relative_document_path = Path("shared.txt")
+    first_document = loader([relative_document_path])[0]
     first_document.blocks[0].metadata["dataset_record_id"] = "q0001"
     second_document = loader([document_path])[0]
 
-    assert load_calls == [[document_path.resolve()]]
+    assert load_calls == [[relative_document_path]]
     assert first_document is not second_document
     assert first_document.blocks[0] is not second_document.blocks[0]
     assert "dataset_record_id" not in second_document.blocks[0].metadata
