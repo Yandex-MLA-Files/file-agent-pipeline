@@ -1,15 +1,18 @@
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from file_agent.document import Document
 from file_agent.hf_dataset import QADatasetRecord, download_record_documents
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.base import LLMClient
 from file_agent.qa import select_context_passages
 from file_agent.rag import answer_indexed_documents, index_documents, load_documents
 from file_agent.retrieval import Retriever, SearchResult
+
+DocumentLoader = Callable[[list[str | Path]], list[Document]]
 
 
 @dataclass(frozen=True)
@@ -134,6 +137,7 @@ def process_hf_qa_record(
     max_chars: int = 1000,
     overlap: int = 100,
     retriever: Retriever | None = None,
+    document_loader: DocumentLoader | None = None,
 ) -> GeneratedQARecord:
     document_paths = download_record_documents(
         record=record,
@@ -150,6 +154,7 @@ def process_hf_qa_record(
         max_chars=max_chars,
         overlap=overlap,
         retriever=retriever,
+        document_loader=document_loader,
     )
 
 
@@ -161,11 +166,13 @@ def process_qa_record(
     max_chars: int = 1000,
     overlap: int = 100,
     retriever: Retriever | None = None,
+    document_loader: DocumentLoader | None = None,
 ) -> GeneratedQARecord:
     if len(document_paths) != len(record.doc_ids):
         raise ValueError("document_paths count must match record.doc_ids count")
 
-    documents = load_documents(document_paths)
+    active_document_loader = document_loader or load_documents
+    documents = active_document_loader(document_paths)
     for document, doc_id in zip(documents, record.doc_ids, strict=True):
         for block in document.blocks:
             block.metadata["dataset_record_id"] = record.id

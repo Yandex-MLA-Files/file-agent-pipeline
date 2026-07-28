@@ -2,17 +2,20 @@ import hashlib
 import json
 import logging
 import os
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from datasets import Dataset
 
+from file_agent.document import Document
 from file_agent.hf_dataset import QADatasetRecord, validate_qa_dataset
-from file_agent.hf_rag import GeneratedQARecord, process_hf_qa_record
+from file_agent.hf_rag import DocumentLoader, GeneratedQARecord, process_hf_qa_record
 from file_agent.lancedb_retriever import DEFAULT_SEMANTIC_MODEL_NAME
 from file_agent.llm.base import LLMClient
 from file_agent.qa import build_qa_prompt
+from file_agent.rag import load_documents
 from file_agent.retrieval import Retriever
 
 CHECKPOINT_SCHEMA_VERSION = 2
@@ -70,6 +73,7 @@ def generate_hf_qa_records(
     records: list[GeneratedQARecord] = []
     processed_count = 0
     resumed_count = 0
+    document_loader = _create_cached_document_loader()
 
     for row_index, row in enumerate(dataset):
         record = QADatasetRecord.from_row(row, row_index=row_index)
@@ -100,6 +104,7 @@ def generate_hf_qa_records(
                 max_chars=max_chars,
                 overlap=overlap,
                 retriever=retriever,
+                document_loader=document_loader,
             )
             _validate_generated_record(generated_record, record)
             _write_checkpoint(
@@ -122,6 +127,31 @@ def generate_hf_qa_records(
         processed_count=processed_count,
         resumed_count=resumed_count,
     )
+
+
+def _create_cached_document_loader() -> DocumentLoader:
+    cache: dict[Path, Document] = {}
+
+    def load_cached_documents(file_paths: list[str | Path]) -> list[Document]:
+        documents: list[Document] = []
+
+        for file_path in file_paths:
+            cache_key = Path(file_path).resolve()
+            cached_document = cache.get(cache_key)
+            if cached_document is None:
+                cached_document = load_documents([cache_key])[0]
+                cache[cache_key] = cached_document
+            else:
+                LOGGER.info("Reusing parsed document from batch cache: %s", cache_key)
+
+            # HF processing adds row-specific dataset metadata to every block.
+            # Return an isolated copy so one question cannot mutate the cached
+            # document or leak its metadata into another question.
+            documents.append(deepcopy(cached_document))
+
+        return documents
+
+    return load_cached_documents
 
 
 def build_generation_parameters(

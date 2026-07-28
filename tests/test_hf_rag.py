@@ -10,6 +10,7 @@ from file_agent.hf_rag import (
     serialize_search_results,
 )
 from file_agent.qa import NO_CONTEXT_MESSAGE
+from file_agent.rag import load_documents
 from file_agent.retrieval import SearchResult
 
 
@@ -221,6 +222,27 @@ def test_process_qa_record_rejects_mismatched_document_paths(tmp_path):
             llm_client=DummyLLM(),
             retriever=FakeRetriever(),
         )
+
+
+def test_process_qa_record_uses_supplied_document_loader(tmp_path):
+    record = make_record()
+    document_paths = create_text_documents(tmp_path)
+    loader_calls = []
+
+    def recording_loader(paths):
+        loader_calls.append(paths)
+        return load_documents(paths)
+
+    result = process_qa_record(
+        record=record,
+        document_paths=document_paths,
+        llm_client=DummyLLM(),
+        retriever=FakeRetriever(),
+        document_loader=recording_loader,
+    )
+
+    assert result.id == record.id
+    assert loader_calls == [document_paths]
 
 
 def test_process_qa_record_preserves_no_context_result(tmp_path):

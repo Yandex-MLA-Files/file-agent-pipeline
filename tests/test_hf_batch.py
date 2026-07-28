@@ -3,7 +3,8 @@ import json
 import pytest
 from datasets import Dataset
 
-from file_agent.hf_batch import generate_hf_qa_records
+from file_agent.document import Block, Document
+from file_agent.hf_batch import _create_cached_document_loader, generate_hf_qa_records
 from file_agent.hf_rag import GeneratedQARecord, RetrievedContext
 
 
@@ -95,6 +96,7 @@ def test_generate_hf_qa_records_processes_in_order_and_writes_checkpoints(
     assert calls[0][1]["top_k"] == 3
     assert calls[0][1]["max_chars"] == 800
     assert calls[0][1]["overlap"] == 80
+    assert calls[0][1]["document_loader"] is calls[1][1]["document_loader"]
 
     checkpoint_paths = sorted((tmp_path / "checkpoints").glob("*.json"))
     assert [path.name for path in checkpoint_paths] == ["000000.json", "000001.json"]
@@ -107,6 +109,45 @@ def test_generate_hf_qa_records_processes_in_order_and_writes_checkpoints(
     assert first_checkpoint["parameters"]["embedding_model"]
     assert first_checkpoint["parameters"]["top_k"] == 3
     assert first_checkpoint["result"] == result.records[0].to_dict()
+
+
+def test_cached_document_loader_reuses_parsing_and_returns_isolated_copies(
+    monkeypatch,
+    tmp_path,
+):
+    document_path = tmp_path / "shared.txt"
+    document_path.write_text("Shared document", encoding="utf-8")
+    load_calls = []
+
+    def fake_load_documents(file_paths):
+        paths = list(file_paths)
+        load_calls.append(paths)
+        return [
+            Document(
+                file_name=paths[0].name,
+                file_type="txt",
+                blocks=[
+                    Block(
+                        id="block-1",
+                        text="Shared document",
+                        type="text",
+                        metadata={"source_file": paths[0].name},
+                    )
+                ],
+            )
+        ]
+
+    monkeypatch.setattr("file_agent.hf_batch.load_documents", fake_load_documents)
+    loader = _create_cached_document_loader()
+
+    first_document = loader([document_path])[0]
+    first_document.blocks[0].metadata["dataset_record_id"] = "q0001"
+    second_document = loader([document_path])[0]
+
+    assert load_calls == [[document_path.resolve()]]
+    assert first_document is not second_document
+    assert first_document.blocks[0] is not second_document.blocks[0]
+    assert "dataset_record_id" not in second_document.blocks[0].metadata
 
 
 def test_generate_hf_qa_records_resumes_without_processing_again(monkeypatch, tmp_path):
