@@ -1,21 +1,21 @@
 ---
-name: Задача
-about: Обычная рабочая задача (фича, улучшение, инфра)
+name: Task
+about: A feature, improvement, or infrastructure task
 title: ""
 labels: ["task"]
 assignees: []
 ---
 
-## Описание
-<!-- Что нужно сделать и зачем -->
+## Description
+<!-- Explain what needs to be done and why. -->
 
 
-## Зона / роль
-<!-- parser / retrieval / evaluation / devops — поставь нужный лейбл справа -->
+## Area
+<!-- Apply the relevant label: parser / retrieval / generation / evaluation / backend / frontend / devops. -->
 
 
-## Критерии готовности
+## Acceptance criteria
 - [ ]
 
-## Заметки
-<!-- Ссылки, идеи, зависимости от других задач (#N) -->
+## Notes
+<!-- Add links, ideas, and dependencies on other issues. -->

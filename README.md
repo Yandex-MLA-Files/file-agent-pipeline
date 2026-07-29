@@ -1,167 +1,86 @@
 # File Agent Pipeline
 
-ML-стажировочный проект для построения пайплайна работы с файлами.
+A Python RAG application for answering questions about user-provided files. It parses documents, splits extracted text into chunks, retrieves relevant context with BM25 and semantic search, and generates source-grounded answers through an OpenAI-compatible LLM endpoint.
 
-Проект принимает файл, извлекает текст, приводит документ к единому внутреннему
-представлению, разбивает документ на chunks, ищет релевантные chunks по запросу
-пользователя и готовит prompt для будущего LLM-ответа.
+Supported formats: Markdown, PDF, DOCX, HTML, XLSX, and PPTX.
 
-Сейчас реального доступа к YandexGPT API нет, поэтому настоящие API-запросы не
-выполняются. Для проверки полного пайплайна используется `FakeLLM`.
+## Document parsing
 
-## Текущий Статус MVP
+PDF and DOCX are parsed with [Docling](https://github.com/DS4SD/docling), which
+reconstructs reading order and classifies each element (heading, table, figure,
+formula). This produces a rich `Document` with per-block page numbers and
+bounding boxes, a generated table of contents, and a uniform Markdown export via
+`Document.to_markdown()`.
 
-Уже реализовано:
+- **OCR is decided automatically.** Before parsing, each PDF page is analyzed
+  locally (text density and image coverage) to decide whether it needs OCR, so
+  born-digital pages stay fast and only scanned/image pages are OCR'd. OCR uses
+  EasyOCR by default (reads Cyrillic and Latin — documents are often Russian;
+  languages via `OCR_LANGS`, default `ru,en`); set `OCR_ENGINE=rapidocr` for a
+  faster offline Latin-only engine. Override the decision with
+  `parse_file(path, enable_ocr="on" | "off")`.
+- **Figures can be described by a VLM.** Figures and diagrams are cropped and
+  described, and the description is folded into the searchable text. Off by
+  default; pick a backend with `VLM_BACKEND`:
+  - `smolvlm` — local SmolVLM-256M through transformers: no server, no API key,
+    ~500 MB one-time download, free. Cheapest working option, but a 256M model
+    reads only simple figures reliably; point `VLM_LOCAL_MODEL` at a larger
+    SmolVLM checkpoint for better captions.
+  - `openai` — any OpenAI-compatible vision endpoint (`VLM_BASE_URL` /
+    `VLM_MODEL`), e.g. a local Ollama `qwen2.5-vl:7b` (free, needs ~6 GB RAM) or
+    a hosted API. Use this when figure content actually matters.
 
-- `Document` / `Block` IR для единого представления документов.
-- Парсинг `.md` через `MarkdownParser`.
-- Парсинг `.pdf` через `PDFParser` и PyMuPDF.
-- Парсинг `.html` и `.htm` через `HTMLParser` и BeautifulSoup.
-- Парсинг `.xlsx` через `XLSXParser` и openpyxl.
-- Парсинг `.pptx` через `PPTXParser` и python-pptx.
-- Chunking документов.
-- Простой keyword-based retrieval по chunks.
-- QA prompt layer для сборки контекста и prompt.
-- `YandexGPTClient` подготовлен заранее, но не подключен к Streamlit и не вызывается в тестах.
-- `FakeLLM` mode для проверки полного QA-пайплайна без настоящего API.
-- Streamlit-интерфейс для загрузки файла, просмотра текста, поиска chunks и проверки FakeLLM.
-- Pytest-тесты для парсеров, chunking, retrieval, QA layer, FakeLLM и YandexGPTClient.
+  Cost is bounded either way: at most `VLM_MAX_FIGURES` figures per document
+  (largest first) and tiny decorative images are skipped.
 
-Поддерживаемые форматы:
+If Docling cannot process a PDF, the pipeline falls back to a plain PyMuPDF text
+extraction so parsing never hard-fails.
 
-- `.md`
-- `.pdf`
-- `.html`
-- `.htm`
-- `.xlsx`
-- `.pptx`
+## Chunking
 
-## Как Работает Текущий Пайплайн
+Structured parsing yields many small blocks, so chunking works in two levels to
+avoid both extremes — one tiny chunk per block, and one giant chunk that mixes
+unrelated sections:
 
-```text
-file -> parse_file -> Document/Block -> chunk_document -> search_chunks -> QA prompt -> FakeLLM/YandexGPT later -> answer
-```
+1. blocks are grouped into **sections** (a heading plus its body), so a heading
+   always opens a chunk and never dangles at the end of the previous one;
+2. whole sections are **packed together up to a size budget** (small adjacent
+   sections merge), oversized sections are split block by block, small tables are
+   kept whole while large ones are split by rows (repeating the header), and each
+   continuation chunk keeps its section heading as a breadcrumb.
 
-Основные шаги:
+The budget is measured in the **retrieval encoder's own tokens**, not characters:
+an embedding model truncates at a fixed token count (128 for the default
+multilingual MiniLM), and Russian text costs more tokens per character than
+English — so a character budget silently drops the tail of every chunk at index
+time and behaves differently per language. `chunk_documents()` loads the encoder's
+tokenizer automatically and falls back to characters when it is unavailable
+(offline). Splits happen on sentence boundaries, never mid-word.
 
-- `parse_file(file_path)` выбирает парсер по расширению файла.
-- Парсер возвращает `Document` с набором `Block`.
-- `chunk_document(document)` разбивает blocks на chunks.
-- `search_chunks(query, chunks)` ищет релевантные chunks простым keyword scoring.
-- QA layer собирает context из найденных chunks и строит prompt.
-- Сейчас prompt можно проверить через `FakeLLM`; позже его можно будет отправлять в YandexGPT.
+Small encoder windows would starve the LLM of context, so retrieval is
+**small-to-big**: the encoder-sized chunk is what gets embedded and matched, and
+every piece of a split section or table carries its full parent passage in
+`metadata["context"]` — that passage (deduplicated across chunks) is what the QA
+prompt actually contains. Precise search and complete answers at the same time.
 
-## Парсеры
+Each chunk records the section it belongs to, all sections it covers, page
+numbers, block ids and any VLM description for filtering and tracing.
 
-`MarkdownParser` читает Markdown-файлы и создаёт один `Block` с исходным текстом документа.
+## Quick start
 
-`PDFParser` читает PDF через PyMuPDF и создаёт отдельный `Block` для каждой страницы. В metadata сохраняется номер страницы и имя исходного файла.
-
-`HTMLParser` читает HTML через BeautifulSoup, удаляет `script` и `style`, затем извлекает читаемый текст страницы в один `Block`.
-
-`XLSXParser` читает Excel-файлы через openpyxl в режиме `read_only=True` и `data_only=True`. Он создаёт отдельный `Block` для каждого листа, а строки листа превращает в табличный текст с разделителем `\t`.
-
-`PPTXParser` читает PowerPoint-презентации через python-pptx и создаёт отдельный `Block` для каждого слайда. Он извлекает заголовки, обычные текстовые блоки и текст из таблиц.
-
-## FakeLLM
-
-`FakeLLM` — временная заглушка для проверки пайплайна без доступа к YandexGPT.
-
-Важно:
-
-- `FakeLLM` не генерирует настоящий ответ по документу.
-- Он проверяет, что найденные chunks были собраны в context.
-- Он проверяет, что prompt был построен.
-- Он проверяет, что был вызван `llm_client.generate(prompt)`.
-- В ответе выводится тестовое сообщение, длина prompt и preview prompt.
-
-После получения доступа к YandexGPT `FakeLLM` можно будет заменить на `YandexGPTClient`.
-
-## Установка
-
-Проект использует [uv](https://docs.astral.sh/uv/) для управления зависимостями.
+The project requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
-```
-
-Чтобы линт и форматирование запускались автоматически перед каждым коммитом,
-один раз установи git-хуки:
-
-```bash
-uv run pre-commit install
-```
-
-## Запуск Тестов
-
-```bash
-uv run pytest
-```
-
-## Линт и форматирование
-
-```bash
-uv run ruff check .
-uv run ruff format --check .
-```
-
-## Запуск Streamlit
-
-```bash
 uv run streamlit run app.py
 ```
 
-Если Streamlit не подхватывает новые парсеры, нужно полностью остановить старый
-процесс сервера и запустить команду выше заново.
+Copy `.env.example` to `.env` and configure either Yandex AI Studio or a local OpenAI-compatible endpoint before generating answers. See [local inference setup](docs/local_inference.md) for local vLLM and SGLang examples.
 
-## Переменные Окружения
+## Quality checks
 
-В проекте есть пример файла `.env.example`:
-
-```env
-YANDEX_API_KEY=your_api_key_here
-YANDEX_FOLDER_ID=your_folder_id_here
-YANDEX_MODEL=yandexgpt-lite
+```bash
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
 ```
-
-Для локального запуска с настоящим YandexGPT позже нужно будет создать файл
-`.env` и заполнить реальные значения.
-
-Настоящий `.env` нельзя коммитить. Он уже добавлен в `.gitignore`.
-
-## Текущие Ограничения
-
-- Настоящий ответ YandexGPT пока не используется, потому что доступа к API ещё нет.
-- `YandexGPTClient` подготовлен, но не подключен к Streamlit.
-- Retrieval пока keyword-based и может искать не идеально.
-- OCR пока нет.
-- VLM пока нет.
-- Изображения из PPTX пока не анализируются.
-- Excel-формулы не вычисляются; используется `data_only=True`, поэтому берутся сохранённые значения ячеек.
-- Embeddings, vector search, FAISS, LangChain и LangGraph пока не добавлены.
-
-## Roadmap
-
-Следующие шаги:
-
-- Подключить настоящий YandexGPT.
-- Добавить режим YandexGPT в Streamlit.
-- Улучшить retrieval.
-- Добавить evaluation dataset.
-- Добавить OCR/VLM.
-- Исследовать агентный подход и LangGraph.
-
-## Структура MVP
-
-Ключевые файлы:
-
-- `src/file_agent/document.py` — `Document` и `Block`.
-- `src/file_agent/pipeline.py` — выбор парсера по расширению файла.
-- `src/file_agent/parsers/` — парсеры Markdown, PDF, HTML, XLSX и PPTX.
-- `src/file_agent/chunking.py` — разбиение документов на chunks.
-- `src/file_agent/retrieval.py` — простой keyword retrieval.
-- `src/file_agent/qa.py` — сбор context и QA prompt.
-- `src/file_agent/llm/fake.py` — FakeLLM для локальной проверки.
-- `src/file_agent/llm/yandexgpt.py` — подготовленный клиент YandexGPT.
-- `app.py` — Streamlit MVP.
-- `tests/` — pytest-тесты.
