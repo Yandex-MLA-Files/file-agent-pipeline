@@ -4,13 +4,10 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 .venv/
-verify_output/
 reports/
 out/
 .env
 logs/
 
-# Real run data dropped in ad hoc for a given evaluation run -- not a
-# committed fixture (sample_run.parquet is the one used by verify_setup.py
-# and README examples, keep that tracked).
+# Real run data dropped in ad hoc for a given evaluation run -- not a committed fixture.
 answers*.parquet

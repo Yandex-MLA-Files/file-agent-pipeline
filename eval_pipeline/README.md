@@ -9,7 +9,7 @@ LLM-as-judge evaluation for RAG answers.
 The project requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 Independent of any specific dataset or RAG pipeline. The contract is a
-single function: `Judge.evaluate(dataset)`, where `dataset` is a table with
+single function: `RagasJudge.evaluate(dataset)`, where `dataset` is a table with
 columns `question` (X), `answer_model` (y_hyp), `contexts` (whatever),
 `answer` (y_ref). Where those four columns came from is not this package's
 concern.
@@ -23,7 +23,6 @@ uv sync
 ## Run
 
 ```
-uv run python verify_setup.py
 uv run python scripts/run_eval.py --run run.parquet --out reports/v1
 ```
 
@@ -85,12 +84,10 @@ uv run ruff format .
 eval/
   run_loader.py       load + validate a run file
   judge/
-    base.py           Judge interface
-    ragas_judge.py     RagasJudge implementation — see module docstring for metric choices
+    ragas_judge.py     RagasJudge — see module docstring for metric choices
   report.py            aggregate scores into a report
 scripts/run_eval.py     CLI entrypoint
 tests/                  pytest suite, no network calls
-verify_setup.py          one-shot smoke test
 ```
 
 

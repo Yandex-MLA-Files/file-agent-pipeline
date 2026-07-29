@@ -6,6 +6,7 @@ import uuid
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
 
@@ -14,6 +15,7 @@ from langchain_huggingface import HuggingFaceEmbeddings as LangchainHuggingFaceE
 from langchain_openai import ChatOpenAI
 from ragas import RunConfig
 from ragas import evaluate as ragas_evaluate
+from ragas.callbacks import ChainRun
 from ragas.cost import BaseCallbackHandler, LLMResult
 from ragas.dataset_schema import EvaluationDataset
 from ragas.embeddings import BaseRagasEmbeddings, LangchainEmbeddingsWrapper
@@ -27,8 +29,6 @@ from ragas.metrics import (
     ResponseRelevancy,
 )
 from ragas.metrics.base import Metric, ModeMetric
-
-from eval.judge.base import Judge
 
 DEFAULT_PRICE_PER_1K_INPUT_TOKENS = 0.3
 DEFAULT_PRICE_PER_1K_OUTPUT_TOKENS = 0.5
@@ -75,10 +75,6 @@ def _match_response_language_to_input(
     faithfulness.nli_statements_prompt.instruction += _LANGUAGE_MATCH_INSTRUCTION
     answer_correctness.claim_decomposition_prompt.instruction += _LANGUAGE_MATCH_INSTRUCTION
     answer_correctness.nli_prompt.instruction += _LANGUAGE_MATCH_INSTRUCTION
-    # Bonus effect, not just readability: the multilingual embeddings model
-    # compares this generated question against the real one via cosine
-    # similarity -- matching language should make that comparison more
-    # reliable too, not just easier for a human to read in the trace log.
     answer_relevancy.question_generation.instruction += _LANGUAGE_MATCH_INSTRUCTION
     context_precision.context_precision_prompt.instruction += _LANGUAGE_MATCH_INSTRUCTION
     context_recall.context_recall_prompt.instruction += _LANGUAGE_MATCH_INSTRUCTION
@@ -152,10 +148,45 @@ def _per_run_trace_path(base_path: str | Path, now: datetime) -> Path:
     return base.with_name(f"{base.stem}_{stamp}{base.suffix}")
 
 
+def _parse_row_traces(
+    ragas_traces: dict[str, ChainRun],
+    run_id: str | None,
+) -> list[dict[str, Any]]:
+    root_traces = [
+        chain_trace for chain_trace in ragas_traces.values() if chain_trace.parent_run_id == run_id
+    ]
+    root_trace = root_traces[0]
+
+    row_traces = []
+    for row_uuid in root_trace.children:
+        row_trace = ragas_traces[row_uuid]
+        scores: dict[str, Any] = {}
+        calls: dict[str, list[dict[str, Any]]] = {}
+        for metric_uuid in row_trace.children:
+            metric_trace = ragas_traces[metric_uuid]
+            scores[metric_trace.name] = metric_trace.outputs.get("output", {})
+            metric_calls = []
+            for prompt_uuid in metric_trace.children:
+                prompt_trace = ragas_traces[prompt_uuid]
+                output = prompt_trace.outputs.get("output", {})
+                output = output[0] if isinstance(output, list) else output
+                metric_calls.append(
+                    {
+                        "prompt": prompt_trace.name,
+                        "input": prompt_trace.inputs.get("data", {}),
+                        "output": output,
+                    }
+                )
+            calls[metric_trace.name] = metric_calls
+        row_traces.append({"scores": scores, "calls": calls})
+
+    return row_traces
+
+
 def _log_judge_trace(
     path: str | Path,
     run_df: pd.DataFrame,
-    traces: list,
+    row_traces: list[dict[str, Any]],
 ) -> None:
 
     run_id = str(uuid.uuid4())
@@ -165,7 +196,7 @@ def _log_judge_trace(
     run_path = _per_run_trace_path(path, now)
     run_path.parent.mkdir(parents=True, exist_ok=True)
     with open(run_path, "w", encoding="utf-8") as f:
-        for (_, row), trace in zip(run_df.iterrows(), traces, strict=True):
+        for (_, row), row_trace in zip(run_df.iterrows(), row_traces, strict=True):
             entry = {
                 "run_id": run_id,
                 "timestamp": timestamp,
@@ -174,8 +205,8 @@ def _log_judge_trace(
                 "answer_model": row["answer_model"],
                 "reference": row["answer"],
                 "contexts": list(row["contexts"]),
-                "verdict": dict(trace.scores),
-                "reasoning_trace": dict(trace),
+                "verdict": row_trace["scores"],
+                "reasoning_trace": row_trace["calls"],
             }
             f.write(json.dumps(entry, ensure_ascii=False, default=_json_default_trace) + "\n")
 
@@ -188,9 +219,6 @@ def _build_default_llm(model: str) -> BaseRagasLLM:
         temperature=0,
     )
     with warnings.catch_warnings():
-        # LangchainLLMWrapper is ragas' deprecated LLM interface, kept as a
-        # pre-existing choice; the DeprecationWarning is expected noise, not
-        # a signal something's broken.
         warnings.simplefilter("ignore", DeprecationWarning)
         return LangchainLLMWrapper(chat)
 
@@ -202,7 +230,8 @@ def _build_default_embeddings(model: str) -> BaseRagasEmbeddings:
         return LangchainEmbeddingsWrapper(embeddings)
 
 
-class RagasJudge(Judge):
+class RagasJudge:
+    #: names of the metric columns evaluate() adds to the DataFrame
     metric_names = (
         "faithfulness",
         "answer_correctness",
@@ -271,7 +300,9 @@ class RagasJudge(Judge):
             ),
         )
         _log_usage(self.usage_log_path, usage_cb, len(run_df), self._model_name)
-        _log_judge_trace(self.trace_log_path, run_df, result.traces)
+        run_id = str(result.run_id) if result.run_id is not None else None
+        row_traces = _parse_row_traces(result.ragas_traces, run_id)
+        _log_judge_trace(self.trace_log_path, run_df, row_traces)
 
         scores = result.to_pandas()
         df = run_df.copy()

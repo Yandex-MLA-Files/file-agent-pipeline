@@ -68,6 +68,31 @@ def test_contexts_as_string_raises(tmp_path):
         load_run(path)
 
 
+def test_contexts_as_chunk_dicts_extracts_text(tmp_path):
+    df = _valid_df()
+    df["contexts"] = [
+        [{"rank": 1, "chunk_id": "c1", "text": "chunk 1", "score": 0.9}],
+        [{"rank": 1, "chunk_id": "c2", "text": "chunk 3", "score": 0.5}],
+    ]
+    path = tmp_path / "run.parquet"
+    df.to_parquet(path, index=False)
+    loaded = load_run(path)
+    assert loaded.loc[0, "contexts"] == ["chunk 1"]
+    assert loaded.loc[1, "contexts"] == ["chunk 3"]
+
+
+def test_contexts_chunk_dict_without_text_raises(tmp_path):
+    df = _valid_df()
+    df["contexts"] = [
+        [{"rank": 1, "chunk_id": "c1", "score": 0.9}],
+        [{"rank": 1, "chunk_id": "c2", "text": "chunk 3", "score": 0.5}],
+    ]
+    path = tmp_path / "run.parquet"
+    df.to_parquet(path, index=False)
+    with pytest.raises(RunValidationError, match="'text' key"):
+        load_run(path)
+
+
 def test_empty_answer_model_raises(tmp_path):
     df = _valid_df()
     df.loc[0, "answer_model"] = ""

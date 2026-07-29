@@ -22,21 +22,28 @@ def load_run(path: str | Path) -> pd.DataFrame:
     if not path.exists():
         raise RunValidationError(f"file not found: {path}")
 
-    if path.suffix == ".parquet":
-        df = pd.read_parquet(path)
-    elif path.suffix == ".csv":
-        df = pd.read_csv(path)
-        if "contexts" in df.columns:
-            # CSV can't hold native lists — expect a JSON-encoded string
-            import json
-
-            df["contexts"] = df["contexts"].apply(json.loads)
-    else:
-        raise RunValidationError(f"unsupported file format: {path.suffix}")
+    if path.suffix != ".parquet":
+        raise RunValidationError(f"unsupported file format: {path.suffix} (only .parquet)")
+    df = pd.read_parquet(path)
 
     _validate_schema(df)
-    df["contexts"] = df["contexts"].apply(list)
+    df["contexts"] = df["contexts"].apply(_normalize_contexts)
     return df
+
+
+def _normalize_contexts(contexts) -> list[str]:
+    # Accept a plain string or a retriever chunk dict with a "text" key.
+    normalized = []
+    for chunk in contexts:
+        if isinstance(chunk, str):
+            normalized.append(chunk)
+        elif isinstance(chunk, dict) and isinstance(chunk.get("text"), str):
+            normalized.append(chunk["text"])
+        else:
+            raise RunValidationError(
+                f"context chunk must be a string or a dict with a 'text' key, got: {chunk!r}"
+            )
+    return normalized
 
 
 def _validate_schema(df: pd.DataFrame) -> None:

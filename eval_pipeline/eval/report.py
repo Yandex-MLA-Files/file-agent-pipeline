@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -37,8 +40,6 @@ def build_report(
 
 def _json_default(obj):
 
-    import numpy as np
-
     if isinstance(obj, np.integer):
         return int(obj)
     if isinstance(obj, np.floating):
@@ -50,8 +51,6 @@ def _json_default(obj):
 
 def save_report(report: dict, scored_df: pd.DataFrame, out_dir: str | Path) -> Path:
     """Save the summary (report.json) and per-row scores (scored.parquet)."""
-    import json
-
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -70,9 +69,6 @@ def append_run_log(
     judge_name: str,
     log_path: str | Path = "runs_log.jsonl",
 ) -> None:
-
-    import json
-    from datetime import UTC, datetime
 
     entry = {
         "timestamp": datetime.now(UTC).isoformat(),

@@ -3,6 +3,7 @@ import re
 
 import pandas as pd
 import pytest
+from ragas.callbacks import ChainRun
 from ragas.metrics import (
     FactualCorrectness,
     Faithfulness,
@@ -11,7 +12,7 @@ from ragas.metrics import (
     ResponseRelevancy,
 )
 
-from eval.judge.ragas_judge import RagasJudge, _TokenUsageCallback, _usage_cost
+from eval.judge.ragas_judge import RagasJudge, _parse_row_traces, _TokenUsageCallback, _usage_cost
 
 _METRIC_OFFSETS = {
     "faithfulness": 0.01,
@@ -234,6 +235,67 @@ def test_evaluate_writes_a_trace_log_file_per_run(patched_metrics, tmp_path):
         # patched_metrics bypasses the real prompt calls, so no per-prompt
         # steps fire -- just check every metric got a (possibly empty) slot
         assert set(entry["reasoning_trace"].keys()) == set(_METRIC_OFFSETS.keys())
+
+
+def test_parse_row_traces_keeps_every_call_of_a_repeated_prompt_name():
+    # Mirrors what ragas' own tree looks like for a metric that calls the
+    # same-named prompt more than once per row -- e.g. context_precision
+    # checking each context chunk separately, or answer_correctness's NLI
+    # prompt firing for both the precision and recall direction. ragas'
+    # `parse_run_traces` keys these by prompt name and overwrites earlier
+    # calls; `_parse_row_traces` must keep all of them, in order.
+    ragas_traces = {
+        "root": ChainRun(
+            run_id="root",
+            parent_run_id=None,
+            name="evaluation",
+            inputs={},
+            metadata={},
+            children=["row0"],
+        ),
+        "row0": ChainRun(
+            run_id="row0",
+            parent_run_id="root",
+            name="row 0",
+            inputs={},
+            metadata={},
+            children=["metric0"],
+        ),
+        "metric0": ChainRun(
+            run_id="metric0",
+            parent_run_id="row0",
+            name="context_precision",
+            inputs={},
+            metadata={},
+            outputs={"output": 0.6},
+            children=["prompt0", "prompt1"],
+        ),
+        "prompt0": ChainRun(
+            run_id="prompt0",
+            parent_run_id="metric0",
+            name="context_precision_prompt",
+            inputs={"data": {"context": "chunk 1"}},
+            metadata={},
+            outputs={"output": {"verdict": 1}},
+        ),
+        "prompt1": ChainRun(
+            run_id="prompt1",
+            parent_run_id="metric0",
+            name="context_precision_prompt",
+            inputs={"data": {"context": "chunk 2"}},
+            metadata={},
+            outputs={"output": {"verdict": 0}},
+        ),
+    }
+
+    row_traces = _parse_row_traces(ragas_traces, run_id=None)
+
+    assert len(row_traces) == 1
+    assert row_traces[0]["scores"]["context_precision"] == 0.6
+    calls = row_traces[0]["calls"]["context_precision"]
+    assert len(calls) == 2
+    assert [c["input"]["context"] for c in calls] == ["chunk 1", "chunk 2"]
+    assert [c["output"]["verdict"] for c in calls] == [1, 0]
 
 
 def test_evaluate_writes_separate_trace_files_for_separate_runs(patched_metrics, tmp_path):
