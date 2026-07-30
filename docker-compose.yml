@@ -52,6 +52,7 @@ services:
     volumes:
       - /mnt/storage-1/file-agent-pipe/huggingface/pipeline:/root/.cache/huggingface
       - /mnt/storage-1/file-agent-pipe/easyocr:/root/.EasyOCR
+      - /mnt/storage-1/file-agent-pipe/logs/app:/app/logs
     depends_on:
       - vllm
       - jaeger
