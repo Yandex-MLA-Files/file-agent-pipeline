@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import pandas as pd
+
+REQUIRED_COLUMNS = ("id", "question", "answer_model", "contexts", "answer")
+
+
+@dataclass
+class RunValidationError(Exception):
+    message: str
+
+    def __str__(self) -> str:
+        return self.message
+
+
+def load_run(path: str | Path) -> pd.DataFrame:
+
+    path = Path(path)
+    if not path.exists():
+        raise RunValidationError(f"file not found: {path}")
+
+    if path.suffix != ".parquet":
+        raise RunValidationError(f"unsupported file format: {path.suffix} (only .parquet)")
+    df = pd.read_parquet(path)
+
+    _validate_schema(df)
+    df["contexts"] = df["contexts"].apply(_normalize_contexts)
+    return df
+
+
+def _normalize_contexts(contexts) -> list[str]:
+    # Accept a plain string or a retriever chunk dict with a "text" key.
+    normalized = []
+    for chunk in contexts:
+        if isinstance(chunk, str):
+            normalized.append(chunk)
+        elif isinstance(chunk, dict) and isinstance(chunk.get("text"), str):
+            normalized.append(chunk["text"])
+        else:
+            raise RunValidationError(
+                f"context chunk must be a string or a dict with a 'text' key, got: {chunk!r}"
+            )
+    return normalized
+
+
+def _validate_schema(df: pd.DataFrame) -> None:
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise RunValidationError(f"run file is missing required columns: {missing}")
+
+    if df["id"].isnull().any():
+        raise RunValidationError("some rows have an empty id")
+
+    dup_ids = df["id"][df["id"].duplicated()].tolist()
+    if dup_ids:
+        raise RunValidationError(f"duplicate ids: {dup_ids[:5]}")
+
+    bad_contexts = df[
+        ~df["contexts"].apply(lambda x: pd.api.types.is_list_like(x) and not isinstance(x, dict))
+    ]
+    if len(bad_contexts) > 0:
+        raise RunValidationError(
+            f"contexts must be list[str], but {len(bad_contexts)} row(s) "
+            f"aren't (first offending id: {bad_contexts['id'].iloc[0]}). "
+            f"Contexts were likely joined into a single string instead of "
+            f"kept as a list."
+        )
+
+    empty_answers = (
+        df["answer_model"].isnull().sum() + (df["answer_model"].astype(str).str.strip() == "").sum()
+    )
+    if empty_answers > 0:
+        raise RunValidationError(f"{empty_answers} row(s) with an empty answer_model")
