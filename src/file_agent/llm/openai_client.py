@@ -44,6 +44,7 @@ class OpenAILLMClient:
 
             text = text.strip()
             span.set_attribute("file_agent.response_length", len(text))
+            span.set_attribute("file_agent.response", text)
 
             usage = getattr(response, "usage", None)
             if usage is not None:
