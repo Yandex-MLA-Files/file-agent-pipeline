@@ -18,7 +18,10 @@ services:
     container_name: file-agent-vllm
     network_mode: host
     restart: unless-stopped
-    shm_size: "64mb"
+    ipc: host
+    environment:
+      - VLLM_USE_V1=0
+      - VLLM_ATTENTION_BACKEND=XFORMERS
     command:
       - --model
       - Qwen/Qwen2.5-7B-Instruct
@@ -36,7 +39,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
+              device_ids: ["0"]
               capabilities: [gpu]
 
   app:
@@ -46,6 +49,9 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    volumes:
+      - /mnt/storage-1/file-agent-pipe/huggingface/pipeline:/root/.cache/huggingface
+      - /mnt/storage-1/file-agent-pipe/easyocr:/root/.EasyOCR
     depends_on:
       - vllm
       - jaeger
