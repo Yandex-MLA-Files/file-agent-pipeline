@@ -158,7 +158,6 @@ else:
             st.session_state.get("search_cache_key") != search_cache_key
             or "search_results" not in st.session_state
         ):
-
             with resume_span(st.session_state.get("ingest_span")):
                 st.session_state["search_results"] = retriever.search(
                     query=normalized_query,
