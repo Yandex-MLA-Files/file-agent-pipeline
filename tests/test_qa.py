@@ -45,6 +45,34 @@ def test_build_context_from_results_preserves_chunk_texts():
     assert "block_id=block-1" in context
 
 
+def test_build_context_from_results_deduplicates_parent_passages():
+    parent = "Full section used to answer the question"
+    results = [
+        SearchResult(
+            chunk=Chunk(
+                id="chunk-1",
+                text="First fragment",
+                metadata={"context": parent, "page_number": 1},
+            ),
+            score=1.0,
+        ),
+        SearchResult(
+            chunk=Chunk(
+                id="chunk-2",
+                text="Second fragment",
+                metadata={"context": parent, "page_number": 1},
+            ),
+            score=0.5,
+        ),
+    ]
+
+    context = build_context_from_results(results)
+
+    assert context.count(parent) == 1
+    assert "First fragment" not in context
+    assert "Second fragment" not in context
+
+
 def test_build_qa_prompt_contains_question_and_context():
     prompt = build_qa_prompt(
         question="What is the document about?",
@@ -53,7 +81,10 @@ def test_build_qa_prompt_contains_question_and_context():
 
     assert "What is the document about?" in prompt
     assert "Document context" in prompt
-    assert "using only the context" in prompt
+    assert "используя только приведённый ниже контекст" in prompt
+    assert "ответ только на том же языке, что и вопрос" in prompt
+    assert "не меняйте отношения местами" in prompt
+    assert prompt.endswith("Ответ только на языке вопроса:")
 
 
 def test_answer_question_with_context_calls_llm_client_generate():

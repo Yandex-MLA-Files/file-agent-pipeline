@@ -18,7 +18,7 @@ from file_agent.rag import (
     load_documents,
 )
 
-SUPPORTED_TYPES = ["md", "pdf", "docx", "html", "htm", "xlsx", "pptx"]
+SUPPORTED_TYPES = ["md", "txt", "pdf", "docx", "html", "htm", "xlsx", "pptx"]
 TEXT_PREVIEW_LIMIT = 3000
 CHUNK_PREVIEW_LIMIT = 1000
 RETRIEVAL_STATE_KEYS = (

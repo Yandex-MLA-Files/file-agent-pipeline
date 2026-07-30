@@ -43,6 +43,17 @@ def test_parse_file_uses_markdown_parser(tmp_path):
     assert document.blocks[0].text == "Hello from pipeline"
 
 
+def test_parse_file_uses_txt_parser(tmp_path):
+    file_path = tmp_path / "example.txt"
+    file_path.write_text("Hello from TXT", encoding="utf-8")
+
+    document = parse_file(file_path)
+
+    assert document.file_name == "example.txt"
+    assert document.file_type == "txt"
+    assert document.blocks[0].text == "Hello from TXT"
+
+
 def test_parse_file_parses_pdf(tmp_path):
     file_path = tmp_path / "example.pdf"
     create_pdf(file_path, "Hello from PDF")
@@ -98,7 +109,7 @@ def test_parse_file_uses_pptx_parser(tmp_path):
 
 
 def test_parse_file_rejects_unsupported_extension(tmp_path):
-    file_path = tmp_path / "example.txt"
+    file_path = tmp_path / "example.csv"
     file_path.write_text("Unsupported", encoding="utf-8")
 
     with pytest.raises(ValueError, match="Unsupported file type"):

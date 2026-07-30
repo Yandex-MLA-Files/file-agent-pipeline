@@ -45,7 +45,7 @@ Users can upload one or more documents, preview extracted text, find relevant ch
 - A Streamlit UI for multi-file upload, preview, search, and answer generation.
 - Pytest coverage for the main layers.
 
-Supported extensions: `.md`, `.pdf`, `.docx`, `.html`, `.htm`, `.xlsx`, `.pptx`.
+Supported extensions: `.md`, `.txt`, `.pdf`, `.docx`, `.html`, `.htm`, `.xlsx`, `.pptx`.
 
 ## Repository layout
 

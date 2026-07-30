@@ -12,6 +12,7 @@ from file_agent.parsers.md_parser import MarkdownParser
 from file_agent.parsers.pdf_parser import PDFParser
 from file_agent.parsers.pptx_parser import PPTXParser
 from file_agent.parsers.routing import analyze_pdf
+from file_agent.parsers.txt_parser import TXTParser
 from file_agent.parsers.xlsx_parser import XLSXParser
 from file_agent.vlm.factory import create_vlm_client
 
@@ -48,6 +49,8 @@ def parse_file(
         return _parse_structured(path, enable_vlm=enable_vlm, enable_ocr=enable_ocr)
     if suffix == ".md":
         return MarkdownParser().parse(path)
+    if suffix == ".txt":
+        return TXTParser().parse(path)
     if suffix in {".html", ".htm"}:
         return HTMLParser().parse(path)
     if suffix == ".xlsx":
