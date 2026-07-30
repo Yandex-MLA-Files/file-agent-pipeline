@@ -1,12 +1,15 @@
 import logging
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
+from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 
 _configured = False
 
@@ -59,3 +62,32 @@ def _configure_cost_logger() -> None:
 
 
 tracer = trace.get_tracer("file_agent")
+
+SpanIdentity = tuple[int, int]
+
+
+def span_identity(span: trace.Span) -> SpanIdentity:
+    span_context = span.get_span_context()
+    return span_context.trace_id, span_context.span_id
+
+
+@contextmanager
+def resume_span(identity: SpanIdentity | None):
+    if identity is None:
+        yield
+        return
+
+    trace_id, span_id = identity
+    parent = NonRecordingSpan(
+        SpanContext(
+            trace_id=trace_id,
+            span_id=span_id,
+            is_remote=True,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        )
+    )
+    token = otel_context.attach(trace.set_span_in_context(parent))
+    try:
+        yield
+    finally:
+        otel_context.detach(token)
