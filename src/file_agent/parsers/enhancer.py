@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from file_agent.document import Block, BlockType, Document
+from file_agent.telemetry import tracer
 from file_agent.utils.image_extractor import extract_image_from_pdf
 from file_agent.vlm.base import VLMClient
 
@@ -74,26 +75,32 @@ class DocumentEnhancer:
                 self.max_figures,
             )
 
-        described = 0
-        for block in selected:
-            try:
-                image = extract_image_from_pdf(file_path, block.page_number, block.bbox)
-                if image is None:
-                    continue
+        with tracer.start_as_current_span("file_agent.enhance_document") as span:
+            span.set_attribute("file_agent.figure_count", len(selected))
+            span.set_attribute("file_agent.figure_candidates", len(candidates))
 
-                description = self.vlm_client.describe_image(image, FIGURE_PROMPT)
-                if not description:
-                    continue
-                block.vlm_description = description
-                # Fold the description into the block text so it becomes part of
-                # the indexed/searchable content and the Markdown export.
-                addition = f"[Image description]: {description}"
-                block.text = f"{block.text}\n\n{addition}".strip() if block.text else addition
-                described += 1
-                logger.debug("Described block %s on page %s", block.id, block.page_number)
-            except Exception as exc:
-                logger.warning("VLM description failed for block %s: %s", block.id, exc)
-                block.metadata["vlm_error"] = str(exc)
+            described = 0
+            for block in selected:
+                try:
+                    image = extract_image_from_pdf(file_path, block.page_number, block.bbox)
+                    if image is None:
+                        continue
+
+                    description = self.vlm_client.describe_image(image, FIGURE_PROMPT)
+                    if not description:
+                        continue
+                    block.vlm_description = description
+                    # Fold the description into the block text so it becomes part of
+                    # the indexed/searchable content and the Markdown export.
+                    addition = f"[Image description]: {description}"
+                    block.text = f"{block.text}\n\n{addition}".strip() if block.text else addition
+                    described += 1
+                    logger.debug("Described block %s on page %s", block.id, block.page_number)
+                except Exception as exc:
+                    logger.warning("VLM description failed for block %s: %s", block.id, exc)
+                    block.metadata["vlm_error"] = str(exc)
+
+            span.set_attribute("file_agent.described_count", described)
 
         if described:
             doc.metadata["vlm_described_figures"] = described

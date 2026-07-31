@@ -29,6 +29,27 @@ uv run streamlit run app.py
 
 Local inference setup: [docs/local_inference.md](docs/local_inference.md).
 
+## Tracing (OpenTelemetry + Jaeger)
+
+The pipeline is instrumented with OpenTelemetry (`src/file_agent/telemetry.py`).
+Spans are created in `parse_file`, `chunk_document`, `load_documents`,
+`index_documents`, `LanceDBRetriever.index`/`.search`, `answer_question_with_context`
+and `answer_indexed_documents`, and exported over OTLP/gRPC to Jaeger.
+
+Run Jaeger locally:
+
+```bash
+docker compose up -d jaeger
+```
+
+The UI is available at http://localhost:16686 (service `file-agent-pipeline`).
+
+Spans are sent to `localhost:4317` by default. Override the endpoint with the
+`OTEL_EXPORTER_OTLP_ENDPOINT` environment variable (see `.env.example`).
+
+If Jaeger isn't running, `configure_telemetry()` still works — spans are sent
+in the background via `BatchSpanProcessor` and simply won't arrive anywhere.
+
 ## Development
 
 ```bash

@@ -14,6 +14,7 @@ from file_agent.parsers.pptx_parser import PPTXParser
 from file_agent.parsers.routing import analyze_pdf
 from file_agent.parsers.txt_parser import TXTParser
 from file_agent.parsers.xlsx_parser import XLSXParser
+from file_agent.telemetry import tracer
 from file_agent.vlm.factory import create_vlm_client
 
 load_dotenv()
@@ -45,6 +46,24 @@ def parse_file(
     path = Path(file_path)
     suffix = path.suffix.lower()
 
+    with tracer.start_as_current_span("file_agent.parse_file") as span:
+        span.set_attribute("file_agent.file_name", path.name)
+        span.set_attribute("file_agent.file_suffix", suffix)
+        logger.info("Parsing file %s", path.name)
+
+        document = _parse_by_suffix(path, suffix, enable_vlm=enable_vlm, enable_ocr=enable_ocr)
+
+        span.set_attribute("file_agent.block_count", len(document.blocks))
+        logger.info("Parsed %s into %d block(s)", path.name, len(document.blocks))
+        return document
+
+
+def _parse_by_suffix(
+    path: Path,
+    suffix: str,
+    enable_vlm: bool | None,
+    enable_ocr: OcrMode,
+) -> Document:
     if suffix in {".pdf", ".docx"}:
         return _parse_structured(path, enable_vlm=enable_vlm, enable_ocr=enable_ocr)
     if suffix == ".md":

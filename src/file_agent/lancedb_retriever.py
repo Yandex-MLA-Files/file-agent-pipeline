@@ -1,4 +1,5 @@
 import json
+import logging
 from functools import lru_cache
 from typing import Protocol
 
@@ -9,6 +10,9 @@ from lancedb.rerankers import RRFReranker
 
 from file_agent.chunking import Chunk
 from file_agent.retrieval import SearchResult
+from file_agent.telemetry import tracer
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SEMANTIC_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DEFAULT_FTS_LANGUAGE = "Russian"
@@ -43,64 +47,77 @@ class LanceDBRetriever:
         self._table = None
 
     def index(self, chunks: list[Chunk]) -> None:
-        self.clear()
-        if not chunks:
-            return
+        with tracer.start_as_current_span("file_agent.retriever_index") as span:
+            span.set_attribute("file_agent.chunk_count", len(chunks))
 
-        texts = [chunk.text for chunk in chunks]
-        embeddings = self._encode(texts)
-        records = [
-            {
-                "chunk_id": chunk.id,
-                "text": chunk.text,
-                "vector": embeddings[index].tolist(),
-                "metadata_json": json.dumps(
-                    chunk.metadata,
-                    ensure_ascii=False,
-                    default=str,
-                ),
-            }
-            for index, chunk in enumerate(chunks)
-        ]
+            self.clear()
+            if not chunks:
+                return
 
-        self._table = self._connection.create_table(
-            self._table_name,
-            data=records,
-        )
-        self._table.create_index(
-            "text",
-            config=FTS(language=self._fts_language),
-        )
+            texts = [chunk.text for chunk in chunks]
+            embeddings = self._encode(texts)
+            records = [
+                {
+                    "chunk_id": chunk.id,
+                    "text": chunk.text,
+                    "vector": embeddings[index].tolist(),
+                    "metadata_json": json.dumps(
+                        chunk.metadata,
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                }
+                for index, chunk in enumerate(chunks)
+            ]
+
+            self._table = self._connection.create_table(
+                self._table_name,
+                data=records,
+            )
+            self._table.create_index(
+                "text",
+                config=FTS(language=self._fts_language),
+            )
+            logger.info("Indexed %d chunk(s) into table %r", len(chunks), self._table_name)
 
     def search(
         self,
         query: str,
         top_k: int = 5,
     ) -> list[SearchResult]:
-        if top_k <= 0 or self._table is None:
-            return []
+        with tracer.start_as_current_span("file_agent.retriever_search") as span:
+            span.set_attribute("file_agent.query", query)
+            span.set_attribute("file_agent.top_k", top_k)
 
-        query = query.strip()
-        if not query:
-            return []
+            if top_k <= 0 or self._table is None:
+                span.set_attribute("file_agent.result_count", 0)
+                return []
 
-        query_vector = self._encode([query])[0].tolist()
-        rows = (
-            self._table.search(
-                query_type="hybrid",
-                vector_column_name="vector",
-                fts_columns="text",
+            query = query.strip()
+            if not query:
+                span.set_attribute("file_agent.result_count", 0)
+                return []
+
+            query_vector = self._encode([query])[0].tolist()
+            rows = (
+                self._table.search(
+                    query_type="hybrid",
+                    vector_column_name="vector",
+                    fts_columns="text",
+                )
+                .vector(query_vector)
+                .text(query)
+                .distance_type("cosine")
+                .distance_range(upper_bound=1.0 - self._semantic_min_score)
+                .rerank(RRFReranker(K=self._rrf_k))
+                .limit(top_k)
+                .to_list()
             )
-            .vector(query_vector)
-            .text(query)
-            .distance_type("cosine")
-            .distance_range(upper_bound=1.0 - self._semantic_min_score)
-            .rerank(RRFReranker(K=self._rrf_k))
-            .limit(top_k)
-            .to_list()
-        )
 
-        return [self._to_search_result(row) for row in rows]
+            results = [self._to_search_result(row) for row in rows]
+            span.set_attribute("file_agent.result_count", len(results))
+            logger.info("Query %r returned %d result(s)", query, len(results))
+            return results
 
     def clear(self) -> None:
         self._connection.drop_table(self._table_name, ignore_missing=True)

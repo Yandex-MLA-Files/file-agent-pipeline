@@ -17,3 +17,5 @@ runs/
 
 /scripts/
 CLAUDE.md
+logs/
+.idea/
