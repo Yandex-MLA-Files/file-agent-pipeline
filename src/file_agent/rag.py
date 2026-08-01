@@ -3,10 +3,16 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal, cast
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from file_agent.agent_tools import (
+    TOOL_AGENT_SYSTEM_PROMPT,
+    ToolAgentContext,
+)
 from file_agent.chunking import Chunk
 from file_agent.document import Document
 from file_agent.lancedb_retriever import LanceDBRetriever
-from file_agent.llm.base import LLMClient
+from file_agent.llm.base import LLMClient, ToolCallingLLMClient
 from file_agent.rag_core import (
     RAGResponse,
     chunk_documents,
@@ -16,15 +22,15 @@ from file_agent.rag_core import (
 from file_agent.rag_graph import (
     IngestionContext,
     QAContext,
-    agentic_qa_graph,
     ingestion_graph,
     qa_graph,
+    tool_agent_graph,
 )
 from file_agent.retrieval import Retriever, SearchResult
 
-RAGMode = Literal["standard", "agentic"]
+RAGMode = Literal["standard", "tool_agent"]
 DEFAULT_RAG_MODE: RAGMode = "standard"
-DEFAULT_AGENTIC_MAX_RETRIES = 2
+DEFAULT_MAX_TOOL_ROUNDS = 4
 
 __all__ = [
     "RAGResponse",
@@ -38,7 +44,7 @@ __all__ = [
     "ingest_documents",
     "ingest_files",
     "load_documents",
-    "resolve_agentic_max_retries",
+    "resolve_max_tool_rounds",
     "resolve_rag_mode",
 ]
 
@@ -84,23 +90,32 @@ def answer_indexed_documents(
     documents_count: int,
     chunks_count: int,
     top_k: int = 5,
+    documents: list[Document] | None = None,
     mode: str | None = None,
-    max_retries: int | None = None,
+    max_tool_rounds: int | None = None,
 ) -> RAGResponse:
-    active_graph, context = _qa_runtime(
-        mode=mode,
-        max_retries=max_retries,
-        llm_client=llm_client,
-        retriever=retriever,
-    )
-    state = active_graph.invoke(
+    if resolve_rag_mode(mode) == "tool_agent":
+        return _answer_with_tool_agent(
+            question=question,
+            llm_client=llm_client,
+            retriever=retriever,
+            documents=documents or [],
+            documents_count=documents_count,
+            chunks_count=chunks_count,
+            max_tool_rounds=max_tool_rounds,
+        )
+
+    state = qa_graph.invoke(
         {
             "question": question,
             "top_k": top_k,
             "documents_count": documents_count,
             "chunks_count": chunks_count,
         },
-        context=context,
+        context=QAContext(
+            llm_client=llm_client,
+            retriever=retriever,
+        ),
     )
     return state["response"]
 
@@ -112,16 +127,24 @@ def answer_with_results(
     documents_count: int,
     chunks_count: int,
     retriever: Retriever | None = None,
+    documents: list[Document] | None = None,
     mode: str | None = None,
-    max_retries: int | None = None,
+    max_tool_rounds: int | None = None,
 ) -> RAGResponse:
-    active_graph, context = _qa_runtime(
-        mode=mode,
-        max_retries=max_retries,
-        llm_client=llm_client,
-        retriever=retriever,
-    )
-    state = active_graph.invoke(
+    if resolve_rag_mode(mode) == "tool_agent":
+        if retriever is None:
+            raise ValueError("A retriever is required for RAG_MODE=tool_agent")
+        return _answer_with_tool_agent(
+            question=question,
+            llm_client=llm_client,
+            retriever=retriever,
+            documents=documents or [],
+            documents_count=documents_count,
+            chunks_count=chunks_count,
+            max_tool_rounds=max_tool_rounds,
+        )
+
+    state = qa_graph.invoke(
         {
             "question": question,
             "results": results,
@@ -129,7 +152,7 @@ def answer_with_results(
             "documents_count": documents_count,
             "chunks_count": chunks_count,
         },
-        context=context,
+        context=QAContext(llm_client=llm_client),
     )
     return state["response"]
 
@@ -143,7 +166,7 @@ def answer_files(
     overlap: int = 100,
     retriever: Retriever | None = None,
     mode: str | None = None,
-    max_retries: int | None = None,
+    max_tool_rounds: int | None = None,
 ) -> RAGResponse:
     active_retriever = retriever or LanceDBRetriever()
     documents, chunks = ingest_files(
@@ -159,8 +182,9 @@ def answer_files(
         documents_count=len(documents),
         chunks_count=len(chunks),
         top_k=top_k,
+        documents=documents,
         mode=mode,
-        max_retries=max_retries,
+        max_tool_rounds=max_tool_rounds,
     )
 
 
@@ -173,7 +197,7 @@ def answer_documents(
     overlap: int = 100,
     retriever: Retriever | None = None,
     mode: str | None = None,
-    max_retries: int | None = None,
+    max_tool_rounds: int | None = None,
 ) -> RAGResponse:
     active_retriever = retriever or LanceDBRetriever()
     chunks = ingest_documents(
@@ -189,54 +213,64 @@ def answer_documents(
         documents_count=len(documents),
         chunks_count=len(chunks),
         top_k=top_k,
+        documents=documents,
         mode=mode,
-        max_retries=max_retries,
+        max_tool_rounds=max_tool_rounds,
     )
 
 
 def resolve_rag_mode(mode: str | None = None) -> RAGMode:
     value = (mode or os.getenv("RAG_MODE", DEFAULT_RAG_MODE)).strip().lower()
-    if value not in ("standard", "agentic"):
+    if value not in ("standard", "tool_agent"):
         raise ValueError(f"Unsupported RAG_MODE: {value}")
     return cast(RAGMode, value)
 
 
-def resolve_agentic_max_retries(max_retries: int | None = None) -> int:
+def resolve_max_tool_rounds(max_tool_rounds: int | None = None) -> int:
     value: int
-    if max_retries is not None:
-        value = max_retries
+    if max_tool_rounds is not None:
+        value = max_tool_rounds
     else:
-        raw_value = os.getenv("RAG_MAX_RETRIES", str(DEFAULT_AGENTIC_MAX_RETRIES))
+        raw_value = os.getenv("RAG_MAX_TOOL_ROUNDS", str(DEFAULT_MAX_TOOL_ROUNDS))
         try:
             value = int(raw_value)
         except ValueError as exc:
-            raise ValueError("RAG_MAX_RETRIES must be an integer") from exc
+            raise ValueError("RAG_MAX_TOOL_ROUNDS must be an integer") from exc
 
-    if value < 0:
-        raise ValueError("RAG_MAX_RETRIES must be greater than or equal to zero")
+    if value < 1:
+        raise ValueError("RAG_MAX_TOOL_ROUNDS must be greater than zero")
     return value
 
 
-def _qa_runtime(
-    mode: str | None,
-    max_retries: int | None,
+def _answer_with_tool_agent(
+    question: str,
     llm_client: LLMClient,
-    retriever: Retriever | None,
-):
-    active_mode = resolve_rag_mode(mode)
-    if active_mode == "agentic":
-        return (
-            agentic_qa_graph,
-            QAContext(
-                llm_client=llm_client,
-                retriever=retriever,
-                max_retries=resolve_agentic_max_retries(max_retries),
-            ),
-        )
-    return (
-        qa_graph,
-        QAContext(
+    retriever: Retriever,
+    documents: list[Document],
+    documents_count: int,
+    chunks_count: int,
+    max_tool_rounds: int | None,
+) -> RAGResponse:
+    if not isinstance(llm_client, ToolCallingLLMClient):
+        raise TypeError("The configured LLM client does not support native tool calling")
+
+    state = tool_agent_graph.invoke(
+        {
+            "messages": [
+                SystemMessage(content=TOOL_AGENT_SYSTEM_PROMPT),
+                HumanMessage(content=question),
+            ],
+            "question": question,
+            "sources": [],
+            "search_queries": [],
+            "documents_count": documents_count,
+            "chunks_count": chunks_count,
+        },
+        context=ToolAgentContext(
             llm_client=llm_client,
             retriever=retriever,
+            documents=documents,
+            max_tool_rounds=resolve_max_tool_rounds(max_tool_rounds),
         ),
     )
+    return state["response"]

@@ -1,18 +1,9 @@
 from file_agent.chunking import Chunk
 from file_agent.qa import (
-    CLARIFICATION_MESSAGE,
-    CLARIFICATION_MESSAGE_RU,
     NO_CONTEXT_MESSAGE,
     answer_question_with_context,
-    build_clarification_message,
     build_context_from_results,
-    build_context_grading_prompt,
     build_qa_prompt,
-    build_query_analysis_prompt,
-    build_query_rewrite_prompt,
-    normalize_rewritten_query,
-    parse_context_relevance,
-    parse_query_route,
 )
 from file_agent.retrieval import SearchResult
 
@@ -132,48 +123,3 @@ def test_answer_question_with_context_skips_llm_when_results_empty():
 
     assert answer == NO_CONTEXT_MESSAGE
     assert llm_client.prompts == []
-
-
-def test_agentic_prompts_include_inputs_and_expected_decisions():
-    analysis_prompt = build_query_analysis_prompt("What is the deadline?")
-    grading_prompt = build_context_grading_prompt(
-        question="What is the deadline?",
-        context="The deadline is Friday.",
-    )
-    rewrite_prompt = build_query_rewrite_prompt(
-        original_question="When is it due?",
-        previous_query="due date",
-    )
-
-    assert "What is the deadline?" in analysis_prompt
-    assert "retrieve" in analysis_prompt
-    assert "clarify" in analysis_prompt
-    assert "The deadline is Friday." in grading_prompt
-    assert "relevant" in grading_prompt
-    assert "irrelevant" in grading_prompt
-    assert "When is it due?" in rewrite_prompt
-    assert "due date" in rewrite_prompt
-
-
-def test_agentic_decision_parsers_use_safe_fallbacks():
-    assert parse_query_route("clarify") == "clarify"
-    assert parse_query_route("unexpected response") == "retrieve"
-    assert parse_context_relevance("irrelevant") is False
-    assert parse_context_relevance("not relevant") is False
-    assert parse_context_relevance("unexpected response") is True
-
-
-def test_normalize_rewritten_query_removes_common_wrappers():
-    assert (
-        normalize_rewritten_query(
-            '```text\nQuery: "project completion deadline"\n```',
-            fallback="original",
-        )
-        == "project completion deadline"
-    )
-    assert normalize_rewritten_query("", fallback="original") == "original"
-
-
-def test_clarification_message_follows_question_language():
-    assert build_clarification_message("What about it?") == CLARIFICATION_MESSAGE
-    assert build_clarification_message("А что с этим?") == CLARIFICATION_MESSAGE_RU

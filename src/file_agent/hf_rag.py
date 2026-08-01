@@ -193,6 +193,7 @@ def process_qa_record(
             documents_count=len(documents),
             chunks_count=len(chunks),
             top_k=top_k,
+            documents=documents,
         )
         contexts = serialize_search_results(response.sources)
 

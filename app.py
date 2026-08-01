@@ -4,17 +4,21 @@ import tempfile
 from pathlib import Path
 
 import streamlit as st
+from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).parent
 SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
+load_dotenv(PROJECT_ROOT / ".env")
 
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.factory import create_llm_client
 from file_agent.rag import (
+    answer_indexed_documents,
     answer_with_results,
     ingest_files,
+    resolve_rag_mode,
 )
 
 SUPPORTED_TYPES = ["md", "txt", "pdf", "docx", "html", "htm", "xlsx", "pptx"]
@@ -50,6 +54,8 @@ def _clear_retrieval_state() -> None:
 
 st.set_page_config(page_title="File Agent Pipeline")
 st.title("File Agent Pipeline")
+rag_mode = resolve_rag_mode()
+st.caption(f"RAG mode: `{rag_mode}`")
 
 uploaded_files = st.file_uploader(
     "Upload files",
@@ -139,7 +145,7 @@ else:
     results = []
     normalized_query = query.strip()
 
-    if normalized_query:
+    if normalized_query and rag_mode == "standard":
         search_cache_key = (
             files_fingerprint,
             normalized_query,
@@ -194,26 +200,44 @@ else:
             st.warning("Enter a question before generating an answer.")
         else:
             try:
-                response = answer_with_results(
-                    question=normalized_query,
-                    results=results,
-                    llm_client=create_llm_client(),
-                    documents_count=len(documents),
-                    chunks_count=len(chunks),
-                    retriever=retriever,
-                )
+                llm_client = create_llm_client(load_env=False)
+                if rag_mode == "tool_agent":
+                    response = answer_indexed_documents(
+                        question=normalized_query,
+                        llm_client=llm_client,
+                        retriever=retriever,
+                        documents_count=len(documents),
+                        chunks_count=len(chunks),
+                        top_k=int(top_k),
+                        documents=documents,
+                        mode=rag_mode,
+                    )
+                else:
+                    response = answer_with_results(
+                        question=normalized_query,
+                        results=results,
+                        llm_client=llm_client,
+                        documents_count=len(documents),
+                        chunks_count=len(chunks),
+                        mode=rag_mode,
+                    )
             except Exception as exc:
                 st.error(f"Could not generate answer: {exc}")
             else:
                 st.subheader("Answer")
                 st.write(response.answer)
-                if response.search_queries:
+                if response.search_queries or response.tool_calls:
                     with st.expander("RAG execution details"):
                         st.write(f"Stop reason: `{response.stop_reason}`")
-                        st.write(f"Query rewrites: {response.retry_count}")
-                        st.write("Search queries:")
-                        for search_query in response.search_queries:
-                            st.write(f"- {search_query}")
+                        if response.search_queries:
+                            st.write("Search queries:")
+                            for search_query in response.search_queries:
+                                st.write(f"- {search_query}")
+                        if response.tool_calls:
+                            st.write("Tool calls:")
+                            for tool_call in response.tool_calls:
+                                st.write(f"- `{tool_call['name']}`")
+                                st.json(tool_call["arguments"])
 
                 if response.sources:
                     st.subheader("Sources")

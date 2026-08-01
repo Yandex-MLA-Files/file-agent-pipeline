@@ -1,6 +1,21 @@
-from typing import Protocol
+from collections.abc import Sequence
+from typing import Protocol, runtime_checkable
+
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.tools import BaseTool
 
 
 class LLMClient(Protocol):
     def generate(self, prompt: str) -> str:
+        raise NotImplementedError
+
+
+@runtime_checkable
+class ToolCallingLLMClient(LLMClient, Protocol):
+    def chat_with_tools(
+        self,
+        messages: Sequence[BaseMessage],
+        tools: Sequence[BaseTool],
+    ) -> AIMessage:
+        """Return an assistant message that may contain native tool calls."""
         raise NotImplementedError

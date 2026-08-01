@@ -23,16 +23,20 @@ once and reuse the same in-memory LanceDB retriever for multiple questions.
 The QA workflow has two modes configured in `.env`:
 
 ```text
-RAG_MODE=standard  # retrieve -> generate
-RAG_MODE=agentic   # analyze -> retrieve -> grade -> rewrite/retry -> generate
-RAG_MAX_RETRIES=2  # maximum query rewrites in agentic mode
+RAG_MODE=standard    # retrieve -> generate
+RAG_MODE=tool_agent  # model -> document tools -> model -> final answer
+RAG_MAX_TOOL_ROUNDS=4
 ```
 
-Agentic retries are bounded. If the question needs clarification or no relevant
-context is found after the configured attempts, the graph stops without calling
-the answer-generation node. Query analysis, context grading, and every rewrite
-are additional LLM calls, so `agentic` mode trades latency and cost for better
-retrieval recovery.
+The tool agent can search the index multiple times, list uploaded documents, and
+inspect a document's table of contents. All tools are read-only and receive the
+active retriever and documents through LangGraph runtime context. Tool execution
+is bounded by `RAG_MAX_TOOL_ROUNDS`; after the limit, the model must answer from
+the observations already collected.
+
+`tool_agent` requires an OpenAI-compatible model and endpoint with native tool
+calling support. The standard mode continues to work with text-generation-only
+models.
 
 ## Setup
 

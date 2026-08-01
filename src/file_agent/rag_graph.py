@@ -1,26 +1,21 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Annotated, Literal, TypedDict
 
-from langgraph.graph import END, START, StateGraph
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 
+from file_agent.agent_tools import (
+    DOCUMENT_TOOLS,
+    TOOL_LIMIT_MESSAGE,
+    ToolAgentContext,
+)
 from file_agent.chunking import Chunk
 from file_agent.document import Document
 from file_agent.llm.base import LLMClient
-from file_agent.qa import (
-    NO_CONTEXT_MESSAGE,
-    QUERY_ROUTE_CLARIFY,
-    answer_question_with_context,
-    build_clarification_message,
-    build_context_from_results,
-    build_context_grading_prompt,
-    build_query_analysis_prompt,
-    build_query_rewrite_prompt,
-    normalize_rewritten_query,
-    parse_context_relevance,
-    parse_query_route,
-)
+from file_agent.qa import answer_question_with_context
 from file_agent.rag_core import (
     RAGResponse,
     chunk_documents,
@@ -46,17 +41,38 @@ class IngestionContext:
 
 class QAState(TypedDict, total=False):
     question: str
-    search_query: str
     top_k: int
     results: list[SearchResult]
     answer: str
-    query_route: str
-    context_relevant: bool
-    can_retry: bool
-    retry_count: int
-    max_retries: int
     search_queries: list[str]
     stop_reason: str
+    documents_count: int
+    chunks_count: int
+    response: RAGResponse
+
+
+def merge_search_results(
+    current: list[SearchResult],
+    new: list[SearchResult],
+) -> list[SearchResult]:
+    merged = list(current)
+    seen_chunk_ids = {result.chunk.id for result in current}
+    for result in new:
+        if result.chunk.id in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(result.chunk.id)
+        merged.append(result)
+    return merged
+
+
+def append_strings(current: list[str], new: list[str]) -> list[str]:
+    return [*current, *new]
+
+
+class ToolAgentState(MessagesState):
+    question: str
+    sources: Annotated[list[SearchResult], merge_search_results]
+    search_queries: Annotated[list[str], append_strings]
     documents_count: int
     chunks_count: int
     response: RAGResponse
@@ -66,7 +82,6 @@ class QAState(TypedDict, total=False):
 class QAContext:
     llm_client: LLMClient
     retriever: Retriever | None = None
-    max_retries: int = 2
 
 
 def load_documents_node(state: IngestionState) -> dict:
@@ -110,7 +125,7 @@ def retrieve_node(
     if retriever is None:
         raise ValueError("A retriever is required when search results are not precomputed")
 
-    search_query = state.get("search_query") or state["question"]
+    search_query = state["question"]
     results = retriever.search(
         query=search_query,
         top_k=state.get("top_k", 5),
@@ -119,7 +134,6 @@ def retrieve_node(
     search_queries.append(search_query)
     return {
         "results": results,
-        "search_query": search_query,
         "search_queries": search_queries,
     }
 
@@ -139,79 +153,6 @@ def generate_answer_node(
     }
 
 
-def analyze_question_node(
-    state: QAState,
-    runtime: Runtime[QAContext],
-) -> dict:
-    question = state["question"].strip()
-    decision = runtime.context.llm_client.generate(build_query_analysis_prompt(question))
-    return {
-        "query_route": parse_query_route(decision),
-        "search_query": state.get("search_query") or question,
-        "retry_count": state.get("retry_count", 0),
-        "max_retries": state.get("max_retries", runtime.context.max_retries),
-        "search_queries": list(state.get("search_queries", [])),
-    }
-
-
-def grade_context_node(
-    state: QAState,
-    runtime: Runtime[QAContext],
-) -> dict:
-    results = state.get("results", [])
-    if not results:
-        context_relevant = False
-    else:
-        context = build_context_from_results(results)
-        decision = runtime.context.llm_client.generate(
-            build_context_grading_prompt(
-                question=state["question"],
-                context=context,
-            )
-        )
-        context_relevant = parse_context_relevance(decision)
-
-    retry_count = state.get("retry_count", 0)
-    max_retries = state.get("max_retries", runtime.context.max_retries)
-    return {
-        "context_relevant": context_relevant,
-        "can_retry": runtime.context.retriever is not None and retry_count < max_retries,
-    }
-
-
-def rewrite_query_node(
-    state: QAState,
-    runtime: Runtime[QAContext],
-) -> dict:
-    previous_query = state.get("search_query") or state["question"]
-    rewritten = runtime.context.llm_client.generate(
-        build_query_rewrite_prompt(
-            original_question=state["question"],
-            previous_query=previous_query,
-        )
-    )
-    return {
-        "search_query": normalize_rewritten_query(rewritten, fallback=previous_query),
-        "retry_count": state.get("retry_count", 0) + 1,
-    }
-
-
-def clarify_question_node(state: QAState) -> dict:
-    return {
-        "answer": build_clarification_message(state["question"]),
-        "results": [],
-        "stop_reason": "clarification_needed",
-    }
-
-
-def no_context_node(state: QAState) -> dict:
-    return {
-        "answer": NO_CONTEXT_MESSAGE,
-        "results": [],
-        "stop_reason": "insufficient_context",
-    }
-
-
 def build_response_node(state: QAState) -> dict:
     return {
         "response": RAGResponse(
@@ -220,7 +161,7 @@ def build_response_node(state: QAState) -> dict:
             documents_count=state.get("documents_count", 0),
             chunks_count=state.get("chunks_count", 0),
             search_queries=list(state.get("search_queries", [])),
-            retry_count=state.get("retry_count", 0),
+            retry_count=0,
             stop_reason=state.get("stop_reason", "answer_generated"),
         )
     }
@@ -238,26 +179,6 @@ def route_qa_input(state: QAState) -> Literal["retrieve", "generate_answer"]:
     if "results" in state:
         return "generate_answer"
     return "retrieve"
-
-
-def route_after_question_analysis(
-    state: QAState,
-) -> Literal["clarify_question", "retrieve", "grade_context"]:
-    if state["query_route"] == QUERY_ROUTE_CLARIFY:
-        return "clarify_question"
-    if "results" in state:
-        return "grade_context"
-    return "retrieve"
-
-
-def route_after_context_grade(
-    state: QAState,
-) -> Literal["generate_answer", "rewrite_query", "no_context"]:
-    if state["context_relevant"]:
-        return "generate_answer"
-    if state["can_retry"]:
-        return "rewrite_query"
-    return "no_context"
 
 
 def build_ingestion_graph():
@@ -304,48 +225,100 @@ def build_qa_graph():
     return builder.compile(name="rag_qa")
 
 
-def build_agentic_qa_graph():
-    builder = StateGraph(
-        QAState,
-        context_schema=QAContext,
+def tool_agent_model_node(
+    state: ToolAgentState,
+    runtime: Runtime[ToolAgentContext],
+) -> dict:
+    messages = list(state["messages"])
+    completed_tool_rounds = _count_tool_rounds(messages)
+    available_tools = (
+        DOCUMENT_TOOLS if completed_tool_rounds < runtime.context.max_tool_rounds else []
     )
-    builder.add_node("analyze_question", analyze_question_node)
-    builder.add_node("retrieve", retrieve_node)
-    builder.add_node("grade_context", grade_context_node)
-    builder.add_node("rewrite_query", rewrite_query_node)
-    builder.add_node("clarify_question", clarify_question_node)
-    builder.add_node("no_context", no_context_node)
-    builder.add_node("generate_answer", generate_answer_node)
-    builder.add_node("build_response", build_response_node)
+    if not available_tools:
+        messages.insert(0, SystemMessage(content=TOOL_LIMIT_MESSAGE))
 
-    builder.add_edge(START, "analyze_question")
+    response = runtime.context.llm_client.chat_with_tools(
+        messages=messages,
+        tools=available_tools,
+    )
+    if not available_tools and response.tool_calls:
+        raise ValueError("LLM requested a tool after the tool-call limit was reached")
+    return {"messages": [response]}
+
+
+def route_tool_agent(
+    state: ToolAgentState,
+) -> Literal["tools", "build_response"]:
+    last_message = state["messages"][-1]
+    if isinstance(last_message, AIMessage) and last_message.tool_calls:
+        return "tools"
+    return "build_response"
+
+
+def build_tool_agent_response_node(state: ToolAgentState) -> dict:
+    last_message = state["messages"][-1]
+    if not isinstance(last_message, AIMessage) or last_message.tool_calls:
+        raise ValueError("Tool agent did not return a final answer")
+
+    search_queries = list(state.get("search_queries", []))
+    return {
+        "response": RAGResponse(
+            answer=str(last_message.content).strip(),
+            sources=list(state.get("sources", [])),
+            documents_count=state.get("documents_count", 0),
+            chunks_count=state.get("chunks_count", 0),
+            search_queries=search_queries,
+            retry_count=max(0, len(search_queries) - 1),
+            stop_reason="tool_agent_completed",
+            tool_calls=_collect_tool_calls(state["messages"]),
+        )
+    }
+
+
+def build_tool_agent_graph():
+    builder = StateGraph(
+        ToolAgentState,
+        context_schema=ToolAgentContext,
+    )
+    builder.add_node("agent_model", tool_agent_model_node)
+    builder.add_node(
+        "tools",
+        ToolNode(DOCUMENT_TOOLS, handle_tool_errors=True),
+    )
+    builder.add_node("build_response", build_tool_agent_response_node)
+    builder.add_edge(START, "agent_model")
     builder.add_conditional_edges(
-        "analyze_question",
-        route_after_question_analysis,
+        "agent_model",
+        route_tool_agent,
         {
-            "clarify_question": "clarify_question",
-            "retrieve": "retrieve",
-            "grade_context": "grade_context",
+            "tools": "tools",
+            "build_response": "build_response",
         },
     )
-    builder.add_edge("retrieve", "grade_context")
-    builder.add_conditional_edges(
-        "grade_context",
-        route_after_context_grade,
-        {
-            "generate_answer": "generate_answer",
-            "rewrite_query": "rewrite_query",
-            "no_context": "no_context",
-        },
-    )
-    builder.add_edge("rewrite_query", "retrieve")
-    builder.add_edge("clarify_question", "build_response")
-    builder.add_edge("no_context", "build_response")
-    builder.add_edge("generate_answer", "build_response")
+    builder.add_edge("tools", "agent_model")
     builder.add_edge("build_response", END)
-    return builder.compile(name="agentic_rag_qa")
+    return builder.compile(name="rag_tool_agent")
+
+
+def _count_tool_rounds(messages: list[BaseMessage]) -> int:
+    return sum(1 for message in messages if isinstance(message, AIMessage) and message.tool_calls)
+
+
+def _collect_tool_calls(messages: list[BaseMessage]) -> list[dict]:
+    collected = []
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            continue
+        for tool_call in message.tool_calls:
+            collected.append(
+                {
+                    "name": tool_call["name"],
+                    "arguments": dict(tool_call["args"]),
+                }
+            )
+    return collected
 
 
 ingestion_graph = build_ingestion_graph()
 qa_graph = build_qa_graph()
-agentic_qa_graph = build_agentic_qa_graph()
+tool_agent_graph = build_tool_agent_graph()

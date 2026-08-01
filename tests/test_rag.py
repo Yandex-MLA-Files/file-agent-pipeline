@@ -1,4 +1,5 @@
 import pytest
+from langchain_core.messages import AIMessage
 
 from file_agent.chunking import Chunk
 from file_agent.rag import (
@@ -6,7 +7,7 @@ from file_agent.rag import (
     answer_files,
     answer_indexed_documents,
     answer_with_results,
-    resolve_agentic_max_retries,
+    resolve_max_tool_rounds,
     resolve_rag_mode,
 )
 from file_agent.retrieval import SearchResult
@@ -21,13 +22,16 @@ class DummyLLM:
         return "Generated answer"
 
 
-class SequenceLLM:
+class ToolSequenceLLM:
     def __init__(self, responses):
         self.responses = list(responses)
 
     def generate(self, prompt: str) -> str:
+        raise AssertionError("generate must not be used in tool_agent mode")
+
+    def chat_with_tools(self, messages, tools):
         if not self.responses:
-            raise AssertionError("Unexpected LLM call")
+            raise AssertionError("Unexpected tool-calling LLM invocation")
         return self.responses.pop(0)
 
 
@@ -160,18 +164,33 @@ def test_answer_with_results_uses_precomputed_search_results():
     assert "Precomputed context" in llm_client.prompts[0]
 
 
-def test_answer_indexed_documents_can_use_agentic_mode():
+def test_answer_indexed_documents_can_use_tool_agent_mode():
     retriever = FakeRetriever()
     retriever.index(
         [
             Chunk(
                 id="chunk-1",
-                text="Agentic context",
+                text="Tool context",
                 metadata={"source_file": "notes.md"},
             )
         ]
     )
-    llm_client = SequenceLLM(["retrieve", "relevant", "Agentic answer"])
+    llm_client = ToolSequenceLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "tool context", "top_k": 5},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Tool agent answer"),
+        ]
+    )
 
     response = answer_indexed_documents(
         question="What is the context?",
@@ -179,20 +198,20 @@ def test_answer_indexed_documents_can_use_agentic_mode():
         retriever=retriever,
         documents_count=1,
         chunks_count=1,
-        mode="agentic",
+        mode="tool_agent",
     )
 
-    assert response.answer == "Agentic answer"
-    assert response.search_queries == ["What is the context?"]
+    assert response.answer == "Tool agent answer"
+    assert response.search_queries == ["tool context"]
     assert llm_client.responses == []
 
 
-def test_rag_mode_and_retry_settings_can_come_from_environment(monkeypatch):
-    monkeypatch.setenv("RAG_MODE", "agentic")
-    monkeypatch.setenv("RAG_MAX_RETRIES", "4")
+def test_rag_mode_and_tool_round_limit_can_come_from_environment(monkeypatch):
+    monkeypatch.setenv("RAG_MODE", "tool_agent")
+    monkeypatch.setenv("RAG_MAX_TOOL_ROUNDS", "4")
 
-    assert resolve_rag_mode() == "agentic"
-    assert resolve_agentic_max_retries() == 4
+    assert resolve_rag_mode() == "tool_agent"
+    assert resolve_max_tool_rounds() == 4
 
 
 @pytest.mark.parametrize("mode", ["unknown", "agent"])
@@ -201,21 +220,21 @@ def test_resolve_rag_mode_rejects_unknown_modes(mode):
         resolve_rag_mode(mode)
 
 
-@pytest.mark.parametrize("value", [-1, -10])
-def test_resolve_agentic_max_retries_rejects_negative_values(value):
-    with pytest.raises(ValueError, match="greater than or equal to zero"):
-        resolve_agentic_max_retries(value)
+@pytest.mark.parametrize("value", [0, -1])
+def test_resolve_max_tool_rounds_rejects_non_positive_values(value):
+    with pytest.raises(ValueError, match="greater than zero"):
+        resolve_max_tool_rounds(value)
 
 
-def test_resolve_agentic_max_retries_rejects_non_integer_environment_value(monkeypatch):
-    monkeypatch.setenv("RAG_MAX_RETRIES", "many")
+def test_resolve_max_tool_rounds_rejects_non_integer_environment_value(monkeypatch):
+    monkeypatch.setenv("RAG_MAX_TOOL_ROUNDS", "many")
 
     with pytest.raises(ValueError, match="must be an integer"):
-        resolve_agentic_max_retries()
+        resolve_max_tool_rounds()
 
 
-def test_standard_mode_does_not_read_agentic_retry_setting(monkeypatch):
-    monkeypatch.setenv("RAG_MAX_RETRIES", "many")
+def test_standard_mode_does_not_read_tool_round_setting(monkeypatch):
+    monkeypatch.setenv("RAG_MAX_TOOL_ROUNDS", "many")
     llm_client = DummyLLM()
     results = [
         SearchResult(
@@ -234,3 +253,15 @@ def test_standard_mode_does_not_read_agentic_retry_setting(monkeypatch):
     )
 
     assert response.answer == "Generated answer"
+
+
+def test_tool_agent_mode_requires_tool_calling_llm():
+    with pytest.raises(TypeError, match="does not support native tool calling"):
+        answer_indexed_documents(
+            question="Question",
+            llm_client=DummyLLM(),
+            retriever=FakeRetriever(),
+            documents_count=0,
+            chunks_count=0,
+            mode="tool_agent",
+        )

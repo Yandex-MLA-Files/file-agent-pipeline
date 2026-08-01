@@ -21,6 +21,7 @@ dependencies = [
     "openai>=2.45.0",
     "lancedb>=0.34.0",
     "langgraph>=1.2.8,<2.0.0",
+    "langchain-core>=1.5.1,<2.0.0",
 ]
 
 [dependency-groups]
