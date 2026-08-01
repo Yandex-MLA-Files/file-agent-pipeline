@@ -20,6 +20,20 @@ QA:        question -> retrieval -> answer generation -> response
 Keeping ingestion separate lets the Streamlit application index uploaded files
 once and reuse the same in-memory LanceDB retriever for multiple questions.
 
+The QA workflow has two modes configured in `.env`:
+
+```text
+RAG_MODE=standard  # retrieve -> generate
+RAG_MODE=agentic   # analyze -> retrieve -> grade -> rewrite/retry -> generate
+RAG_MAX_RETRIES=2  # maximum query rewrites in agentic mode
+```
+
+Agentic retries are bounded. If the question needs clarification or no relevant
+context is found after the configured attempts, the graph stops without calling
+the answer-generation node. Query analysis, context grading, and every rewrite
+are additional LLM calls, so `agentic` mode trades latency and cost for better
+retrieval recovery.
+
 ## Setup
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).

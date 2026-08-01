@@ -1,7 +1,16 @@
+import re
+
 from file_agent.llm.base import LLMClient
 from file_agent.retrieval import SearchResult
 
 NO_CONTEXT_MESSAGE = "No relevant context was found in the document to answer the question."
+CLARIFICATION_MESSAGE = "Please make the question more specific before searching the documents."
+CLARIFICATION_MESSAGE_RU = "Пожалуйста, уточните вопрос перед поиском по документам."
+
+QUERY_ROUTE_RETRIEVE = "retrieve"
+QUERY_ROUTE_CLARIFY = "clarify"
+CONTEXT_RELEVANT = "relevant"
+CONTEXT_IRRELEVANT = "irrelevant"
 
 
 def select_context_passages(
@@ -64,6 +73,95 @@ def build_qa_prompt(question: str, context: str) -> str:
         f"Вопрос:\n{question}\n\n"
         "Ответ только на языке вопроса:"
     )
+
+
+def build_query_analysis_prompt(question: str) -> str:
+    return (
+        "Classify whether the user's question is specific enough to search in uploaded "
+        "documents.\n"
+        "Return exactly one lowercase token and nothing else:\n"
+        "- retrieve: the question contains enough meaning to attempt document retrieval;\n"
+        "- clarify: the question is empty, only refers to missing prior context, or is too "
+        "vague to form a useful search query.\n"
+        "Prefer retrieve when uncertain. Do not answer the question.\n\n"
+        f"Question:\n{question}\n\n"
+        "Decision:"
+    )
+
+
+def parse_query_route(response: str) -> str:
+    tokens = _decision_tokens(response)
+    if QUERY_ROUTE_CLARIFY in tokens:
+        return QUERY_ROUTE_CLARIFY
+    return QUERY_ROUTE_RETRIEVE
+
+
+def build_context_grading_prompt(question: str, context: str) -> str:
+    return (
+        "Decide whether the retrieved document context contains information that could "
+        "help answer the question.\n"
+        "Return exactly one lowercase token and nothing else:\n"
+        "- relevant: at least one passage is meaningfully related to the question;\n"
+        "- irrelevant: the passages are unrelated or provide no useful evidence.\n"
+        "Do not answer the question.\n\n"
+        f"Question:\n{question}\n\n"
+        f"Retrieved context:\n{context}\n\n"
+        "Decision:"
+    )
+
+
+def parse_context_relevance(response: str) -> bool:
+    tokens = _decision_tokens(response)
+    # An unrecognized grader response falls back to the existing standard-RAG
+    # behavior instead of discarding potentially useful retrieval results.
+    explicitly_irrelevant = (
+        CONTEXT_IRRELEVANT in tokens
+        or "not_relevant" in tokens
+        or {"not", CONTEXT_RELEVANT}.issubset(tokens)
+    )
+    return not explicitly_irrelevant
+
+
+def build_query_rewrite_prompt(
+    original_question: str,
+    previous_query: str,
+) -> str:
+    return (
+        "Rewrite the question as a concise semantic-search query for a document index.\n"
+        "Preserve the original meaning, include important entities and constraints, and "
+        "do not invent facts.\n"
+        "Return only the rewritten query without a label, explanation, or quotation "
+        "marks.\n\n"
+        f"Original question:\n{original_question}\n\n"
+        f"Previous search query:\n{previous_query}\n\n"
+        "Rewritten query:"
+    )
+
+
+def normalize_rewritten_query(response: str, fallback: str) -> str:
+    lines = [line.strip() for line in response.replace("```", "").splitlines() if line.strip()]
+    if lines and lines[0].casefold() in {"text", "plaintext", "markdown"}:
+        lines.pop(0)
+    if not lines:
+        return fallback
+
+    query = re.sub(
+        r"^(?:rewritten\s+query|search\s+query|query)\s*:\s*",
+        "",
+        lines[0],
+        flags=re.IGNORECASE,
+    ).strip(" \"'")
+    return query or fallback
+
+
+def build_clarification_message(question: str) -> str:
+    if re.search(r"[А-Яа-яЁё]", question):
+        return CLARIFICATION_MESSAGE_RU
+    return CLARIFICATION_MESSAGE
+
+
+def _decision_tokens(response: str) -> set[str]:
+    return set(re.findall(r"[a-z_]+", response.casefold()))
 
 
 def answer_question_with_context(

@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from file_agent.chunking import Chunk, chunk_document, get_embedding_tokenizer
@@ -14,6 +14,9 @@ class RAGResponse:
     sources: list[SearchResult]
     documents_count: int
     chunks_count: int
+    search_queries: list[str] = field(default_factory=list)
+    retry_count: int = 0
+    stop_reason: str = "answer_generated"
 
 
 def load_documents(file_paths: Iterable[str | Path]) -> list[Document]:

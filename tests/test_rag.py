@@ -1,9 +1,13 @@
+import pytest
+
 from file_agent.chunking import Chunk
 from file_agent.rag import (
     answer_documents,
     answer_files,
     answer_indexed_documents,
     answer_with_results,
+    resolve_agentic_max_retries,
+    resolve_rag_mode,
 )
 from file_agent.retrieval import SearchResult
 
@@ -15,6 +19,16 @@ class DummyLLM:
     def generate(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return "Generated answer"
+
+
+class SequenceLLM:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def generate(self, prompt: str) -> str:
+        if not self.responses:
+            raise AssertionError("Unexpected LLM call")
+        return self.responses.pop(0)
 
 
 class FakeRetriever:
@@ -144,3 +158,79 @@ def test_answer_with_results_uses_precomputed_search_results():
     assert response.chunks_count == 1
     assert len(llm_client.prompts) == 1
     assert "Precomputed context" in llm_client.prompts[0]
+
+
+def test_answer_indexed_documents_can_use_agentic_mode():
+    retriever = FakeRetriever()
+    retriever.index(
+        [
+            Chunk(
+                id="chunk-1",
+                text="Agentic context",
+                metadata={"source_file": "notes.md"},
+            )
+        ]
+    )
+    llm_client = SequenceLLM(["retrieve", "relevant", "Agentic answer"])
+
+    response = answer_indexed_documents(
+        question="What is the context?",
+        llm_client=llm_client,
+        retriever=retriever,
+        documents_count=1,
+        chunks_count=1,
+        mode="agentic",
+    )
+
+    assert response.answer == "Agentic answer"
+    assert response.search_queries == ["What is the context?"]
+    assert llm_client.responses == []
+
+
+def test_rag_mode_and_retry_settings_can_come_from_environment(monkeypatch):
+    monkeypatch.setenv("RAG_MODE", "agentic")
+    monkeypatch.setenv("RAG_MAX_RETRIES", "4")
+
+    assert resolve_rag_mode() == "agentic"
+    assert resolve_agentic_max_retries() == 4
+
+
+@pytest.mark.parametrize("mode", ["unknown", "agent"])
+def test_resolve_rag_mode_rejects_unknown_modes(mode):
+    with pytest.raises(ValueError, match="Unsupported RAG_MODE"):
+        resolve_rag_mode(mode)
+
+
+@pytest.mark.parametrize("value", [-1, -10])
+def test_resolve_agentic_max_retries_rejects_negative_values(value):
+    with pytest.raises(ValueError, match="greater than or equal to zero"):
+        resolve_agentic_max_retries(value)
+
+
+def test_resolve_agentic_max_retries_rejects_non_integer_environment_value(monkeypatch):
+    monkeypatch.setenv("RAG_MAX_RETRIES", "many")
+
+    with pytest.raises(ValueError, match="must be an integer"):
+        resolve_agentic_max_retries()
+
+
+def test_standard_mode_does_not_read_agentic_retry_setting(monkeypatch):
+    monkeypatch.setenv("RAG_MAX_RETRIES", "many")
+    llm_client = DummyLLM()
+    results = [
+        SearchResult(
+            chunk=Chunk(id="chunk-1", text="Context", metadata={}),
+            score=1.0,
+        )
+    ]
+
+    response = answer_with_results(
+        question="Question",
+        results=results,
+        llm_client=llm_client,
+        documents_count=1,
+        chunks_count=1,
+        mode="standard",
+    )
+
+    assert response.answer == "Generated answer"

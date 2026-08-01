@@ -200,12 +200,20 @@ else:
                     llm_client=create_llm_client(),
                     documents_count=len(documents),
                     chunks_count=len(chunks),
+                    retriever=retriever,
                 )
             except Exception as exc:
                 st.error(f"Could not generate answer: {exc}")
             else:
                 st.subheader("Answer")
                 st.write(response.answer)
+                if response.search_queries:
+                    with st.expander("RAG execution details"):
+                        st.write(f"Stop reason: `{response.stop_reason}`")
+                        st.write(f"Query rewrites: {response.retry_count}")
+                        st.write("Search queries:")
+                        for search_query in response.search_queries:
+                            st.write(f"- {search_query}")
 
                 if response.sources:
                     st.subheader("Sources")
