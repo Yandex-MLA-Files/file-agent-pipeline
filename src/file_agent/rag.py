@@ -27,6 +27,7 @@ from file_agent.rag_graph import (
     tool_agent_graph,
 )
 from file_agent.retrieval import Retriever, SearchResult
+from file_agent.telemetry import tracer
 
 RAGMode = Literal["standard", "tool_agent"]
 DEFAULT_RAG_MODE: RAGMode = "standard"
@@ -94,30 +95,37 @@ def answer_indexed_documents(
     mode: str | None = None,
     max_tool_rounds: int | None = None,
 ) -> RAGResponse:
-    if resolve_rag_mode(mode) == "tool_agent":
-        return _answer_with_tool_agent(
-            question=question,
-            llm_client=llm_client,
-            retriever=retriever,
-            documents=documents or [],
-            documents_count=documents_count,
-            chunks_count=chunks_count,
-            max_tool_rounds=max_tool_rounds,
-        )
+    with tracer.start_as_current_span("file_agent.answer_indexed_documents") as span:
+        span.set_attribute("file_agent.question", question)
+        span.set_attribute("file_agent.top_k", top_k)
 
-    state = qa_graph.invoke(
-        {
-            "question": question,
-            "top_k": top_k,
-            "documents_count": documents_count,
-            "chunks_count": chunks_count,
-        },
-        context=QAContext(
-            llm_client=llm_client,
-            retriever=retriever,
-        ),
-    )
-    return state["response"]
+        if resolve_rag_mode(mode) == "tool_agent":
+            response = _answer_with_tool_agent(
+                question=question,
+                llm_client=llm_client,
+                retriever=retriever,
+                documents=documents or [],
+                documents_count=documents_count,
+                chunks_count=chunks_count,
+                max_tool_rounds=max_tool_rounds,
+            )
+        else:
+            state = qa_graph.invoke(
+                {
+                    "question": question,
+                    "top_k": top_k,
+                    "documents_count": documents_count,
+                    "chunks_count": chunks_count,
+                },
+                context=QAContext(
+                    llm_client=llm_client,
+                    retriever=retriever,
+                ),
+            )
+            response = state["response"]
+
+        span.set_attribute("file_agent.result_count", len(response.sources))
+        return response
 
 
 def answer_with_results(

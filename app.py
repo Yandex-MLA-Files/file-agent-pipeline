@@ -20,6 +20,9 @@ from file_agent.rag import (
     ingest_files,
     resolve_rag_mode,
 )
+from file_agent.telemetry import configure_telemetry, resume_span, span_identity, tracer
+
+configure_telemetry()
 
 SUPPORTED_TYPES = ["md", "txt", "pdf", "docx", "html", "htm", "xlsx", "pptx"]
 TEXT_PREVIEW_LIMIT = 3000
@@ -32,6 +35,7 @@ RETRIEVAL_STATE_KEYS = (
     "lancedb_retriever",
     "search_cache_key",
     "search_results",
+    "ingest_span",
 )
 
 
@@ -77,8 +81,10 @@ else:
                 file_paths.append(file_path)
 
             try:
-                retriever = LanceDBRetriever()
-                documents, chunks = ingest_files(file_paths, retriever)
+                with tracer.start_as_current_span("file_agent.ingest_files") as ingest_span:
+                    retriever = LanceDBRetriever()
+                    documents, chunks = ingest_files(file_paths, retriever)
+                    ingest_span_identity = span_identity(ingest_span)
             except Exception as exc:
                 st.error(f"Could not parse or index uploaded files: {exc}")
                 st.stop()
@@ -94,6 +100,7 @@ else:
             block.text for document in documents for block in document.blocks
         )
         st.session_state["lancedb_retriever"] = retriever
+        st.session_state["ingest_span"] = ingest_span_identity
 
     documents = st.session_state["indexed_documents"]
     chunks = st.session_state["indexed_chunks"]
@@ -155,10 +162,11 @@ else:
             st.session_state.get("search_cache_key") != search_cache_key
             or "search_results" not in st.session_state
         ):
-            st.session_state["search_results"] = retriever.search(
-                query=normalized_query,
-                top_k=int(top_k),
-            )
+            with resume_span(st.session_state.get("ingest_span")):
+                st.session_state["search_results"] = retriever.search(
+                    query=normalized_query,
+                    top_k=int(top_k),
+                )
             st.session_state["search_cache_key"] = search_cache_key
 
         results = st.session_state["search_results"]
@@ -200,27 +208,33 @@ else:
             st.warning("Enter a question before generating an answer.")
         else:
             try:
-                llm_client = create_llm_client(load_env=False)
-                if rag_mode == "tool_agent":
-                    response = answer_indexed_documents(
-                        question=normalized_query,
-                        llm_client=llm_client,
-                        retriever=retriever,
-                        documents_count=len(documents),
-                        chunks_count=len(chunks),
-                        top_k=int(top_k),
-                        documents=documents,
-                        mode=rag_mode,
-                    )
-                else:
-                    response = answer_with_results(
-                        question=normalized_query,
-                        results=results,
-                        llm_client=llm_client,
-                        documents_count=len(documents),
-                        chunks_count=len(chunks),
-                        mode=rag_mode,
-                    )
+                with (
+                    resume_span(st.session_state.get("ingest_span")),
+                    tracer.start_as_current_span("file_agent.ask_question") as question_span,
+                ):
+                    question_span.set_attribute("file_agent.question", normalized_query)
+                    question_span.set_attribute("file_agent.top_k", int(top_k))
+                    llm_client = create_llm_client(load_env=False)
+                    if rag_mode == "tool_agent":
+                        response = answer_indexed_documents(
+                            question=normalized_query,
+                            llm_client=llm_client,
+                            retriever=retriever,
+                            documents_count=len(documents),
+                            chunks_count=len(chunks),
+                            top_k=int(top_k),
+                            documents=documents,
+                            mode=rag_mode,
+                        )
+                    else:
+                        response = answer_with_results(
+                            question=normalized_query,
+                            results=results,
+                            llm_client=llm_client,
+                            documents_count=len(documents),
+                            chunks_count=len(chunks),
+                            mode=rag_mode,
+                        )
             except Exception as exc:
                 st.error(f"Could not generate answer: {exc}")
             else:

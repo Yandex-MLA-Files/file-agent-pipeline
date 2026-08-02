@@ -9,10 +9,15 @@ produces an explainable per-page decision plus a document-level summary. The
 pipeline uses it to turn Docling's OCR on only when it is actually required.
 """
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 import fitz  # PyMuPDF
+
+from file_agent.telemetry import tracer
+
+logger = logging.getLogger(__name__)
 
 # A page with fewer characters than this has essentially no usable text layer.
 MIN_CHARS_FOR_TEXT_LAYER = 100
@@ -120,8 +125,24 @@ def _decide_ocr(char_count: int, image_count: int, image_area_ratio: float) -> t
 
 def analyze_pdf(pdf_path: Path) -> PdfAnalysis:
     """Analyze every page of a PDF and decide which pages require OCR."""
-    pages: list[PageAnalysis] = []
-    with fitz.open(str(pdf_path)) as pdf:
-        for index, page in enumerate(pdf, start=1):
-            pages.append(_analyze_page(page, index))
-    return PdfAnalysis(pages=pages)
+    with tracer.start_as_current_span("file_agent.analyze_pdf") as span:
+        span.set_attribute("file_agent.file_name", Path(pdf_path).name)
+
+        pages: list[PageAnalysis] = []
+        with fitz.open(str(pdf_path)) as pdf:
+            for index, page in enumerate(pdf, start=1):
+                pages.append(_analyze_page(page, index))
+
+        analysis = PdfAnalysis(pages=pages)
+
+        span.set_attribute("file_agent.page_count", len(pages))
+        span.set_attribute("file_agent.needs_ocr", analysis.needs_ocr)
+        span.set_attribute("file_agent.scanned_ratio", analysis.scanned_ratio)
+        logger.info(
+            "Analyzed %s: %d page(s), needs_ocr=%s, scanned_ratio=%.2f",
+            Path(pdf_path).name,
+            len(pages),
+            analysis.needs_ocr,
+            analysis.scanned_ratio,
+        )
+        return analysis

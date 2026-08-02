@@ -10,6 +10,7 @@ from docling.document_converter import DocumentConverter
 
 from file_agent.document import Block, BlockType, Document
 from file_agent.parsers.base import BaseParser
+from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
 
@@ -153,46 +154,56 @@ class DoclingParser(BaseParser):
 
     def parse(self, file_path: Path) -> Document:
         path = Path(file_path)
-        result = self._converter.convert(path)
-        docling_doc = result.document
 
-        page_heights = self._page_heights(docling_doc)
+        with tracer.start_as_current_span("file_agent.docling_parse") as span:
+            span.set_attribute("file_agent.file_name", path.name)
+            span.set_attribute("file_agent.do_ocr", self.do_ocr)
+            if self.ocr_engine:
+                span.set_attribute("file_agent.ocr_engine", self.ocr_engine)
 
-        blocks: list[Block] = []
-        for item, level in docling_doc.iterate_items():
-            block = self._item_to_block(item, level, docling_doc, page_heights, path)
-            if block is not None:
-                blocks.append(block)
+            result = self._converter.convert(path)
+            docling_doc = result.document
 
-        if not blocks:
-            blocks.append(
-                Block(
-                    id="block-empty",
-                    text="",
-                    type=BlockType.TEXT.value,
-                    metadata={
-                        "source_file": path.name,
-                        "warning": "empty document or no extractable content",
-                    },
-                    block_type=BlockType.TEXT,
-                    page_number=1,
+            page_heights = self._page_heights(docling_doc)
+
+            blocks: list[Block] = []
+            for item, level in docling_doc.iterate_items():
+                block = self._item_to_block(item, level, docling_doc, page_heights, path)
+                if block is not None:
+                    blocks.append(block)
+
+            if not blocks:
+                blocks.append(
+                    Block(
+                        id="block-empty",
+                        text="",
+                        type=BlockType.TEXT.value,
+                        metadata={
+                            "source_file": path.name,
+                            "warning": "empty document or no extractable content",
+                        },
+                        block_type=BlockType.TEXT,
+                        page_number=1,
+                    )
                 )
+
+            native_markdown = self._export_markdown(docling_doc)
+
+            document = Document(
+                file_name=path.name,
+                file_type=path.suffix.lower().lstrip("."),
+                blocks=blocks,
+                metadata={
+                    "parsing_method": "docling_ocr" if self.do_ocr else "docling",
+                    "ocr_engine": self.ocr_engine,
+                    "docling_markdown": native_markdown,
+                },
             )
+            document.build_table_of_contents()
 
-        native_markdown = self._export_markdown(docling_doc)
-
-        document = Document(
-            file_name=path.name,
-            file_type=path.suffix.lower().lstrip("."),
-            blocks=blocks,
-            metadata={
-                "parsing_method": "docling_ocr" if self.do_ocr else "docling",
-                "ocr_engine": self.ocr_engine,
-                "docling_markdown": native_markdown,
-            },
-        )
-        document.build_table_of_contents()
-        return document
+            span.set_attribute("file_agent.block_count", len(blocks))
+            logger.info("Docling parsed %s into %d block(s)", path.name, len(blocks))
+            return document
 
     # -- helpers ------------------------------------------------------------
 

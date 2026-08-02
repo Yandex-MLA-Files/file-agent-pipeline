@@ -15,5 +15,7 @@ runs/
 
 *.log
 
-scripts/
+/scripts/
 CLAUDE.md
+logs/
+.idea/

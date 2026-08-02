@@ -6,6 +6,7 @@ from functools import lru_cache
 from typing import Any, Protocol
 
 from file_agent.document import Block, BlockType, Document
+from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
 
@@ -219,11 +220,20 @@ def chunk_document(
     if overlap >= max_chars:
         raise ValueError("overlap must be smaller than max_chars")
 
-    budget = _build_budget(max_chars, overlap, min_chars, max_tokens, tokenizer)
-    chunker = _Chunker(document, budget)
-    for section in _group_sections(document.blocks):
-        chunker.add_section(section)
-    return chunker.finish()
+    with tracer.start_as_current_span("file_agent.chunk_document") as span:
+        span.set_attribute("file_agent.block_count", len(document.blocks))
+        span.set_attribute("file_agent.max_chars", max_chars)
+        span.set_attribute("file_agent.overlap", overlap)
+
+        budget = _build_budget(max_chars, overlap, min_chars, max_tokens, tokenizer)
+        chunker = _Chunker(document, budget)
+        for section in _group_sections(document.blocks):
+            chunker.add_section(section)
+        chunks = chunker.finish()
+
+        span.set_attribute("file_agent.chunk_count", len(chunks))
+        logger.info("Chunked %d block(s) into %d chunk(s)", len(document.blocks), len(chunks))
+        return chunks
 
 
 def _group_sections(blocks: list[Block]) -> list[_Section]:

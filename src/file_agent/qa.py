@@ -1,5 +1,10 @@
+import logging
+
 from file_agent.llm.base import LLMClient
 from file_agent.retrieval import SearchResult
+from file_agent.telemetry import tracer
+
+logger = logging.getLogger(__name__)
 
 NO_CONTEXT_MESSAGE = "No relevant context was found in the document to answer the question."
 
@@ -71,9 +76,17 @@ def answer_question_with_context(
     results: list[SearchResult],
     llm_client: LLMClient,
 ) -> str:
-    if not results:
-        return NO_CONTEXT_MESSAGE
+    with tracer.start_as_current_span("file_agent.answer_question_with_context") as span:
+        span.set_attribute("file_agent.question", question)
+        span.set_attribute("file_agent.result_count", len(results))
 
-    context = build_context_from_results(results)
-    prompt = build_qa_prompt(question, context)
-    return llm_client.generate(prompt)
+        if not results:
+            logger.info("No search results for question %r, skipping LLM call", question)
+            return NO_CONTEXT_MESSAGE
+
+        context = build_context_from_results(results)
+        prompt = build_qa_prompt(question, context)
+        span.set_attribute("file_agent.prompt_length", len(prompt))
+
+        logger.info("Answering question %r with %d context result(s)", question, len(results))
+        return llm_client.generate(prompt)

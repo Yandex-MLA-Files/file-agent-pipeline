@@ -22,6 +22,7 @@ from file_agent.rag_core import (
     load_documents,
 )
 from file_agent.retrieval import Retriever, SearchResult
+from file_agent.telemetry import tracer
 
 
 class IngestionState(TypedDict, total=False):
@@ -113,7 +114,10 @@ def index_documents_node(
     state: IngestionState,
     runtime: Runtime[IngestionContext],
 ) -> dict:
-    runtime.context.retriever.index(state["chunks"])
+    with tracer.start_as_current_span("file_agent.index_documents") as span:
+        span.set_attribute("file_agent.document_count", len(state["documents"]))
+        span.set_attribute("file_agent.chunk_count", len(state["chunks"]))
+        runtime.context.retriever.index(state["chunks"])
     return {}
 
 

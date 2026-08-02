@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -7,6 +8,9 @@ from file_agent.chunking import Chunk, chunk_document, get_embedding_tokenizer
 from file_agent.document import Document
 from file_agent.pipeline import parse_file
 from file_agent.retrieval import Retriever, SearchResult
+from file_agent.telemetry import tracer
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -22,7 +26,12 @@ class RAGResponse:
 
 
 def load_documents(file_paths: Iterable[str | Path]) -> list[Document]:
-    return [parse_file(file_path) for file_path in file_paths]
+    file_paths = list(file_paths)
+    with tracer.start_as_current_span("file_agent.load_documents") as span:
+        span.set_attribute("file_agent.file_count", len(file_paths))
+        documents = [parse_file(file_path) for file_path in file_paths]
+        logger.info("Loaded %d document(s)", len(documents))
+        return documents
 
 
 def chunk_documents(
@@ -55,10 +64,14 @@ def index_documents(
     max_chars: int = 1000,
     overlap: int = 100,
 ) -> list[Chunk]:
-    chunks = chunk_documents(
-        documents=documents,
-        max_chars=max_chars,
-        overlap=overlap,
-    )
-    retriever.index(chunks)
-    return chunks
+    with tracer.start_as_current_span("file_agent.index_documents") as span:
+        span.set_attribute("file_agent.document_count", len(documents))
+        chunks = chunk_documents(
+            documents=documents,
+            max_chars=max_chars,
+            overlap=overlap,
+        )
+        retriever.index(chunks)
+        span.set_attribute("file_agent.chunk_count", len(chunks))
+        logger.info("Indexed %d chunk(s) from %d document(s)", len(chunks), len(documents))
+        return chunks
