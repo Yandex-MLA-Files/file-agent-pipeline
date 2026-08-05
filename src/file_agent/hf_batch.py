@@ -49,6 +49,7 @@ def generate_hf_qa_records(
     retriever: Retriever | None = None,
     resume: bool = False,
     use_router: bool = False,
+    router_llm_client: LLMClient | None = None,
 ) -> BatchGenerationResult:
     validate_qa_dataset(dataset)
     if not isinstance(dataset_id, str) or not dataset_id.strip():
@@ -71,6 +72,7 @@ def generate_hf_qa_records(
         max_chars=max_chars,
         overlap=overlap,
         use_router=use_router,
+        router_llm_client=router_llm_client,
     )
     records: list[GeneratedQARecord] = []
     processed_count = 0
@@ -108,6 +110,7 @@ def generate_hf_qa_records(
                 retriever=retriever,
                 document_loader=document_loader,
                 use_router=use_router,
+                router_llm_client=router_llm_client,
             )
             _validate_generated_record(generated_record, record)
             _write_checkpoint(
@@ -171,6 +174,7 @@ def build_generation_parameters(
     max_chars: int,
     overlap: int,
     use_router: bool = False,
+    router_llm_client: LLMClient | None = None,
 ) -> dict[str, Any]:
     prompt_template = build_qa_prompt(
         question="{question}",
@@ -182,6 +186,9 @@ def build_generation_parameters(
         "model_id": _model_identifier(llm_client),
         "temperature": _optional_scalar_attribute(llm_client, "temperature"),
         "max_tokens": _optional_scalar_attribute(llm_client, "max_tokens"),
+        "router_model_id": (
+            _model_identifier(router_llm_client) if router_llm_client is not None else None
+        ),
         "retriever": _component_identifier(retriever) if retriever is not None else "default",
         "rag_pipeline_version": RAG_PIPELINE_VERSION,
         "use_router": use_router,

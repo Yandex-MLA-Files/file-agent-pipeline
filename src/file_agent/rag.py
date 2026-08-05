@@ -113,9 +113,11 @@ def answer_indexed_documents_with_routing(
     documents_count: int,
     chunks_count: int,
     top_k: int = 5,
+    router_llm_client: LLMClient | None = None,
 ) -> RAGResponse:
+    active_router_llm_client = router_llm_client or llm_client
     with tracer.start_as_current_span("file_agent.answer_indexed_documents_with_routing") as span:
-        query_type = classify_query(question, llm_client)
+        query_type = classify_query(question, active_router_llm_client)
         span.set_attribute("file_agent.query_type", query_type.value)
 
         if query_type == QueryType.COMPLEX:
@@ -126,6 +128,7 @@ def answer_indexed_documents_with_routing(
                 documents_count=documents_count,
                 chunks_count=chunks_count,
                 top_k=top_k,
+                router_llm_client=active_router_llm_client,
             )
         else:
             response = answer_indexed_documents(
@@ -147,11 +150,13 @@ def answer_indexed_documents_with_plan(
     documents_count: int,
     chunks_count: int,
     top_k: int = 5,
+    router_llm_client: LLMClient | None = None,
 ) -> RAGResponse:
+    active_router_llm_client = router_llm_client or llm_client
     with tracer.start_as_current_span("file_agent.answer_indexed_documents_with_plan") as span:
         span.set_attribute("file_agent.question", question)
 
-        subqueries = plan_subqueries(question, llm_client)
+        subqueries = plan_subqueries(question, active_router_llm_client)
         span.set_attribute("file_agent.subquery_count", len(subqueries))
 
         results_by_subquery = [

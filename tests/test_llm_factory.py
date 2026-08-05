@@ -8,7 +8,9 @@ from file_agent.llm.factory import (
     DEFAULT_YANDEX_BASE_URL,
     DEFAULT_YANDEX_MODEL,
     LOCAL_API_KEY_PLACEHOLDER,
+    create_generation_llm_client,
     create_llm_client,
+    create_router_llm_client,
 )
 from file_agent.llm.openai_client import OpenAILLMClient
 
@@ -97,6 +99,32 @@ def test_factory_rejects_unknown_backend(monkeypatch):
 
     with pytest.raises(ValueError, match="Unsupported LLM_BACKEND"):
         create_llm_client(load_env=False)
+
+
+def test_create_generation_llm_client_always_uses_local_backend(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "yandex")
+    monkeypatch.setenv("LOCAL_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+    monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+
+    client = create_generation_llm_client(load_env=False)
+
+    assert isinstance(client, OpenAILLMClient)
+    assert client.model == "Qwen/Qwen2.5-7B-Instruct"
+    assert client.client.kwargs["base_url"] == DEFAULT_LOCAL_BASE_URL
+
+
+def test_create_router_llm_client_always_uses_yandex_backend(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "local")
+    monkeypatch.setenv("YANDEX_API_KEY", "api-key")
+    monkeypatch.setenv("YANDEX_MODEL", "gpt://folder/deepseek-v4-flash")
+    monkeypatch.delenv("YANDEX_FOLDER_ID", raising=False)
+
+    client = create_router_llm_client(load_env=False)
+
+    assert isinstance(client, OpenAILLMClient)
+    assert client.model == "gpt://folder/deepseek-v4-flash"
+    assert client.client.kwargs["base_url"] == DEFAULT_YANDEX_BASE_URL
 
 
 def test_factory_requires_yandex_api_key(monkeypatch):

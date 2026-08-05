@@ -18,7 +18,7 @@ from file_agent.hf_batch import (
 from file_agent.hf_dataset import QADatasetRecord, load_qa_dataset
 from file_agent.hf_output import GeneratedDatasetArtifacts, save_generated_qa_dataset
 from file_agent.llm.base import LLMClient
-from file_agent.llm.factory import create_llm_client
+from file_agent.llm.factory import create_generation_llm_client, create_router_llm_client
 
 MANIFEST_SCHEMA_VERSION = 2
 MANIFEST_FILE_NAME = "run_manifest.json"
@@ -71,13 +71,23 @@ class HFGenerationRunResult:
 def run_hf_dataset_generation(
     config: HFGenerationConfig,
     llm_client: LLMClient | None = None,
+    router_llm_client: LLMClient | None = None,
 ) -> HFGenerationRunResult:
     """Run dataset loading, RAG generation, final export, and manifest writing."""
     _validate_output_directory(config.output_dir)
 
     active_llm_client = (
-        llm_client if llm_client is not None else create_llm_client(env_file=config.env_file)
+        llm_client
+        if llm_client is not None
+        else create_generation_llm_client(env_file=config.env_file)
     )
+    active_router_llm_client = None
+    if config.use_router:
+        active_router_llm_client = (
+            router_llm_client
+            if router_llm_client is not None
+            else create_router_llm_client(env_file=config.env_file)
+        )
     source_dataset = load_qa_dataset(
         dataset_id=config.dataset_id,
         config_name=config.config_name,
@@ -107,6 +117,7 @@ def run_hf_dataset_generation(
         overlap=config.overlap,
         resume=config.resume,
         use_router=config.use_router,
+        router_llm_client=active_router_llm_client,
     )
     artifacts = save_generated_qa_dataset(
         source_dataset=selected_dataset,
@@ -118,6 +129,7 @@ def run_hf_dataset_generation(
         dataset=selected_dataset,
         available_rows=available_rows,
         llm_client=active_llm_client,
+        router_llm_client=active_router_llm_client,
         batch_result=batch_result,
         artifacts=artifacts,
     )
@@ -225,6 +237,7 @@ def _build_manifest(
     llm_client: LLMClient,
     batch_result: BatchGenerationResult,
     artifacts: GeneratedDatasetArtifacts,
+    router_llm_client: LLMClient | None = None,
 ) -> dict[str, Any]:
     generation_parameters = build_generation_parameters(
         dataset_id=config.dataset_id,
@@ -235,6 +248,7 @@ def _build_manifest(
         max_chars=config.max_chars,
         overlap=config.overlap,
         use_router=config.use_router,
+        router_llm_client=router_llm_client,
     )
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
