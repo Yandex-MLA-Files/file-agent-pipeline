@@ -21,6 +21,24 @@ class FakeOpenAI:
         self.chat = SimpleNamespace(completions=self.completions)
 
 
+class ScriptedCompletions:
+    """Returns each response in order, one per create() call."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.responses.pop(0)
+
+
+class ScriptedOpenAI:
+    def __init__(self, responses):
+        self.completions = ScriptedCompletions(responses)
+        self.chat = SimpleNamespace(completions=self.completions)
+
+
 def _chat_completion(content: str | None, include_choice: bool = True):
     choices = []
     if include_choice:
@@ -70,7 +88,44 @@ def test_generate_raises_clear_error_for_empty_response(response):
     client = OpenAILLMClient(
         client=FakeOpenAI(response),
         model="test-model",
+        empty_response_retries=0,
+        retry_delay_seconds=0,
     )
 
     with pytest.raises(ValueError, match="empty response"):
         client.generate("Question")
+
+
+def test_generate_retries_after_empty_response_then_succeeds():
+    openai_client = ScriptedOpenAI(
+        [
+            _chat_completion(""),
+            _chat_completion("Generated answer"),
+        ]
+    )
+    client = OpenAILLMClient(
+        client=openai_client,
+        model="test-model",
+        empty_response_retries=2,
+        retry_delay_seconds=0,
+    )
+
+    answer = client.generate("Question")
+
+    assert answer == "Generated answer"
+    assert len(openai_client.completions.calls) == 2
+
+
+def test_generate_raises_after_exhausting_retries():
+    openai_client = ScriptedOpenAI([_chat_completion("") for _ in range(3)])
+    client = OpenAILLMClient(
+        client=openai_client,
+        model="test-model",
+        empty_response_retries=2,
+        retry_delay_seconds=0,
+    )
+
+    with pytest.raises(ValueError, match="empty response"):
+        client.generate("Question")
+
+    assert len(openai_client.completions.calls) == 3
