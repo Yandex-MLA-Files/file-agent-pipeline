@@ -1,3 +1,7 @@
+import base64
+import json
+from types import SimpleNamespace
+
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -8,10 +12,12 @@ from opentelemetry.trace import StatusCode
 from file_agent.chunking import Chunk, chunk_document
 from file_agent.document import Block, Document
 from file_agent.lancedb_retriever import LanceDBRetriever
+from file_agent.llm.openai_client import OpenAILLMClient
 from file_agent.pipeline import parse_file
 from file_agent.qa import answer_question_with_context
 from file_agent.rag import answer_indexed_documents, index_documents, ingest_files, load_documents
 from file_agent.retrieval import SearchResult
+from file_agent.telemetry import _create_langfuse_exporter
 
 
 class FakeEmbeddingModel:
@@ -101,6 +107,13 @@ def test_retriever_index_and_search_create_spans(span_exporter):
     span_names = [span.name for span in span_exporter.get_finished_spans()]
     assert "file_agent.retriever_index" in span_names
     assert "file_agent.retriever_search" in span_names
+    search_span = next(
+        span
+        for span in span_exporter.get_finished_spans()
+        if span.name == "file_agent.retriever_search"
+    )
+    assert search_span.attributes["langfuse.observation.type"] == "retriever"
+    assert json.loads(search_span.attributes["langfuse.observation.input"])["query"] == "python"
 
 
 def test_load_documents_creates_span(tmp_path, span_exporter):
@@ -155,6 +168,88 @@ def test_answer_indexed_documents_creates_span(span_exporter):
 
     span_names = [span.name for span in span_exporter.get_finished_spans()]
     assert "file_agent.answer_indexed_documents" in span_names
+    answer_span = next(
+        span
+        for span in span_exporter.get_finished_spans()
+        if span.name == "file_agent.answer_indexed_documents"
+    )
+    assert answer_span.attributes["langfuse.observation.type"] == "agent"
+    assert (
+        json.loads(answer_span.attributes["langfuse.observation.input"])["question"] == "question?"
+    )
+    assert json.loads(answer_span.attributes["langfuse.observation.output"])["answer"] == (
+        "Generated answer"
+    )
+
+
+def test_llm_generation_has_langfuse_attributes(span_exporter):
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="Generated answer"))],
+                usage=SimpleNamespace(
+                    prompt_tokens=10,
+                    completion_tokens=3,
+                    total_tokens=13,
+                ),
+            )
+
+    fake_openai = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    span_exporter.clear()
+
+    OpenAILLMClient(client=fake_openai, model="test-model").generate("Question")
+
+    generation = next(
+        span
+        for span in span_exporter.get_finished_spans()
+        if span.name == "file_agent.llm_generate"
+    )
+    assert generation.attributes["langfuse.observation.type"] == "generation"
+    assert generation.attributes["langfuse.observation.model.name"] == "test-model"
+    assert json.loads(generation.attributes["langfuse.observation.usage_details"]) == {
+        "prompt_tokens": 10,
+        "completion_tokens": 3,
+        "total_tokens": 13,
+    }
+
+
+def test_langfuse_exporter_is_disabled_without_configuration(monkeypatch):
+    for name in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert _create_langfuse_exporter() is None
+
+
+def test_langfuse_exporter_uses_http_endpoint_and_basic_auth(monkeypatch):
+    calls = []
+
+    def fake_exporter(**kwargs):
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "http://localhost:3000/")
+    monkeypatch.setattr("file_agent.telemetry.OTLPHTTPSpanExporter", fake_exporter)
+
+    exporter = _create_langfuse_exporter()
+
+    assert exporter is not None
+    assert calls[0]["endpoint"] == "http://localhost:3000/api/public/otel/v1/traces"
+    credentials = base64.b64encode(b"pk-test:sk-test").decode("ascii")
+    assert calls[0]["headers"] == {
+        "Authorization": f"Basic {credentials}",
+        "x-langfuse-ingestion-version": "4",
+    }
+
+
+def test_langfuse_exporter_rejects_partial_configuration(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "http://localhost:3000")
+
+    with pytest.raises(ValueError, match="LANGFUSE_SECRET_KEY"):
+        _create_langfuse_exporter()
 
 
 def test_parse_file_records_error_status_on_exception(tmp_path, span_exporter):

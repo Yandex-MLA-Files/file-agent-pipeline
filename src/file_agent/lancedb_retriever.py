@@ -88,14 +88,21 @@ class LanceDBRetriever:
         with tracer.start_as_current_span("file_agent.retriever_search") as span:
             span.set_attribute("file_agent.query", query)
             span.set_attribute("file_agent.top_k", top_k)
+            span.set_attribute("langfuse.observation.type", "retriever")
+            span.set_attribute(
+                "langfuse.observation.input",
+                json.dumps({"query": query, "top_k": top_k}, ensure_ascii=False),
+            )
 
             if top_k <= 0 or self._table is None:
                 span.set_attribute("file_agent.result_count", 0)
+                span.set_attribute("langfuse.observation.output", "[]")
                 return []
 
             query = query.strip()
             if not query:
                 span.set_attribute("file_agent.result_count", 0)
+                span.set_attribute("langfuse.observation.output", "[]")
                 return []
 
             query_vector = self._encode([query])[0].tolist()
@@ -116,6 +123,13 @@ class LanceDBRetriever:
 
             results = [self._to_search_result(row) for row in rows]
             span.set_attribute("file_agent.result_count", len(results))
+            span.set_attribute(
+                "langfuse.observation.output",
+                json.dumps(
+                    [{"chunk_id": result.chunk.id, "score": result.score} for result in results],
+                    ensure_ascii=False,
+                ),
+            )
             logger.info("Query %r returned %d result(s)", query, len(results))
             return results
 

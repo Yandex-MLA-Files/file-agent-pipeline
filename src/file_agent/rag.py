@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import Iterable
 from pathlib import Path
@@ -98,8 +99,15 @@ def answer_indexed_documents(
     with tracer.start_as_current_span("file_agent.answer_indexed_documents") as span:
         span.set_attribute("file_agent.question", question)
         span.set_attribute("file_agent.top_k", top_k)
+        span.set_attribute("langfuse.observation.type", "agent")
+        span.set_attribute(
+            "langfuse.observation.input",
+            json.dumps({"question": question, "top_k": top_k}, ensure_ascii=False),
+        )
 
-        if resolve_rag_mode(mode) == "tool_agent":
+        active_mode = resolve_rag_mode(mode)
+        span.set_attribute("langfuse.observation.metadata.rag_mode", active_mode)
+        if active_mode == "tool_agent":
             response = _answer_with_tool_agent(
                 question=question,
                 llm_client=llm_client,
@@ -125,6 +133,17 @@ def answer_indexed_documents(
             response = state["response"]
 
         span.set_attribute("file_agent.result_count", len(response.sources))
+        span.set_attribute(
+            "langfuse.observation.output",
+            json.dumps(
+                {
+                    "answer": response.answer,
+                    "source_chunk_ids": [result.chunk.id for result in response.sources],
+                    "stop_reason": response.stop_reason,
+                },
+                ensure_ascii=False,
+            ),
+        )
         return response
 
 
@@ -139,30 +158,60 @@ def answer_with_results(
     mode: str | None = None,
     max_tool_rounds: int | None = None,
 ) -> RAGResponse:
-    if resolve_rag_mode(mode) == "tool_agent":
-        if retriever is None:
-            raise ValueError("A retriever is required for RAG_MODE=tool_agent")
-        return _answer_with_tool_agent(
-            question=question,
-            llm_client=llm_client,
-            retriever=retriever,
-            documents=documents or [],
-            documents_count=documents_count,
-            chunks_count=chunks_count,
-            max_tool_rounds=max_tool_rounds,
+    with tracer.start_as_current_span("file_agent.answer_with_results") as span:
+        span.set_attribute("file_agent.question", question)
+        span.set_attribute("file_agent.result_count", len(results))
+        span.set_attribute("langfuse.observation.type", "agent")
+        span.set_attribute(
+            "langfuse.observation.input",
+            json.dumps(
+                {
+                    "question": question,
+                    "source_chunk_ids": [result.chunk.id for result in results],
+                },
+                ensure_ascii=False,
+            ),
         )
 
-    state = qa_graph.invoke(
-        {
-            "question": question,
-            "results": results,
-            "search_queries": [question],
-            "documents_count": documents_count,
-            "chunks_count": chunks_count,
-        },
-        context=QAContext(llm_client=llm_client),
-    )
-    return state["response"]
+        active_mode = resolve_rag_mode(mode)
+        span.set_attribute("langfuse.observation.metadata.rag_mode", active_mode)
+        if active_mode == "tool_agent":
+            if retriever is None:
+                raise ValueError("A retriever is required for RAG_MODE=tool_agent")
+            response = _answer_with_tool_agent(
+                question=question,
+                llm_client=llm_client,
+                retriever=retriever,
+                documents=documents or [],
+                documents_count=documents_count,
+                chunks_count=chunks_count,
+                max_tool_rounds=max_tool_rounds,
+            )
+        else:
+            state = qa_graph.invoke(
+                {
+                    "question": question,
+                    "results": results,
+                    "search_queries": [question],
+                    "documents_count": documents_count,
+                    "chunks_count": chunks_count,
+                },
+                context=QAContext(llm_client=llm_client),
+            )
+            response = state["response"]
+
+        span.set_attribute(
+            "langfuse.observation.output",
+            json.dumps(
+                {
+                    "answer": response.answer,
+                    "source_chunk_ids": [result.chunk.id for result in response.sources],
+                    "stop_reason": response.stop_reason,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        return response
 
 
 def answer_files(

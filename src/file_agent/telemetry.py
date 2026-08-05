@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 from contextlib import contextmanager
@@ -6,6 +7,9 @@ from pathlib import Path
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+    OTLPSpanExporter as OTLPHTTPSpanExporter,
+)
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -30,6 +34,11 @@ def configure_telemetry(service_name: str = "file-agent-pipeline") -> None:
         insecure=True,
     )
     provider.add_span_processor(BatchSpanProcessor(exporter))
+
+    langfuse_exporter = _create_langfuse_exporter()
+    if langfuse_exporter is not None:
+        provider.add_span_processor(BatchSpanProcessor(langfuse_exporter))
+
     trace.set_tracer_provider(provider)
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -44,6 +53,34 @@ def configure_telemetry(service_name: str = "file-agent-pipeline") -> None:
     _configure_cost_logger()
 
     _configured = True
+
+
+def _create_langfuse_exporter() -> OTLPHTTPSpanExporter | None:
+    public_key = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
+    secret_key = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
+    base_url = os.getenv("LANGFUSE_BASE_URL", "").strip()
+
+    values = {
+        "LANGFUSE_PUBLIC_KEY": public_key,
+        "LANGFUSE_SECRET_KEY": secret_key,
+        "LANGFUSE_BASE_URL": base_url,
+    }
+    if not any(values.values()):
+        return None
+
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        raise ValueError("Incomplete Langfuse configuration; missing " + ", ".join(missing))
+
+    credentials = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode("ascii")
+    endpoint = f"{base_url.rstrip('/')}/api/public/otel/v1/traces"
+    return OTLPHTTPSpanExporter(
+        endpoint=endpoint,
+        headers={
+            "Authorization": f"Basic {credentials}",
+            "x-langfuse-ingestion-version": "4",
+        },
+    )
 
 
 def _configure_cost_logger() -> None:

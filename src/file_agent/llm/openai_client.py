@@ -32,6 +32,16 @@ class OpenAILLMClient:
         with tracer.start_as_current_span("file_agent.llm_generate") as span:
             span.set_attribute("file_agent.model", self.model)
             span.set_attribute("file_agent.prompt_length", len(prompt))
+            span.set_attribute("langfuse.observation.type", "generation")
+            span.set_attribute("langfuse.observation.model.name", self.model)
+            span.set_attribute(
+                "langfuse.observation.model.parameters",
+                json.dumps({"temperature": self.temperature, "max_tokens": self.max_tokens}),
+            )
+            span.set_attribute(
+                "langfuse.observation.input",
+                json.dumps({"messages": [{"role": "user", "content": prompt}]}),
+            )
 
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -50,11 +60,25 @@ class OpenAILLMClient:
             text = text.strip()
             span.set_attribute("file_agent.response_length", len(text))
             span.set_attribute("file_agent.response", text)
+            span.set_attribute(
+                "langfuse.observation.output",
+                json.dumps({"role": "assistant", "content": text}),
+            )
 
             usage = getattr(response, "usage", None)
             if usage is not None:
                 span.set_attribute("file_agent.prompt_tokens", usage.prompt_tokens)
                 span.set_attribute("file_agent.completion_tokens", usage.completion_tokens)
+                span.set_attribute(
+                    "langfuse.observation.usage_details",
+                    json.dumps(
+                        {
+                            "prompt_tokens": usage.prompt_tokens,
+                            "completion_tokens": usage.completion_tokens,
+                            "total_tokens": usage.total_tokens,
+                        }
+                    ),
+                )
 
             logger.info(
                 "LLM %s generated %d char(s) response (%d char(s) prompt)",
@@ -83,6 +107,16 @@ class OpenAILLMClient:
             span.set_attribute("file_agent.model", self.model)
             span.set_attribute("file_agent.message_count", len(messages))
             span.set_attribute("file_agent.tool_count", len(tools))
+            span.set_attribute("langfuse.observation.type", "generation")
+            span.set_attribute("langfuse.observation.model.name", self.model)
+            span.set_attribute(
+                "langfuse.observation.model.parameters",
+                json.dumps({"temperature": self.temperature, "max_tokens": self.max_tokens}),
+            )
+            span.set_attribute(
+                "langfuse.observation.input",
+                json.dumps(request["messages"], ensure_ascii=False, default=str),
+            )
 
             response = self.client.chat.completions.create(**request)
             if not response.choices:
@@ -117,11 +151,29 @@ class OpenAILLMClient:
             span.set_attribute("file_agent.response_length", len(content))
             span.set_attribute("file_agent.response", content)
             span.set_attribute("file_agent.tool_call_count", len(tool_calls))
+            span.set_attribute(
+                "langfuse.observation.output",
+                json.dumps(
+                    {"content": content, "tool_calls": tool_calls},
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
 
             usage = getattr(response, "usage", None)
             if usage is not None:
                 span.set_attribute("file_agent.prompt_tokens", usage.prompt_tokens)
                 span.set_attribute("file_agent.completion_tokens", usage.completion_tokens)
+                span.set_attribute(
+                    "langfuse.observation.usage_details",
+                    json.dumps(
+                        {
+                            "prompt_tokens": usage.prompt_tokens,
+                            "completion_tokens": usage.completion_tokens,
+                            "total_tokens": usage.total_tokens,
+                        }
+                    ),
+                )
 
             logger.info(
                 "LLM %s returned %d char(s) and %d tool call(s)",

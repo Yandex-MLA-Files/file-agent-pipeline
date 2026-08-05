@@ -57,12 +57,14 @@ uv run streamlit run app.py
 
 Local inference setup: [docs/local_inference.md](docs/local_inference.md).
 
-## Tracing (OpenTelemetry + Jaeger)
+## Tracing (OpenTelemetry + Jaeger/Langfuse)
 
 The pipeline is instrumented with OpenTelemetry (`src/file_agent/telemetry.py`).
 Spans are created in `parse_file`, `chunk_document`, `load_documents`,
 `index_documents`, `LanceDBRetriever.index`/`.search`, `answer_question_with_context`
-and `answer_indexed_documents`, and exported over OTLP/gRPC to Jaeger.
+and `answer_indexed_documents`. Jaeger export uses OTLP/gRPC. When Langfuse
+credentials are configured, the same trace is also exported via OTLP/HTTP with
+Langfuse observation types and LLM input/output, model, and token usage.
 
 Run Jaeger locally:
 
@@ -77,6 +79,20 @@ Spans are sent to `localhost:4317` by default. Override the endpoint with the
 
 If Jaeger isn't running, `configure_telemetry()` still works — spans are sent
 in the background via `BatchSpanProcessor` and simply won't arrive anywhere.
+
+To send traces to a local Langfuse project, create API keys in the Langfuse
+project settings and add these values to `.env`:
+
+```text
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=http://localhost:3000
+```
+
+Restart Streamlit, upload a document, and generate an answer. The first trace
+then appears in Langfuse under **Tracing**. Langfuse receives prompt and answer
+text, so do not enable this export for documents that must not leave the app's
+observability boundary.
 
 ## Development
 
