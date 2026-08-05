@@ -112,6 +112,51 @@ def test_generate_hf_qa_records_processes_in_order_and_writes_checkpoints(
     assert first_checkpoint["result"] == result.records[0].to_dict()
 
 
+def test_generate_hf_qa_records_passes_use_router_to_processor_and_checkpoint(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+    install_fake_processor(monkeypatch, calls)
+
+    result = generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+        use_router=True,
+    )
+
+    assert calls[0][1]["use_router"] is True
+    checkpoint = json.loads((tmp_path / "checkpoints" / "000000.json").read_text(encoding="utf-8"))
+    assert checkpoint["parameters"]["use_router"] is True
+    assert result.records[0].id == "q0001"
+
+
+def test_generate_hf_qa_records_rejects_use_router_change_on_resume(
+    monkeypatch,
+    tmp_path,
+):
+    install_fake_processor(monkeypatch, [])
+    generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+        use_router=False,
+    )
+
+    with pytest.raises(ValueError, match="parameters do not match"):
+        generate_hf_qa_records(
+            dataset=make_dataset(),
+            dataset_id="owner/rag-qa",
+            llm_client=DummyLLM(),
+            output_dir=tmp_path,
+            use_router=True,
+            resume=True,
+        )
+
+
 def test_cached_document_loader_reuses_parsing_and_returns_isolated_copies(
     monkeypatch,
     tmp_path,

@@ -40,6 +40,7 @@ class HFGenerationConfig:
     overlap: int = 100
     limit: int | None = None
     resume: bool = False
+    use_router: bool = False
 
     def __post_init__(self) -> None:
         _require_non_empty(self.dataset_id, "dataset_id")
@@ -105,6 +106,7 @@ def run_hf_dataset_generation(
         max_chars=config.max_chars,
         overlap=config.overlap,
         resume=config.resume,
+        use_router=config.use_router,
     )
     artifacts = save_generated_qa_dataset(
         source_dataset=selected_dataset,
@@ -146,6 +148,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=_positive_int, help="Process only the first N rows")
     parser.add_argument("--resume", action="store_true", help="Reuse matching row checkpoints")
     parser.add_argument(
+        "--use-router",
+        action="store_true",
+        help="Route through the query classifier + planner (v1) instead of plain RAG (v0)",
+    )
+    parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="INFO",
@@ -176,6 +183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             overlap=args.overlap,
             limit=args.limit,
             resume=args.resume,
+            use_router=args.use_router,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -226,6 +234,7 @@ def _build_manifest(
         top_k=config.top_k,
         max_chars=config.max_chars,
         overlap=config.overlap,
+        use_router=config.use_router,
     )
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,

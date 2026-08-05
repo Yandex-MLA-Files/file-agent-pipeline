@@ -24,6 +24,18 @@ class DummyLLM:
         return self.answer
 
 
+class ScriptedLLM:
+    """Returns each response in order, one per generate() call."""
+
+    def __init__(self, responses: list[str]):
+        self.responses = list(responses)
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self.responses.pop(0)
+
+
 class FakeRetriever:
     def __init__(self):
         self.chunks = []
@@ -210,6 +222,44 @@ def test_process_hf_qa_record_downloads_documents_before_processing(monkeypatch,
             "token": "test-token",
         }
     ]
+
+
+def test_process_qa_record_routes_through_classifier_when_use_router_is_true(tmp_path):
+    record = make_record()
+    document_paths = create_text_documents(tmp_path)
+    llm_client = ScriptedLLM(['{"query_type": "simple"}', "Generated answer"])
+    retriever = FakeRetriever()
+
+    result = process_qa_record(
+        record=record,
+        document_paths=document_paths,
+        llm_client=llm_client,
+        top_k=2,
+        retriever=retriever,
+        use_router=True,
+    )
+
+    assert result.answer_model == "Generated answer"
+    assert len(llm_client.prompts) == 2  # classify + generate
+    assert retriever.search_calls == [(record.question, 2)]
+
+
+def test_process_qa_record_defaults_to_plain_rag_without_use_router(tmp_path):
+    record = make_record()
+    document_paths = create_text_documents(tmp_path)
+    llm_client = DummyLLM()
+    retriever = FakeRetriever()
+
+    result = process_qa_record(
+        record=record,
+        document_paths=document_paths,
+        llm_client=llm_client,
+        top_k=2,
+        retriever=retriever,
+    )
+
+    assert result.answer_model == "Generated answer"
+    assert len(llm_client.prompts) == 1  # no classification call
 
 
 def test_process_qa_record_rejects_mismatched_document_paths(tmp_path):

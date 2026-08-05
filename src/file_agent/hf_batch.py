@@ -48,6 +48,7 @@ def generate_hf_qa_records(
     overlap: int = 100,
     retriever: Retriever | None = None,
     resume: bool = False,
+    use_router: bool = False,
 ) -> BatchGenerationResult:
     validate_qa_dataset(dataset)
     if not isinstance(dataset_id, str) or not dataset_id.strip():
@@ -69,6 +70,7 @@ def generate_hf_qa_records(
         top_k=top_k,
         max_chars=max_chars,
         overlap=overlap,
+        use_router=use_router,
     )
     records: list[GeneratedQARecord] = []
     processed_count = 0
@@ -105,6 +107,7 @@ def generate_hf_qa_records(
                 overlap=overlap,
                 retriever=retriever,
                 document_loader=document_loader,
+                use_router=use_router,
             )
             _validate_generated_record(generated_record, record)
             _write_checkpoint(
@@ -167,6 +170,7 @@ def build_generation_parameters(
     top_k: int,
     max_chars: int,
     overlap: int,
+    use_router: bool = False,
 ) -> dict[str, Any]:
     prompt_template = build_qa_prompt(
         question="{question}",
@@ -180,6 +184,7 @@ def build_generation_parameters(
         "max_tokens": _optional_scalar_attribute(llm_client, "max_tokens"),
         "retriever": _component_identifier(retriever) if retriever is not None else "default",
         "rag_pipeline_version": RAG_PIPELINE_VERSION,
+        "use_router": use_router,
         "embedding_model": os.getenv("EMBEDDING_MODEL") or DEFAULT_SEMANTIC_MODEL_NAME,
         "ocr_engine": os.getenv("OCR_ENGINE", "easyocr").strip().lower(),
         "ocr_langs": os.getenv("OCR_LANGS", "ru,en").strip(),

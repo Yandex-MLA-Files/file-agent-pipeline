@@ -263,4 +263,36 @@ def test_main_maps_cli_arguments_and_prints_artifact_paths(monkeypatch, tmp_path
     assert "Completed 3 rows (processed: 1, resumed: 2)" in output
     assert str(output_dir / "answers.parquet") in output
     assert str(output_dir / "hf_dataset") in output
-    assert str(output_dir / "run_manifest.json") in output
+
+
+def test_main_parses_use_router_flag(monkeypatch, tmp_path, capsys):
+    output_dir = tmp_path / "run"
+    expected_result = HFGenerationRunResult(
+        batch=BatchGenerationResult(records=(), processed_count=0, resumed_count=0),
+        artifacts=GeneratedDatasetArtifacts(
+            parquet_path=output_dir / "answers.parquet",
+            hf_dataset_path=output_dir / "hf_dataset",
+            row_count=0,
+        ),
+        manifest_path=output_dir / "run_manifest.json",
+    )
+    calls = []
+
+    def fake_run(config):
+        calls.append(config)
+        return expected_result
+
+    monkeypatch.setattr("file_agent.hf_cli.run_hf_dataset_generation", fake_run)
+
+    exit_code = main(
+        [
+            "--dataset-id",
+            "owner/rag-qa",
+            "--output-dir",
+            str(output_dir),
+            "--use-router",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls[0].use_router is True

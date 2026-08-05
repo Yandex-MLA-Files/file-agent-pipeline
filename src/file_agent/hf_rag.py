@@ -9,7 +9,12 @@ from file_agent.hf_dataset import QADatasetRecord, download_record_documents
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.base import LLMClient
 from file_agent.qa import select_context_passages
-from file_agent.rag import answer_indexed_documents, index_documents, load_documents
+from file_agent.rag import (
+    answer_indexed_documents,
+    answer_indexed_documents_with_routing,
+    index_documents,
+    load_documents,
+)
 from file_agent.retrieval import Retriever, SearchResult
 
 DocumentLoader = Callable[[list[str | Path]], list[Document]]
@@ -138,6 +143,7 @@ def process_hf_qa_record(
     overlap: int = 100,
     retriever: Retriever | None = None,
     document_loader: DocumentLoader | None = None,
+    use_router: bool = False,
 ) -> GeneratedQARecord:
     document_paths = download_record_documents(
         record=record,
@@ -155,6 +161,7 @@ def process_hf_qa_record(
         overlap=overlap,
         retriever=retriever,
         document_loader=document_loader,
+        use_router=use_router,
     )
 
 
@@ -167,6 +174,7 @@ def process_qa_record(
     overlap: int = 100,
     retriever: Retriever | None = None,
     document_loader: DocumentLoader | None = None,
+    use_router: bool = False,
 ) -> GeneratedQARecord:
     if len(document_paths) != len(record.doc_ids):
         raise ValueError("document_paths count must match record.doc_ids count")
@@ -179,6 +187,7 @@ def process_qa_record(
             block.metadata["dataset_doc_id"] = doc_id
 
     active_retriever = retriever if retriever is not None else LanceDBRetriever()
+    answer_fn = answer_indexed_documents_with_routing if use_router else answer_indexed_documents
     try:
         chunks = index_documents(
             documents=documents,
@@ -186,7 +195,7 @@ def process_qa_record(
             max_chars=max_chars,
             overlap=overlap,
         )
-        response = answer_indexed_documents(
+        response = answer_fn(
             question=record.question,
             llm_client=llm_client,
             retriever=active_retriever,
