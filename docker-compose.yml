@@ -28,7 +28,7 @@ services:
       - --dtype
       - half
       - --max-model-len
-      - "8192"
+      - "16384"
       - --gpu-memory-utilization
       - "0.90"
       - --enforce-eager

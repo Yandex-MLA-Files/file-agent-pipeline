@@ -73,7 +73,7 @@ docker run -d \
   vllm/vllm-openai:v0.7.3 \
   --model Qwen/Qwen2.5-7B-Instruct \
   --dtype half \
-  --max-model-len 8192 \
+  --max-model-len 16384 \
   --gpu-memory-utilization 0.90 \
   --enforce-eager
 ```
