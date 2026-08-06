@@ -15,6 +15,10 @@ from file_agent.telemetry import tracer
 logger = logging.getLogger(__name__)
 
 DEFAULT_SEMANTIC_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# sentence-transformers defaults to 32; a document with thousands of chunks
+# means thousands/32 forward passes, each paying Python-loop overhead on top of
+# the (small, GPU-cheap) model call. Larger batches cut that overhead down.
+DEFAULT_ENCODE_BATCH_SIZE = 128
 DEFAULT_FTS_LANGUAGE = "Russian"
 DEFAULT_RRF_K = 60
 DEFAULT_SEMANTIC_MIN_SCORE = 0.25
@@ -125,7 +129,12 @@ class LanceDBRetriever:
 
     def _encode(self, texts: list[str]) -> np.ndarray:
         model = self._embedding_model or _load_default_embedding_model()
-        embeddings = model.encode(texts)
+        try:
+            embeddings = model.encode(
+                texts, batch_size=DEFAULT_ENCODE_BATCH_SIZE, show_progress_bar=False
+            )
+        except TypeError:  # a minimal EmbeddingModel that only accepts sentences
+            embeddings = model.encode(texts)
 
         if hasattr(embeddings, "detach"):
             embeddings = embeddings.detach().cpu().numpy()
