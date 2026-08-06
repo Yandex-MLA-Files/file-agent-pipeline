@@ -104,6 +104,23 @@ class _Budget:
         except Exception:  # pragma: no cover - never fail chunking on tokenizer issues
             return len(text)
 
+    def sizes(self, texts: list[str]) -> list[int]:
+        """Batched ``size()``: one tokenizer call instead of one per string.
+
+        Large documents split into thousands of sentences; calling ``encode()``
+        per sentence pays Python/tokenizer call overhead thousands of times.
+        Fast (Rust-backed) tokenizers batch far more cheaply than that.
+        """
+        if self._tokenizer is None:
+            return [len(text) for text in texts]
+        if not texts:
+            return []
+        try:
+            encoded = self._tokenizer(texts, add_special_tokens=False, verbose=False)
+            return [len(ids) for ids in encoded["input_ids"]]
+        except Exception:  # pragma: no cover - fall back to the per-item path
+            return [self.size(text) for text in texts]
+
 
 def _build_budget(
     max_chars: int,
@@ -413,12 +430,17 @@ class _Chunker:
         if not sentences:
             return self._hard_split(text, limit)
 
+        # One batched tokenizer call for every sentence instead of one call per
+        # sentence: a long document has thousands of these, and per-call overhead
+        # dominates at that volume.
+        sizes = dict(zip(sentences, self._budget.sizes(sentences), strict=True))
+
         pieces: list[str] = []
         current: list[str] = []
         current_size = 0
 
         for sentence in sentences:
-            size = self._budget.size(sentence)
+            size = sizes[sentence]
             if size > limit:
                 # A single sentence longer than the budget: flush and hard-split it.
                 if current:
@@ -429,7 +451,7 @@ class _Chunker:
 
             if current and current_size + size > limit:
                 pieces.append(" ".join(current))
-                current, current_size = self._sentence_overlap(current)
+                current, current_size = self._sentence_overlap(current, sizes)
 
             current.append(sentence)
             current_size += size
@@ -438,19 +460,21 @@ class _Chunker:
             pieces.append(" ".join(current))
         return pieces
 
-    def _sentence_overlap(self, sentences: list[str]) -> tuple[list[str], int]:
+    def _sentence_overlap(
+        self, sentences: list[str], sizes: dict[str, int]
+    ) -> tuple[list[str], int]:
         if self._budget.overlap == 0:
             return [], 0
         seed: list[str] = []
         total = 0
         for sentence in reversed(sentences):
-            size = self._budget.size(sentence)
+            size = sizes[sentence]
             if total + size > self._budget.overlap:
                 break
             seed.insert(0, sentence)
             total += size
         if len(seed) == len(sentences):
-            seed, total = seed[1:], total - self._budget.size(sentences[0])
+            seed, total = seed[1:], total - sizes[sentences[0]]
         return seed, max(total, 0)
 
     def _hard_split(self, text: str, limit: int) -> list[str]:
