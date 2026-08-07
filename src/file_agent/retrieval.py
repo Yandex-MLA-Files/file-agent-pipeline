@@ -19,8 +19,9 @@ class Retriever(Protocol):
         self,
         query: str,
         top_k: int = 5,
+        source_file: str | None = None,
     ) -> list[SearchResult]:
-        """Return the chunks most relevant to the query."""
+        """Return relevant chunks, optionally restricted to one source file."""
         raise NotImplementedError
 
     def clear(self) -> None:

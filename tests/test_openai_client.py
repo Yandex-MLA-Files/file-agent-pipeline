@@ -131,6 +131,7 @@ def test_chat_with_tools_converts_messages_tools_and_tool_calls():
     assert set(request["tools"][0]["function"]["parameters"]["properties"]) == {
         "query",
         "top_k",
+        "source_file",
     }
     assert request["tool_choice"] == "auto"
 

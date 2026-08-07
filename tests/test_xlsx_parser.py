@@ -1,5 +1,6 @@
 from openpyxl import Workbook
 
+from file_agent.document import BlockType
 from file_agent.parsers.xlsx_parser import XLSXParser
 
 
@@ -30,6 +31,8 @@ def test_xlsx_parser_creates_block_for_each_sheet(tmp_path):
     assert len(document.blocks) == 2
     assert document.blocks[0].type == "xlsx_sheet"
     assert document.blocks[1].type == "xlsx_sheet"
+    assert document.blocks[0].block_type == BlockType.TABLE
+    assert document.blocks[1].block_type == BlockType.TABLE
 
 
 def test_xlsx_parser_extracts_sheet_text(tmp_path):

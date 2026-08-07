@@ -1,3 +1,6 @@
+import json
+
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from file_agent.agent_tools import (
@@ -7,7 +10,7 @@ from file_agent.agent_tools import (
     search_documents,
 )
 from file_agent.chunking import Chunk
-from file_agent.document import Block, Document
+from file_agent.document import Block, BlockType, Document
 from file_agent.rag_graph import build_tool_agent_graph
 from file_agent.retrieval import SearchResult
 
@@ -40,9 +43,16 @@ class FakeRetriever:
     def index(self, chunks):
         self.results = [SearchResult(chunk=chunk, score=1.0) for chunk in chunks]
 
-    def search(self, query: str, top_k: int = 5):
-        self.search_calls.append((query, top_k))
-        return self.results[:top_k]
+    def search(self, query: str, top_k: int = 5, source_file: str | None = None):
+        self.search_calls.append((query, top_k, source_file))
+        results = self.results
+        if source_file is not None:
+            results = [
+                result
+                for result in results
+                if result.chunk.metadata.get("source_file") == source_file
+            ]
+        return results[:top_k]
 
     def clear(self):
         self.results = []
@@ -81,7 +91,7 @@ def make_search_result() -> SearchResult:
     )
 
 
-def invoke_tool_agent(llm_client, retriever, max_tool_rounds=4):
+def invoke_tool_agent(llm_client, retriever, max_tool_rounds=4, documents=None):
     return build_tool_agent_graph().invoke(
         {
             "messages": [
@@ -97,17 +107,23 @@ def invoke_tool_agent(llm_client, retriever, max_tool_rounds=4):
         context=ToolAgentContext(
             llm_client=llm_client,
             retriever=retriever,
-            documents=[make_document()],
+            documents=documents or [make_document()],
             max_tool_rounds=max_tool_rounds,
         ),
     )
 
 
-def test_search_tool_schema_hides_injected_runtime():
+@pytest.mark.parametrize("document_tool", DOCUMENT_TOOLS)
+def test_document_tool_schemas_hide_injected_runtime(document_tool):
+    schema = document_tool.tool_call_schema.model_json_schema()
+
+    assert "runtime" not in schema["properties"]
+
+
+def test_search_tool_exposes_filter_schema():
     schema = search_documents.tool_call_schema.model_json_schema()
 
-    assert set(schema["properties"]) == {"query", "top_k"}
-    assert "runtime" not in schema["properties"]
+    assert set(schema["properties"]) == {"query", "top_k", "source_file"}
 
 
 def test_tool_agent_searches_documents_and_returns_sources():
@@ -142,7 +158,7 @@ def test_tool_agent_searches_documents_and_returns_sources():
             "arguments": {"query": "project deadline", "top_k": 3},
         }
     ]
-    assert retriever.search_calls == [("project deadline", 3)]
+    assert retriever.search_calls == [("project deadline", 3, None)]
     assert any(isinstance(message, ToolMessage) for message in state["messages"])
     assert llm_client.responses == []
 
@@ -199,7 +215,7 @@ def test_tool_agent_forces_final_answer_after_tool_round_limit():
     assert llm_client.calls[0]["tool_names"] == [tool.name for tool in DOCUMENT_TOOLS]
     assert llm_client.calls[1]["tool_names"] == []
     assert "tool-call limit" in str(llm_client.calls[1]["messages"][0].content)
-    assert retriever.search_calls == [("project deadline", 5)]
+    assert retriever.search_calls == [("project deadline", 5, None)]
 
 
 def test_tool_agent_returns_tool_errors_to_model():
@@ -225,3 +241,339 @@ def test_tool_agent_returns_tool_errors_to_model():
     tool_messages = [message for message in state["messages"] if isinstance(message, ToolMessage)]
     assert "document is not indexed" in str(tool_messages[0].content)
     assert state["response"].answer == "The requested document is not indexed."
+
+
+def test_tool_agent_can_filter_search_by_source_file():
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {
+                            "query": "project deadline",
+                            "source_file": "PLAN.MD",
+                            "top_k": 3,
+                        },
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The deadline is Friday."),
+        ]
+    )
+    retriever = FakeRetriever(
+        [
+            make_search_result(),
+            SearchResult(
+                chunk=Chunk(
+                    id="other-chunk",
+                    text="Other deadline",
+                    metadata={"source_file": "other.md"},
+                ),
+                score=0.8,
+            ),
+        ]
+    )
+
+    state = invoke_tool_agent(llm_client, retriever)
+
+    assert retriever.search_calls == [("project deadline", 3, "plan.md")]
+    assert state["response"].sources == [make_search_result()]
+    tool_message = next(
+        message for message in state["messages"] if isinstance(message, ToolMessage)
+    )
+    payload = json.loads(str(tool_message.content))
+    assert payload["source_file"] == "plan.md"
+    assert payload["results_count"] == 1
+
+
+def test_tool_agent_can_read_full_context_after_search():
+    long_context = "Beginning " + "x" * 3700 + " complete ending"
+    result = SearchResult(
+        chunk=Chunk(
+            id="long-chunk",
+            text="short match",
+            metadata={"context": long_context, "source_file": "plan.md"},
+        ),
+        score=0.9,
+    )
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "complete ending"},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "read_source_context",
+                        "args": {"chunk_id": "long-chunk"},
+                        "id": "call-2",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The context has a complete ending."),
+        ]
+    )
+
+    state = invoke_tool_agent(llm_client, FakeRetriever([result]))
+
+    tool_messages = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+    search_payload = json.loads(str(tool_messages[0].content))
+    context_payload = json.loads(str(tool_messages[1].content))
+    assert search_payload["results"][0]["text"].endswith("...")
+    assert context_payload["text"] == long_context
+    assert state["response"].sources == [result]
+
+
+def make_structured_document() -> Document:
+    return Document(
+        file_name="handbook.pdf",
+        file_type="pdf",
+        blocks=[
+            Block(
+                id="heading-main",
+                text="Main section",
+                type="heading",
+                metadata={"hierarchy_level": 1},
+                block_type=BlockType.HEADING,
+                page_number=1,
+            ),
+            Block(
+                id="main-body",
+                text="Main section body.",
+                type="text",
+                block_type=BlockType.TEXT,
+                page_number=1,
+            ),
+            Block(
+                id="heading-child",
+                text="Child section",
+                type="heading",
+                metadata={"hierarchy_level": 2},
+                block_type=BlockType.HEADING,
+                page_number=2,
+            ),
+            Block(
+                id="child-body",
+                text="Child section body.",
+                type="text",
+                block_type=BlockType.TEXT,
+                page_number=2,
+            ),
+            Block(
+                id="table-1",
+                text="| Name | Value |\n| --- | --- |\n| Accuracy | 0.9 |",
+                type="table",
+                block_type=BlockType.TABLE,
+                page_number=2,
+            ),
+            Block(
+                id="heading-next",
+                text="Next section",
+                type="heading",
+                metadata={"hierarchy_level": 1},
+                block_type=BlockType.HEADING,
+                page_number=3,
+            ),
+            Block(
+                id="next-body",
+                text="This text must not be returned with the main section.",
+                type="text",
+                block_type=BlockType.TEXT,
+                page_number=3,
+            ),
+        ],
+    )
+
+
+def test_tool_agent_can_navigate_outline_and_read_section():
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_document_outline",
+                        "args": {"source_file": "handbook.pdf"},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "read_document_section",
+                        "args": {
+                            "source_file": "handbook.pdf",
+                            "section_id": "heading-main",
+                        },
+                        "id": "call-2",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The main section includes its child section."),
+        ]
+    )
+
+    state = invoke_tool_agent(
+        llm_client,
+        FakeRetriever(),
+        documents=[make_structured_document()],
+    )
+
+    tool_messages = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+    outline = json.loads(str(tool_messages[0].content))
+    section = json.loads(str(tool_messages[1].content))
+    assert outline["table_of_contents"][0]["section_id"] == "heading-main"
+    assert outline["tables"][0]["table_id"] == "table-1"
+    assert "Main section body." in section["text"]
+    assert "Child section body." in section["text"]
+    assert "must not be returned" not in section["text"]
+    assert state["response"].sources[0].chunk.metadata["page_numbers"] == [1, 2]
+
+
+def _invoke_single_read_tool(tool_name, arguments, documents):
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": tool_name,
+                        "args": arguments,
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Answer based on the selected location."),
+        ]
+    )
+    return invoke_tool_agent(
+        llm_client,
+        FakeRetriever(),
+        documents=documents,
+    )
+
+
+@pytest.mark.parametrize(
+    ("documents", "arguments", "expected_text", "metadata_key", "metadata_value"),
+    [
+        (
+            [make_structured_document()],
+            {"source_file": "handbook.pdf", "page_number": 3},
+            "Next section",
+            "page_number",
+            3,
+        ),
+        (
+            [
+                Document(
+                    file_name="deck.pptx",
+                    file_type="pptx",
+                    blocks=[
+                        Block(
+                            id="slide-2",
+                            text="Slide 2 metrics",
+                            type="pptx_slide",
+                            metadata={"slide_number": 2},
+                        )
+                    ],
+                )
+            ],
+            {"source_file": "deck.pptx", "slide_number": 2},
+            "Slide 2 metrics",
+            "slide_number",
+            2,
+        ),
+        (
+            [
+                Document(
+                    file_name="budget.xlsx",
+                    file_type="xlsx",
+                    blocks=[
+                        Block(
+                            id="sheet-1",
+                            text="Month\tAmount\nJanuary\t100",
+                            type="xlsx_sheet",
+                            metadata={"sheet_name": "Budget"},
+                            block_type=BlockType.TABLE,
+                        )
+                    ],
+                )
+            ],
+            {"source_file": "budget.xlsx", "sheet_name": "budget"},
+            "January",
+            "sheet_name",
+            "Budget",
+        ),
+    ],
+)
+def test_tool_agent_can_read_document_locations(
+    documents,
+    arguments,
+    expected_text,
+    metadata_key,
+    metadata_value,
+):
+    state = _invoke_single_read_tool("read_document_location", arguments, documents)
+
+    tool_message = next(
+        message for message in state["messages"] if isinstance(message, ToolMessage)
+    )
+    payload = json.loads(str(tool_message.content))
+    assert expected_text in payload["text"]
+    assert payload["location"][metadata_key] == metadata_value
+    assert state["response"].sources[0].chunk.metadata[metadata_key] == metadata_value
+
+
+def test_tool_agent_can_read_table_rows_with_pagination():
+    document = Document(
+        file_name="budget.xlsx",
+        file_type="xlsx",
+        blocks=[
+            Block(
+                id="sheet-1",
+                text="Name\tValue\nA\t1\nB\t2\nC\t3",
+                type="xlsx_sheet",
+                metadata={"sheet_name": "Budget"},
+                block_type=BlockType.TABLE,
+            )
+        ],
+    )
+
+    state = _invoke_single_read_tool(
+        "read_table",
+        {
+            "source_file": "budget.xlsx",
+            "table_id": "sheet-1",
+            "offset": 1,
+            "limit": 2,
+        },
+        [document],
+    )
+
+    tool_message = next(
+        message for message in state["messages"] if isinstance(message, ToolMessage)
+    )
+    payload = json.loads(str(tool_message.content))
+    assert payload["format"] == "tsv"
+    assert payload["rows"] == ["A\t1", "B\t2"]
+    assert payload["next_offset"] == 3
+    assert state["response"].sources[0].chunk.metadata["table_id"] == "sheet-1"

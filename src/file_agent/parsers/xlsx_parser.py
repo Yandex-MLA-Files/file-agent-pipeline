@@ -3,7 +3,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-from file_agent.document import Block, Document
+from file_agent.document import Block, BlockType, Document
 from file_agent.parsers.base import BaseParser
 
 
@@ -26,6 +26,7 @@ class XLSXParser(BaseParser):
                             "max_row": sheet.max_row,
                             "max_column": sheet.max_column,
                         },
+                        block_type=BlockType.TABLE,
                     )
                 )
         finally:

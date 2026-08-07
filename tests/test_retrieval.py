@@ -119,6 +119,32 @@ def test_lancedb_retriever_honors_top_k_and_clear():
     assert retriever.search("python") == []
 
 
+def test_lancedb_retriever_can_filter_by_source_file():
+    chunks = [
+        Chunk(id="first", text="python first", metadata={"source_file": "first.md"}),
+        Chunk(id="second", text="python second", metadata={"source_file": "second.md"}),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "python first": [1.0, 0.0],
+            "python second": [1.0, 0.0],
+            "python": [1.0, 0.0],
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+    results = retriever.search("python", source_file="second.md")
+
+    assert [result.chunk.id for result in results] == ["second"]
+
+
+def test_lancedb_retriever_returns_no_results_for_blank_source_filter():
+    retriever = LanceDBRetriever(embedding_model=FakeEmbeddingModel({}))
+
+    assert retriever.search("query", source_file="  ") == []
+
+
 def test_lancedb_retriever_handles_empty_inputs_without_loading_model():
     retriever = LanceDBRetriever(embedding_model=FakeEmbeddingModel({}))
 

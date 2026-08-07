@@ -28,11 +28,22 @@ RAG_MODE=tool_agent  # model -> document tools -> model -> final answer
 RAG_MAX_TOOL_ROUNDS=4
 ```
 
-The tool agent can search the index multiple times, list uploaded documents, and
-inspect a document's table of contents. All tools are read-only and receive the
-active retriever and documents through LangGraph runtime context. Tool execution
-is bounded by `RAG_MAX_TOOL_ROUNDS`; after the limit, the model must answer from
-the observations already collected.
+The tool agent can search the index multiple times, optionally restrict search to
+one source file, and navigate uploaded documents without accessing arbitrary
+filesystem paths. Its read-only tools can:
+
+- list documents and inspect their sections and tables;
+- read the surrounding context of a previously found chunk;
+- read a section, including its nested subsections;
+- read a PDF/DOCX page, PPTX slide, or XLSX sheet;
+- read table rows in bounded pages.
+
+Long sections and locations return `next_offset`; tables use a bounded row
+`offset` and `limit`. Direct reads are preserved as answer sources just like
+retrieval results. All tools receive the active retriever and parsed documents
+through LangGraph runtime context. Tool execution is bounded by
+`RAG_MAX_TOOL_ROUNDS`; after the limit, the model must answer from the
+observations already collected.
 
 `tool_agent` requires an OpenAI-compatible model and endpoint with native tool
 calling support. The standard mode continues to work with text-generation-only

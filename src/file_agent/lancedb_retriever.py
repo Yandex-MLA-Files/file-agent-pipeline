@@ -60,6 +60,7 @@ class LanceDBRetriever:
                 {
                     "chunk_id": chunk.id,
                     "text": chunk.text,
+                    "source_file": str(chunk.metadata.get("source_file", "")),
                     "vector": embeddings[index].tolist(),
                     "metadata_json": json.dumps(
                         chunk.metadata,
@@ -84,14 +85,20 @@ class LanceDBRetriever:
         self,
         query: str,
         top_k: int = 5,
+        source_file: str | None = None,
     ) -> list[SearchResult]:
         with tracer.start_as_current_span("file_agent.retriever_search") as span:
             span.set_attribute("file_agent.query", query)
             span.set_attribute("file_agent.top_k", top_k)
+            if source_file is not None:
+                span.set_attribute("file_agent.source_file", source_file)
             span.set_attribute("langfuse.observation.type", "retriever")
             span.set_attribute(
                 "langfuse.observation.input",
-                json.dumps({"query": query, "top_k": top_k}, ensure_ascii=False),
+                json.dumps(
+                    {"query": query, "top_k": top_k, "source_file": source_file},
+                    ensure_ascii=False,
+                ),
             )
 
             if top_k <= 0 or self._table is None:
@@ -105,8 +112,14 @@ class LanceDBRetriever:
                 span.set_attribute("langfuse.observation.output", "[]")
                 return []
 
+            normalized_source = source_file.strip() if source_file is not None else None
+            if source_file is not None and not normalized_source:
+                span.set_attribute("file_agent.result_count", 0)
+                span.set_attribute("langfuse.observation.output", "[]")
+                return []
+
             query_vector = self._encode([query])[0].tolist()
-            rows = (
+            query_builder = (
                 self._table.search(
                     query_type="hybrid",
                     vector_column_name="vector",
@@ -114,7 +127,15 @@ class LanceDBRetriever:
                 )
                 .vector(query_vector)
                 .text(query)
-                .distance_type("cosine")
+            )
+            if normalized_source is not None:
+                escaped_source = normalized_source.replace("'", "''")
+                query_builder = query_builder.where(
+                    f"source_file = '{escaped_source}'",
+                    prefilter=True,
+                )
+            rows = (
+                query_builder.distance_type("cosine")
                 .distance_range(upper_bound=1.0 - self._semantic_min_score)
                 .rerank(RRFReranker(K=self._rrf_k))
                 .limit(top_k)
