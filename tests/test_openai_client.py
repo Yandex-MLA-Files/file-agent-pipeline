@@ -50,6 +50,34 @@ def test_generate_uses_openai_chat_completions():
     ]
 
 
+def test_chat_sends_conversation_as_is():
+    openai_client = FakeOpenAI(_chat_completion("Reply"))
+    client = OpenAILLMClient(
+        client=openai_client,
+        model="test-model",
+        temperature=0.3,
+        max_tokens=64,
+    )
+    messages = [
+        {"role": "system", "content": "Be brief."},
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello"},
+        {"role": "user", "content": "Question"},
+    ]
+
+    answer = client.chat(messages)
+
+    assert answer == "Reply"
+    assert openai_client.completions.calls == [
+        {
+            "model": "test-model",
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": 64,
+        }
+    ]
+
+
 def test_client_requires_model():
     with pytest.raises(ValueError, match="model"):
         OpenAILLMClient(

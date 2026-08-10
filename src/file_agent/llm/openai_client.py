@@ -24,13 +24,19 @@ class OpenAILLMClient:
             raise ValueError("model is required")
 
     def generate(self, prompt: str) -> str:
+        return self.chat([{"role": "user", "content": prompt}])
+
+    def chat(self, messages: list[dict[str, str]]) -> str:
+        prompt_length = sum(len(message.get("content") or "") for message in messages)
+
         with tracer.start_as_current_span("file_agent.llm_generate") as span:
             span.set_attribute("file_agent.model", self.model)
-            span.set_attribute("file_agent.prompt_length", len(prompt))
+            span.set_attribute("file_agent.message_count", len(messages))
+            span.set_attribute("file_agent.prompt_length", prompt_length)
 
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
             )
@@ -52,9 +58,10 @@ class OpenAILLMClient:
                 span.set_attribute("file_agent.completion_tokens", usage.completion_tokens)
 
             logger.info(
-                "LLM %s generated %d char(s) response (%d char(s) prompt)",
+                "LLM %s generated %d char(s) response (%d message(s), %d char(s) prompt)",
                 self.model,
                 len(text),
-                len(prompt),
+                len(messages),
+                prompt_length,
             )
             return text
