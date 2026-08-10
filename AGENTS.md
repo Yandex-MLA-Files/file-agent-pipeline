@@ -44,7 +44,8 @@ Users can upload one or more documents, preview extracted text, find relevant ch
   loop where the LLM plans tool calls (`search_documents`, `list_documents`,
   `read_section`) over the indexed documents; tool calls are JSON parsed
   client-side, so any OpenAI-compatible backend works without server-side
-  tool-call support (see `docs/agent.md`).
+  tool-call support. Bounded session memory (`AgentSession`) enables
+  follow-up questions (see `docs/agent.md`).
 - An `LLMClient` adapter built on the official OpenAI Python SDK, plus a
   `chat(messages)` method for multi-turn conversations.
 - Yandex AI Studio and local OpenAI-compatible LLM backends.

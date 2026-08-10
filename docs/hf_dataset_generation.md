@@ -149,6 +149,12 @@ CUDA_VISIBLE_DEVICES="" uv run python generate_hf_dataset.py \
 For a full run, use a new `RUN_NAME` and remove `--limit 20`. Add
 `--revision <dataset-commit>` when the run must use a fixed dataset snapshot.
 
+Add `--answer-mode agent` to generate answers with the multi-step document
+agent instead of single-pass RAG (see `docs/agent.md`). The mode is recorded
+in the manifest and checkpoint parameters, so agent and RAG runs never mix
+under `--resume`; use separate `RUN_DIR`s to compare the two modes with
+`eval_pipeline` on the same dataset.
+
 Detach from `tmux` with `Ctrl+B`, then `D`. Reattach with:
 
 ```bash
