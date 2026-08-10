@@ -75,7 +75,29 @@ docker run -d \
   --dtype half \
   --max-model-len 16384 \
   --gpu-memory-utilization 0.90 \
-  --enforce-eager
+  --enforce-eager \
+  --enable-auto-tool-choice \
+  --tool-call-parser hermes
+```
+
+The last two flags are required for the ReAct agent (`src/file_agent/agent/`) to
+get real `tool_calls` back from Qwen — without them the model still answers,
+it just never calls a tool, silently. If an **existing** container was created
+before these flags existed, `docker start` will *not* pick them up (flags are
+baked in at `docker run` time) — remove it and recreate with the command
+above:
+
+```bash
+docker rm -f file-agent-vllm
+```
+
+then run the `docker run` block again. `hermes`/`--enable-auto-tool-choice`
+support depends on this exact vLLM image (`v0.7.3`); verify it's recognized
+before relying on it:
+
+```bash
+docker exec file-agent-vllm python3 -m vllm.entrypoints.openai.api_server --help \
+  | grep -A2 tool-call-parser
 ```
 
 Wait until the endpoint is ready:
