@@ -143,16 +143,41 @@ services:
     volumes:
       - file_agent_langfuse_minio_data:/data
 
+  # MinIO doesn't auto-create buckets. One-shot job: waits for MinIO, creates
+  # the "langfuse" bucket if missing, exits. web/worker wait for it to exit
+  # 0 (service_completed_successfully) before starting, so ingestion never
+  # races an empty bucket (this bit us once already - S3 uploads failed with
+  # NoSuchBucket on a fresh stack).
+  file-agent-langfuse-minio-init:
+    image: minio/mc:latest
+    container_name: file-agent-langfuse-minio-init
+    networks: [file-agent-langfuse-net]
+    depends_on:
+      - file-agent-langfuse-minio
+    entrypoint: >
+      sh -c "
+      until mc alias set myminio http://file-agent-langfuse-minio:9000 $${LANGFUSE_S3_ACCESS_KEY} $${LANGFUSE_S3_SECRET_KEY}; do sleep 1; done &&
+      mc mb --ignore-existing myminio/langfuse
+      "
+    environment:
+      - LANGFUSE_S3_ACCESS_KEY=${LANGFUSE_S3_ACCESS_KEY}
+      - LANGFUSE_S3_SECRET_KEY=${LANGFUSE_S3_SECRET_KEY}
+    restart: "no"
+
   file-agent-langfuse-worker:
     image: langfuse/langfuse-worker:3
     container_name: file-agent-langfuse-worker
     restart: unless-stopped
     networks: [file-agent-langfuse-net]
     depends_on:
-      - file-agent-langfuse-postgres
-      - file-agent-langfuse-clickhouse
-      - file-agent-langfuse-redis
-      - file-agent-langfuse-minio
+      file-agent-langfuse-postgres:
+        condition: service_started
+      file-agent-langfuse-clickhouse:
+        condition: service_started
+      file-agent-langfuse-redis:
+        condition: service_started
+      file-agent-langfuse-minio-init:
+        condition: service_completed_successfully
     environment:
       <<: *langfuse-env
 
@@ -164,7 +189,10 @@ services:
     ports:
       - "127.0.0.1:3050:3000"
     depends_on:
-      - file-agent-langfuse-worker
+      file-agent-langfuse-worker:
+        condition: service_started
+      file-agent-langfuse-minio-init:
+        condition: service_completed_successfully
     environment:
       <<: *langfuse-env
       NEXTAUTH_URL: http://localhost:3050
