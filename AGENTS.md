@@ -40,7 +40,13 @@ Users can upload one or more documents, preview extracted text, find relevant ch
   `off` / `smolvlm` local / `openai` endpoint) and a bounded per-document cost.
 - In-memory LanceDB hybrid retrieval combining BM25 full-text search, semantic vector search, and reciprocal rank fusion (RRF).
 - A QA prompt layer and end-to-end RAG orchestration.
-- An `LLMClient` adapter built on the official OpenAI Python SDK.
+- A multi-step document agent (`src/file_agent/agent/`): a think-act-observe
+  loop where the LLM plans tool calls (`search_documents`, `list_documents`,
+  `read_section`) over the indexed documents; tool calls are JSON parsed
+  client-side, so any OpenAI-compatible backend works without server-side
+  tool-call support (see `docs/agent.md`).
+- An `LLMClient` adapter built on the official OpenAI Python SDK, plus a
+  `chat(messages)` method for multi-turn conversations.
 - Yandex AI Studio and local OpenAI-compatible LLM backends.
 - A Streamlit UI for multi-file upload, preview, search, and answer generation.
 - Pytest coverage for the main layers.
@@ -59,6 +65,9 @@ src/file_agent/
   lancedb_retriever.py        # In-memory LanceDB hybrid retrieval
   qa.py                       # Context assembly and QA prompt
   rag.py                      # End-to-end RAG orchestration
+  agent/                      # Multi-step document agent
+    tools.py                  # Toolset over the indexed documents
+    agent.py                  # FileAgent orchestration loop
   parsers/                    # Supported file parsers
     docling_parser.py         # Structured PDF/DOCX parsing (Docling)
     routing.py                # Per-page OCR decision heuristics
@@ -68,6 +77,7 @@ src/file_agent/
   llm/                        # LLM interface, adapter, and factory
 tests/                        # Pytest suite
 docs/local_inference.md       # Local LLM endpoint setup
+docs/agent.md                 # Document agent design and serving notes
 ```
 
 ## Architecture rules
@@ -110,7 +120,8 @@ docs/local_inference.md       # Local LLM endpoint setup
 Do not add the following without a separate task:
 
 - LangChain or LangGraph;
-- complex agent architecture;
+- multi-agent orchestration (the single-agent loop in `src/file_agent/agent/`
+  is the supported agent architecture);
 - a standalone vector database or FAISS;
 - image analysis for PPTX files;
 - Excel formula evaluation.
