@@ -14,7 +14,7 @@ reasoning models are stripped before parsing.
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from file_agent.agent.tools import Tool, ToolError
@@ -26,6 +26,17 @@ from file_agent.telemetry import tracer
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_STEPS = 6
+# Previous question/answer pairs kept in the conversation for follow-ups.
+# Only final answers are replayed, never tool traffic: session memory should
+# carry the dialogue, not stale observations that would crowd the context.
+DEFAULT_MAX_SESSION_TURNS = 4
+# Upper bound for a single observation fed back to the model. Protects the
+# context window from oversized tool output (e.g. several large parent
+# passages at once).
+MAX_OBSERVATION_CHARS = 8000
+OBSERVATION_TRUNCATION_NOTE = (
+    "\n[Observation truncated. Narrow the query or read a specific section.]"
+)
 
 NO_ANSWER_MESSAGE = "The agent could not produce an answer from the documents."
 
@@ -72,7 +83,10 @@ def build_system_prompt(tools: list[Tool]) -> str:
         "- Write the Final Answer in the same language as the user's "
         "question, and name the source files (and sections or pages when "
         "known) the answer is based on.\n"
-        "- Keep the Final Answer short and factual."
+        "- Keep the Final Answer short and factual.\n"
+        "- Earlier questions and answers may precede the current question; "
+        "use them to resolve references (like 'and in the second quarter?'), "
+        "but always ground new facts in fresh Observations."
     )
 
 
@@ -92,6 +106,34 @@ class AgentResponse:
     answer: str
     sources: list[SearchResult]
     steps: list[AgentStep]
+
+
+@dataclass
+class AgentSession:
+    """Bounded conversation memory that enables follow-up questions.
+
+    Keeps the last ``max_turns`` question/answer pairs and replays them as
+    plain chat turns before the current question. Tool calls and observations
+    from previous runs are deliberately not replayed: they are stale working
+    state, and replaying them would crowd the context window without adding
+    grounding (the agent re-queries the documents instead).
+    """
+
+    max_turns: int = DEFAULT_MAX_SESSION_TURNS
+    turns: list[tuple[str, str]] = field(default_factory=list)
+
+    def history_messages(self) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        for question, answer in self.turns[-self.max_turns :]:
+            messages.append({"role": "user", "content": question})
+            messages.append({"role": "assistant", "content": answer})
+        return messages
+
+    def record(self, question: str, answer: str) -> None:
+        self.turns.append((question, answer))
+
+    def clear(self) -> None:
+        self.turns.clear()
 
 
 @dataclass
@@ -120,13 +162,14 @@ class FileAgent:
         self._max_steps = max_steps
         self._system_prompt = build_system_prompt(tools)
 
-    def run(self, question: str) -> AgentResponse:
+    def run(self, question: str, session: AgentSession | None = None) -> AgentResponse:
         question = question.strip()
         if not question:
             raise ValueError("question is required")
 
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self._system_prompt},
+            *(session.history_messages() if session else []),
             {"role": "user", "content": question},
         ]
         steps: list[AgentStep] = []
@@ -136,6 +179,7 @@ class FileAgent:
         with tracer.start_as_current_span("file_agent.agent_run") as span:
             span.set_attribute("file_agent.question", question)
             span.set_attribute("file_agent.max_steps", self._max_steps)
+            span.set_attribute("file_agent.session_turns", len(session.turns) if session else 0)
 
             for _ in range(self._max_steps):
                 reply = _visible_text(self._llm.chat(messages))
@@ -143,7 +187,7 @@ class FileAgent:
 
                 if parsed.final is not None:
                     steps.append(AgentStep(response=reply, thought=parsed.thought))
-                    return self._finish(span, parsed.final, sources, steps)
+                    return self._finish(span, parsed.final, sources, steps, session, question)
 
                 step = AgentStep(response=reply, thought=parsed.thought)
                 if parsed.action is None:
@@ -160,8 +204,9 @@ class FileAgent:
                             sources.append(result)
 
                 steps.append(step)
+                observation = _bounded_observation(step.observation or "")
                 messages.append({"role": "assistant", "content": reply})
-                messages.append({"role": "user", "content": f"Observation: {step.observation}"})
+                messages.append({"role": "user", "content": f"Observation: {observation}"})
 
             # Step budget exhausted: demand an answer from what was observed.
             messages.append({"role": "user", "content": FINAL_ANSWER_DEMAND})
@@ -169,7 +214,9 @@ class FileAgent:
             parsed = _parse_reply(reply)
             steps.append(AgentStep(response=reply, thought=parsed.thought))
             answer = parsed.final if parsed.final is not None else reply
-            return self._finish(span, answer or NO_ANSWER_MESSAGE, sources, steps)
+            return self._finish(
+                span, answer or NO_ANSWER_MESSAGE, sources, steps, session, question
+            )
 
     def _finish(
         self,
@@ -177,8 +224,12 @@ class FileAgent:
         answer: str,
         sources: list[SearchResult],
         steps: list[AgentStep],
+        session: AgentSession | None,
+        question: str,
     ) -> AgentResponse:
         answer = answer.strip() or NO_ANSWER_MESSAGE
+        if session is not None:
+            session.record(question, answer)
         span.set_attribute("file_agent.step_count", len(steps))
         span.set_attribute("file_agent.source_count", len(sources))
         span.set_attribute("file_agent.answer_length", len(answer))
@@ -219,6 +270,7 @@ def answer_with_agent(
     documents: list[Document],
     max_steps: int = DEFAULT_MAX_STEPS,
     tools: list[Tool] | None = None,
+    session: AgentSession | None = None,
 ) -> AgentResponse:
     """Answer a question about already-indexed documents with the agent loop."""
     from file_agent.agent.tools import build_default_tools
@@ -228,7 +280,13 @@ def answer_with_agent(
         tools=tools if tools is not None else build_default_tools(retriever, documents),
         max_steps=max_steps,
     )
-    return agent.run(question)
+    return agent.run(question, session=session)
+
+
+def _bounded_observation(observation: str) -> str:
+    if len(observation) <= MAX_OBSERVATION_CHARS:
+        return observation
+    return observation[:MAX_OBSERVATION_CHARS] + OBSERVATION_TRUNCATION_NOTE
 
 
 def _visible_text(reply: str) -> str:

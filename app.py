@@ -10,7 +10,7 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from file_agent.agent import answer_with_agent
+from file_agent.agent import AgentSession, answer_with_agent
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.factory import create_llm_client
 from file_agent.rag import (
@@ -34,6 +34,7 @@ RETRIEVAL_STATE_KEYS = (
     "search_cache_key",
     "search_results",
     "ingest_span",
+    "agent_session",
 )
 
 
@@ -98,6 +99,7 @@ else:
         )
         st.session_state["lancedb_retriever"] = retriever
         st.session_state["ingest_span"] = ingest_span_identity
+        st.session_state.pop("agent_session", None)
 
     documents = st.session_state["indexed_documents"]
     chunks = st.session_state["indexed_chunks"]
@@ -155,6 +157,18 @@ else:
             "(search, document overview, reading sections) before answering."
         ),
     )
+    if answer_mode == "Agent (multi-step)":
+        agent_session = st.session_state.setdefault("agent_session", AgentSession())
+        if agent_session.turns:
+            session_col, reset_col = st.columns([3, 1])
+            session_col.caption(
+                f"Dialog memory: {len(agent_session.turns)} previous question(s); "
+                "follow-up questions can refer to them."
+            )
+            if reset_col.button("Reset dialog"):
+                agent_session.clear()
+                st.rerun()
+
     generate_answer = st.button("Generate answer")
     results = []
     normalized_query = query.strip()
@@ -229,6 +243,7 @@ else:
                             llm_client=create_llm_client(),
                             retriever=retriever,
                             documents=documents,
+                            session=st.session_state.setdefault("agent_session", AgentSession()),
                         )
                         agent_steps = response.steps
                     else:

@@ -5,7 +5,9 @@ import pytest
 from file_agent.agent.agent import (
     FINAL_ANSWER_DEMAND,
     FORMAT_REMINDER,
+    MAX_OBSERVATION_CHARS,
     AgentResponse,
+    AgentSession,
     FileAgent,
     answer_with_agent,
     build_system_prompt,
@@ -262,6 +264,60 @@ def test_agent_requires_question_and_valid_configuration():
         FileAgent(llm_client=ScriptedLLM([]), tools=[tool], max_steps=0)
     with pytest.raises(ValueError, match="tool"):
         FileAgent(llm_client=ScriptedLLM([]), tools=[])
+
+
+def test_agent_session_replays_previous_turns_and_records_new_ones():
+    tool, _ = make_search_tool()
+    session = AgentSession()
+    session.record("Какая выручка в первом квартале?", "120 млн рублей.")
+
+    llm = ScriptedLLM(["Final Answer: 138 млн рублей."])
+    agent = FileAgent(llm_client=llm, tools=[tool])
+
+    response = agent.run("А во втором?", session=session)
+
+    sent = llm.calls[0]
+    assert sent[0]["role"] == "system"
+    assert sent[1] == {"role": "user", "content": "Какая выручка в первом квартале?"}
+    assert sent[2] == {"role": "assistant", "content": "120 млн рублей."}
+    assert sent[3] == {"role": "user", "content": "А во втором?"}
+    # The new exchange is recorded for the next follow-up.
+    assert session.turns[-1] == ("А во втором?", "138 млн рублей.")
+    assert response.answer == "138 млн рублей."
+
+
+def test_agent_session_is_bounded_to_max_turns():
+    session = AgentSession(max_turns=2)
+    for index in range(5):
+        session.record(f"q{index}", f"a{index}")
+
+    messages = session.history_messages()
+
+    assert len(messages) == 4  # 2 turns * (question + answer)
+    assert messages[0]["content"] == "q3"
+    assert messages[-1]["content"] == "a4"
+
+    session.clear()
+    assert session.history_messages() == []
+
+
+def test_agent_truncates_oversized_observations():
+    huge_output = "x" * (MAX_OBSERVATION_CHARS + 5000)
+    tool, _ = make_search_tool(output=huge_output)
+    llm = ScriptedLLM(
+        [
+            action("search_documents", query="q"),
+            "Final Answer: Done.",
+        ]
+    )
+
+    response = FileAgent(llm_client=llm, tools=[tool]).run("Question?")
+
+    observation_message = llm.calls[-1][-1]["content"]
+    assert len(observation_message) < MAX_OBSERVATION_CHARS + 200
+    assert "Observation truncated" in observation_message
+    # The full output is still available to the UI via the step record.
+    assert response.steps[0].observation == huge_output
 
 
 def test_system_prompt_lists_every_tool():
