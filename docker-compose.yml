@@ -1,6 +1,11 @@
 x-langfuse-env: &langfuse-env
   DATABASE_URL: postgresql://langfuse:${LANGFUSE_POSTGRES_PASSWORD}@file-agent-langfuse-postgres:5432/langfuse
   CLICKHOUSE_URL: http://file-agent-langfuse-clickhouse:8123
+  # Separate from CLICKHOUSE_URL (HTTP interface, used for queries) - the
+  # migration step needs the native protocol port (9000), exposed by the
+  # clickhouse-server image by default even with no explicit `ports:` here
+  # (reachable from other containers on file-agent-langfuse-net regardless).
+  CLICKHOUSE_MIGRATION_URL: clickhouse://file-agent-langfuse-clickhouse:9000
   CLICKHOUSE_USER: langfuse
   CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
   REDIS_CONNECTION_STRING: redis://:${LANGFUSE_REDIS_PASSWORD}@file-agent-langfuse-redis:6379
