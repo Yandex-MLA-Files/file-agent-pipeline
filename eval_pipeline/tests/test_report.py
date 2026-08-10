@@ -93,3 +93,81 @@ def test_append_run_log_writes_one_line_per_call(tmp_path):
     assert entry["n_examples"] == 2
     assert entry["faithfulness_mean"] == 0.9
     assert "timestamp" in entry
+
+
+def test_report_to_mlflow_metrics_flattens_per_metric_stats():
+    from eval.report import report_to_mlflow_metrics
+
+    report = {
+        "n_examples": 3,
+        "faithfulness": {"mean": 0.9, "median": 0.9, "min": 0.8, "max": 1.0},
+    }
+
+    metrics = report_to_mlflow_metrics(report, ("faithfulness",))
+
+    assert metrics == {
+        "n_examples": 3.0,
+        "faithfulness_mean": 0.9,
+        "faithfulness_median": 0.9,
+        "faithfulness_min": 0.8,
+        "faithfulness_max": 1.0,
+    }
+
+
+def test_log_mlflow_run_is_a_noop_without_tracking_uri(monkeypatch):
+    import mlflow
+
+    from eval.report import log_mlflow_run
+
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    monkeypatch.setattr(
+        mlflow, "start_run", lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not run"))
+    )
+
+    log_mlflow_run(run_name="v0", params={"a": 1}, metrics={"m": 1.0})
+
+
+def test_log_mlflow_run_logs_params_metrics_and_tags_when_configured(monkeypatch):
+    import mlflow
+
+    from eval.report import log_mlflow_run
+
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://localhost:5050")
+    monkeypatch.setenv("MLFLOW_EXPERIMENT_NAME", "test-experiment")
+    calls = {}
+
+    class FakeRunContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    def fake_start_run(**kwargs):
+        calls["run_name"] = kwargs.get("run_name")
+        return FakeRunContext()
+
+    monkeypatch.setattr(mlflow, "set_tracking_uri", lambda uri: calls.__setitem__("uri", uri))
+    monkeypatch.setattr(
+        mlflow, "set_experiment", lambda name: calls.__setitem__("experiment", name)
+    )
+    monkeypatch.setattr(mlflow, "start_run", fake_start_run)
+    monkeypatch.setattr(mlflow, "log_params", lambda params: calls.__setitem__("params", params))
+    monkeypatch.setattr(
+        mlflow, "log_metrics", lambda metrics: calls.__setitem__("metrics", metrics)
+    )
+    monkeypatch.setattr(mlflow, "set_tags", lambda tags: calls.__setitem__("tags", tags))
+
+    log_mlflow_run(
+        run_name="v0-qwen-002",
+        params={"judge": "ragas"},
+        metrics={"faithfulness_mean": 0.9},
+        tags={"query_type": "complex"},
+    )
+
+    assert calls["uri"] == "http://localhost:5050"
+    assert calls["experiment"] == "test-experiment"
+    assert calls["run_name"] == "v0-qwen-002"
+    assert calls["params"] == {"judge": "ragas"}
+    assert calls["metrics"] == {"faithfulness_mean": 0.9}
+    assert calls["tags"] == {"query_type": "complex"}

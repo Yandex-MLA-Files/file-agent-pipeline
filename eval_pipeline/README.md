@@ -65,6 +65,17 @@ summary (timestamp, run file, out dir, judge, per-metric means) to
 separate runs -- e.g. different RAG versions -- can be compared without
 having to remember a unique `--out` each time.
 
+## Experiment tracking (MLflow, optional)
+
+If `MLFLOW_TRACKING_URI` is set (see `.env.example`), both `run_eval.py`
+(one run per `--out`, tagged with params + the 5 RagasJudge metric
+mean/median/min/max) and `scripts/compare_runs.py` (one run per
+`query_type` segment, with baseline/candidate/delta metrics) log to MLflow
+so separate RAG versions are comparable in the MLflow UI, not just in
+`runs_log.jsonl`. Unset -> both scripts behave exactly as if MLflow didn't
+exist, no error. A self-hosted instance is defined in the main repo's
+`docker-compose.yml` (`file-agent-mlflow-eval` service).
+
 ## Test
 
 ```
@@ -85,8 +96,9 @@ eval/
   run_loader.py       load + validate a run file
   judge/
     ragas_judge.py     RagasJudge — see module docstring for metric choices
-  report.py            aggregate scores into a report
+  report.py            aggregate scores into a report; optional MLflow run logging
 scripts/run_eval.py     CLI entrypoint
+scripts/compare_runs.py compare two scored runs, segmented by query_type
 tests/                  pytest suite, no network calls
 ```
 

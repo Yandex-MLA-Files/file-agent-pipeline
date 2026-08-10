@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+import mlflow
 import numpy as np
 import pandas as pd
 
@@ -84,3 +87,37 @@ def append_run_log(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def report_to_mlflow_metrics(report: dict, metric_names: tuple[str, ...]) -> dict[str, float]:
+    """Flatten a report's per-metric mean/median/min/max into MLflow metric names."""
+    metrics = {"n_examples": float(report["n_examples"])}
+    for metric in metric_names:
+        for stat in ("mean", "median", "min", "max"):
+            metrics[f"{metric}_{stat}"] = float(report[metric][stat])
+    return metrics
+
+
+def log_mlflow_run(
+    run_name: str,
+    params: dict[str, Any],
+    metrics: dict[str, float],
+    tags: dict[str, str] | None = None,
+) -> None:
+    """Log one MLflow run for comparing eval runs (params + RagasJudge metrics).
+
+    A silent no-op when MLFLOW_TRACKING_URI isn't set, so a missing/unreachable
+    MLflow server never breaks a normal `run_eval.py`/`compare_runs.py` call —
+    same posture as Langfuse tracing in the main app.
+    """
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
+    if not tracking_uri:
+        return
+
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(os.environ.get("MLFLOW_EXPERIMENT_NAME", "file-agent-eval"))
+    with mlflow.start_run(run_name=run_name):
+        mlflow.log_params(params)
+        mlflow.log_metrics(metrics)
+        if tags:
+            mlflow.set_tags(tags)

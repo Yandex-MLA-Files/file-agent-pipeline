@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eval.judge.ragas_judge import RagasJudge
-from eval.report import append_run_log, build_report, save_report
+from eval.report import (
+    append_run_log,
+    build_report,
+    log_mlflow_run,
+    report_to_mlflow_metrics,
+    save_report,
+)
 from eval.run_loader import RunValidationError, load_run
 
 JUDGE_NAME = "ragas"
@@ -45,6 +52,15 @@ def main() -> None:
     report = build_report(scored_df, judge.metric_names, args.negative_example_pattern)
     report_path = save_report(report, scored_df, args.out)
     append_run_log(report, judge.metric_names, args.run, args.out, JUDGE_NAME, args.runs_log)
+    log_mlflow_run(
+        run_name=Path(args.out).name,
+        params={
+            "run_file": str(args.run),
+            "judge": JUDGE_NAME,
+            "judge_model": os.environ.get("JUDGE_MODEL", ""),
+        },
+        metrics=report_to_mlflow_metrics(report, judge.metric_names),
+    )
 
     print(f"Done: {len(run_df)} examples, report saved to {report_path}")
     for metric in judge.metric_names:
