@@ -8,6 +8,10 @@ x-langfuse-env: &langfuse-env
   CLICKHOUSE_MIGRATION_URL: clickhouse://file-agent-langfuse-clickhouse:9000
   CLICKHOUSE_USER: langfuse
   CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+  # Single standalone ClickHouse node, no Zookeeper/cluster - without this,
+  # migrations default to `ON CLUSTER default` + ReplicatedMergeTree, which
+  # fail outright on a non-clustered node.
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
   REDIS_CONNECTION_STRING: redis://:${LANGFUSE_REDIS_PASSWORD}@file-agent-langfuse-redis:6379
   LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
   LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://file-agent-langfuse-minio:9000
