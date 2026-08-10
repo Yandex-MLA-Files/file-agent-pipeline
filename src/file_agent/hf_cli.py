@@ -21,6 +21,7 @@ from file_agent.hf_dataset import QADatasetRecord, load_qa_dataset
 from file_agent.hf_output import GeneratedDatasetArtifacts, save_generated_qa_dataset
 from file_agent.llm.base import LLMClient
 from file_agent.llm.factory import create_generation_llm_client
+from file_agent.telemetry import configure_telemetry
 
 MANIFEST_SCHEMA_VERSION = 2
 MANIFEST_FILE_NAME = "run_manifest.json"
@@ -176,6 +177,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Must run before any parsing/chunking/retrieval or Langfuse client
+    # activity: it registers the global OTel TracerProvider that both the
+    # existing file_agent.telemetry spans and Langfuse's own tracer
+    # (agent/observability.py's pipeline_trace) end up sharing, so the whole
+    # per-row pipeline lands as one nested Langfuse trace instead of only the
+    # agent loop.
+    configure_telemetry()
 
     try:
         config = HFGenerationConfig(

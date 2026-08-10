@@ -222,6 +222,7 @@ def test_main_maps_cli_arguments_and_prints_artifact_paths(monkeypatch, tmp_path
         return expected_result
 
     monkeypatch.setattr("file_agent.hf_cli.run_hf_dataset_generation", fake_run)
+    monkeypatch.setattr("file_agent.hf_cli.configure_telemetry", lambda: None)
     monkeypatch.delenv("AGENT_MAX_ITERATIONS", raising=False)
 
     exit_code = main(
@@ -284,6 +285,7 @@ def test_main_parses_max_iterations_flag(monkeypatch, tmp_path, capsys):
         return expected_result
 
     monkeypatch.setattr("file_agent.hf_cli.run_hf_dataset_generation", fake_run)
+    monkeypatch.setattr("file_agent.hf_cli.configure_telemetry", lambda: None)
     monkeypatch.delenv("AGENT_MAX_ITERATIONS", raising=False)
 
     exit_code = main(

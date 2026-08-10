@@ -50,6 +50,13 @@ Spans are sent to `localhost:4317` by default. Override the endpoint with the
 If Jaeger isn't running, `configure_telemetry()` still works — spans are sent
 in the background via `BatchSpanProcessor` and simply won't arrive anywhere.
 
+`generate_hf_dataset.py` (the HF eval-dataset pipeline) also calls
+`configure_telemetry()`, before Langfuse's client ever initializes. Langfuse
+then reuses the same global `TracerProvider` instead of creating its own, so
+every span above (parsing, chunking, indexing, retrieval) plus the ReAct
+agent loop's LLM turns and tool calls land in one Langfuse trace per dataset
+row — see `agent/observability.py`'s `pipeline_trace`.
+
 ## Development
 
 ```bash

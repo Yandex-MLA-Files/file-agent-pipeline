@@ -85,12 +85,12 @@ def test_get_client_reuses_the_same_instance(monkeypatch):
     assert first is second
 
 
-def test_agent_trace_is_a_noop_without_credentials(monkeypatch):
+def test_pipeline_trace_is_a_noop_without_credentials(monkeypatch):
     _reset_client(monkeypatch)
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
 
-    with observability.agent_trace("question"):
+    with observability.pipeline_trace("question"):
         pass  # must not raise even though no client is configured
 
     observability.log_generation(model="m", input_messages=[], output="a")
@@ -103,7 +103,7 @@ def test_log_generation_and_tool_call_and_finish_trace_reach_the_client(monkeypa
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
 
-    with observability.agent_trace("question"):
+    with observability.pipeline_trace("question"):
         observability.log_generation(model="m", input_messages=[{"role": "user"}], output="a")
         observability.log_tool_call(tool_name="search", arguments={"query": "x"}, output="o")
         observability.finish_trace(output="final answer")
@@ -113,13 +113,15 @@ def test_log_generation_and_tool_call_and_finish_trace_reach_the_client(monkeypa
     assert client.updated_span_output == "final answer"
 
 
-def test_agent_trace_detaches_from_an_ambient_otel_span(monkeypatch):
-    """Regression test: Langfuse's own tracer is OTel-based and parents new
-    spans on whatever span is active in the process-global OTel context. An
-    unrelated tracer (e.g. file_agent.telemetry's Jaeger tracer) leaving a
-    span active there must not become the parent of the Langfuse trace -
-    that produced a Langfuse "Unnamed trace" wrapper with no input/output,
-    with the real react_agent span buried one level underneath it."""
+def test_pipeline_trace_does_not_detach_the_ambient_otel_context(monkeypatch):
+    """Regression test: pipeline_trace must NOT clear the ambient OTel context
+    before opening its own Langfuse span. The whole point of opening the
+    Langfuse trace at the process_qa_record level is that, once
+    configure_telemetry() has registered a shared TracerProvider, Langfuse
+    reuses it - so file_agent.telemetry spans created inside this trace
+    (docling_parse, chunk_document, retriever_index/search, ...) nest under
+    it automatically. Detaching context here (as an earlier, narrower fix
+    once did for the agent-loop-only trace) would break that nesting."""
     _reset_client(monkeypatch)
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
@@ -134,8 +136,8 @@ def test_agent_trace_detaches_from_an_ambient_otel_span(monkeypatch):
     monkeypatch.setattr(observability, "Langfuse", SpyLangfuse)
 
     ambient_tracer = TracerProvider().get_tracer("file_agent")
-    with ambient_tracer.start_as_current_span("file_agent.run_react_agent") as ambient_span:
-        with observability.agent_trace("question"):
+    with ambient_tracer.start_as_current_span("file_agent.load_documents") as ambient_span:
+        with observability.pipeline_trace("question"):
             pass
 
-    assert seen_span_during_trace[0] is not ambient_span
+    assert seen_span_during_trace[0] is ambient_span

@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from file_agent.agent.observability import agent_trace, finish_trace, log_generation, log_tool_call
+from file_agent.agent.observability import finish_trace, log_generation, log_tool_call
 from file_agent.agent.tools import Tool, ToolResult
 from file_agent.llm.base import LLMClient, ToolCall, ToolCallResponse
 from file_agent.retrieval import SearchResult
@@ -37,7 +37,7 @@ def run_react_agent(
     tools: list[Tool],
     max_iterations: int = MAX_ITERATIONS_DEFAULT,
 ) -> AgentResponse:
-    with tracer.start_as_current_span("file_agent.run_react_agent") as span, agent_trace(question):
+    with tracer.start_as_current_span("file_agent.run_react_agent") as span:
         span.set_attribute("file_agent.question", question)
         span.set_attribute("file_agent.tool_count", len(tools))
 

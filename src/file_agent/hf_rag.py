@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from file_agent.agent.loop import MAX_ITERATIONS_DEFAULT, run_react_agent
+from file_agent.agent.observability import finish_trace, pipeline_trace
 from file_agent.agent.tools import build_default_tools
 from file_agent.document import Document
 from file_agent.hf_dataset import QADatasetRecord, download_record_documents
@@ -176,43 +177,45 @@ def process_qa_record(
     if len(document_paths) != len(record.doc_ids):
         raise ValueError("document_paths count must match record.doc_ids count")
 
-    active_document_loader = document_loader or load_documents
-    documents = active_document_loader(document_paths)
-    for document, doc_id in zip(documents, record.doc_ids, strict=True):
-        for block in document.blocks:
-            block.metadata["dataset_record_id"] = record.id
-            block.metadata["dataset_doc_id"] = doc_id
+    with pipeline_trace(record.question):
+        active_document_loader = document_loader or load_documents
+        documents = active_document_loader(document_paths)
+        for document, doc_id in zip(documents, record.doc_ids, strict=True):
+            for block in document.blocks:
+                block.metadata["dataset_record_id"] = record.id
+                block.metadata["dataset_doc_id"] = doc_id
 
-    active_retriever = retriever if retriever is not None else LanceDBRetriever()
-    try:
-        index_documents(
-            documents=documents,
-            retriever=active_retriever,
-            max_chars=max_chars,
-            overlap=overlap,
-        )
-        document_path_map = {Path(path).name: Path(path) for path in document_paths}
-        tools = build_default_tools(
-            active_retriever, document_paths=document_path_map, default_top_k=top_k
-        )
-        response = run_react_agent(
-            question=record.question,
-            llm_client=llm_client,
-            tools=tools,
-            max_iterations=max_iterations,
-        )
-        contexts = serialize_search_results(response.sources)
+        active_retriever = retriever if retriever is not None else LanceDBRetriever()
+        try:
+            index_documents(
+                documents=documents,
+                retriever=active_retriever,
+                max_chars=max_chars,
+                overlap=overlap,
+            )
+            document_path_map = {Path(path).name: Path(path) for path in document_paths}
+            tools = build_default_tools(
+                active_retriever, document_paths=document_path_map, default_top_k=top_k
+            )
+            response = run_react_agent(
+                question=record.question,
+                llm_client=llm_client,
+                tools=tools,
+                max_iterations=max_iterations,
+            )
+            contexts = serialize_search_results(response.sources)
+            finish_trace(output=response.answer)
 
-        return GeneratedQARecord(
-            id=record.id,
-            question=record.question,
-            doc_ids=record.doc_ids,
-            answer_model=response.answer,
-            contexts=contexts,
-            answer=record.answer,
-        )
-    finally:
-        active_retriever.clear()
+            return GeneratedQARecord(
+                id=record.id,
+                question=record.question,
+                doc_ids=record.doc_ids,
+                answer_model=response.answer,
+                contexts=contexts,
+                answer=record.answer,
+            )
+        finally:
+            active_retriever.clear()
 
 
 def serialize_search_results(

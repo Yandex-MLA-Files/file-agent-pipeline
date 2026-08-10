@@ -52,10 +52,12 @@ Users can upload one or more documents, preview extracted text, find relevant ch
   native tool-calling (`generate_with_tools`).
 - Yandex AI Studio and local OpenAI-compatible LLM backends.
 - A Streamlit UI for multi-file upload, preview, search, and answer generation.
-- Langfuse tracing for the agent loop (one trace per question, one generation
-  per LLM turn, one span per tool call) alongside the existing OpenTelemetry/
-  Jaeger tracing of the parsing/chunking/retrieval layers — the two systems
-  are intentionally separate, not bridged.
+- Unified per-question tracing in the HF eval-dataset pipeline: one Langfuse
+  trace covers parsing, chunking, indexing, and the ReAct agent loop (one
+  generation per LLM turn, one span per tool call), bridged with the existing
+  OpenTelemetry/Jaeger spans of the parsing/chunking/retrieval layers rather
+  than duplicating instrumentation — both backends read the same shared OTel
+  `TracerProvider` once `configure_telemetry()` has run (see `hf_cli.main()`).
 - Pytest coverage for the main layers.
 
 Supported extensions: `.md`, `.txt`, `.pdf`, `.docx`, `.html`, `.htm`, `.xlsx`, `.pptx`.
@@ -199,8 +201,18 @@ Langfuse (self-hosted, own stack — see `docker-compose.yml`'s
   `LANGFUSE_SALT`, `LANGFUSE_ENCRYPTION_KEY`, `LANGFUSE_NEXTAUTH_SECRET`
   (self-host infra secrets, only needed to run the `file-agent-langfuse-*`
   compose services, not by the application code itself).
-- Agent tracing degrades to a silent no-op when `LANGFUSE_PUBLIC_KEY`/
-  `LANGFUSE_SECRET_KEY` are unset (e.g. in tests).
+- Tracing (`agent/observability.py`'s `pipeline_trace`) degrades to a silent
+  no-op when `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` are unset (e.g. in
+  tests).
+- `pipeline_trace` opens its Langfuse trace around parsing/chunking/indexing/
+  the agent loop for one dataset row (`hf_rag.process_qa_record`), not just
+  the agent loop. It deliberately does not detach the ambient OTel context:
+  when `configure_telemetry()` has already registered the global OTel
+  `TracerProvider` (as `hf_cli.main()` does, before any parsing runs),
+  Langfuse's client reuses that same provider instead of creating its own, so
+  every existing `file_agent.telemetry` span created during the trace nests
+  under it automatically — no extra instrumentation needed in the parsing/
+  chunking/retrieval modules themselves.
 
 Never make real API requests in tests or add working credentials to code, fixtures, logs, or documentation.
 

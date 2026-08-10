@@ -4,7 +4,6 @@ from contextlib import contextmanager
 from typing import Any
 
 from langfuse import Langfuse
-from opentelemetry import context as otel_context_api
 
 _client: Langfuse | None = None
 
@@ -28,35 +27,36 @@ def _get_client() -> Langfuse | None:
 
 
 @contextmanager
-def agent_trace(question: str) -> Iterator[None]:
-    """Open one Langfuse trace (root span) for a single agent run.
+def pipeline_trace(question: str) -> Iterator[None]:
+    """Open one Langfuse trace (root span) for one dataset row's full pipeline
+    run: parsing, chunking, indexing, and the ReAct agent loop.
 
-    Silently no-ops when LANGFUSE_PUBLIC_KEY/SECRET_KEY aren't set, so the
-    agent loop and its tests never need Langfuse to be reachable. This traces
-    LLM turns and tool calls only - parsing/chunking/retrieval keep the
-    existing OpenTelemetry/Jaeger spans (file_agent.telemetry) unchanged.
+    Silently no-ops when LANGFUSE_PUBLIC_KEY/SECRET_KEY aren't set, so callers
+    and their tests never need Langfuse to be reachable.
 
-    Langfuse's own tracer is OTel-based and, like any OTel tracer, parents new
-    spans on whatever span is active in the process-global OTel context - even
-    one started by the unrelated file_agent.telemetry (Jaeger) tracer. Without
-    detaching first, a run_react_agent call nested under an already-open
-    Jaeger span gets recorded as a child of a synthetic, attribute-less
-    "Unnamed trace" instead of becoming its own root trace (observed in
-    Langfuse as a react_agent span with correct input/output nested one level
-    under a trace whose own input/output show as "undefined").
+    Deliberately does NOT detach the ambient OTel context before opening this
+    span. Langfuse's own tracer is OTel-based; when file_agent.telemetry's
+    configure_telemetry() has already registered a real (non-proxy) global
+    TracerProvider, Langfuse's client reuses that same provider instead of
+    creating its own (langfuse._client.resource_manager._init_tracer_provider)
+    and simply adds its own span processor to it. That makes every existing
+    file_agent.telemetry span created inside this trace (docling_parse,
+    chunk_document, retriever_index/search, llm_generate*, ...) show up as a
+    nested child here automatically, with no extra instrumentation in those
+    modules - the whole point of opening the trace at this level rather than
+    only around the agent loop. Callers that never call configure_telemetry()
+    (e.g. tests, or a future caller without it) are unaffected: Langfuse then
+    creates its own provider and this trace is simply its own root, same as
+    before.
     """
     client = _get_client()
     if client is None:
         yield
         return
-    token = otel_context_api.attach(otel_context_api.Context())
-    try:
-        with client.start_as_current_observation(
-            name="react_agent", as_type="span", input=question
-        ):
-            yield
-    finally:
-        otel_context_api.detach(token)
+    with client.start_as_current_observation(
+        name="process_qa_record", as_type="span", input=question
+    ):
+        yield
 
 
 def log_generation(model: str, input_messages: list[dict[str, Any]], output: str | None) -> None:
