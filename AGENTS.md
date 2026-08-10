@@ -173,7 +173,11 @@ Local OpenAI-compatible backend:
 
 - `LOCAL_LLM_BASE_URL`;
 - `LOCAL_LLM_API_KEY`;
-- `LOCAL_LLM_MODEL`.
+- `LOCAL_LLM_MODEL`;
+- `LOCAL_LLM_TEMPERATURE` (default `0.0`) — keep at 0: with vLLM's hermes
+  tool-call parser, Qwen2.5 reliably emits a well-formed `<tool_call>` tag
+  at temperature 0 but not higher (observed empirically); this only affects
+  the ReAct agent's tool-calling reliability, not plain text generation.
 
 ReAct agent:
 

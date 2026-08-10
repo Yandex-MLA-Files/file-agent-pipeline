@@ -3,6 +3,7 @@ import pytest
 from file_agent.llm.factory import (
     DEFAULT_LOCAL_BASE_URL,
     DEFAULT_LOCAL_MODEL,
+    DEFAULT_LOCAL_TEMPERATURE,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT_SECONDS,
     DEFAULT_YANDEX_BASE_URL,
@@ -62,11 +63,13 @@ def test_factory_creates_local_client_without_configured_api_key(monkeypatch):
     monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
     monkeypatch.delenv("LOCAL_LLM_MODEL", raising=False)
     monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_TEMPERATURE", raising=False)
 
     client = create_llm_client(load_env=False)
 
     assert isinstance(client, OpenAILLMClient)
     assert client.model == DEFAULT_LOCAL_MODEL
+    assert client.temperature == DEFAULT_LOCAL_TEMPERATURE
     assert client.client.kwargs == {
         "api_key": LOCAL_API_KEY_PLACEHOLDER,
         "base_url": DEFAULT_LOCAL_BASE_URL,
@@ -74,6 +77,15 @@ def test_factory_creates_local_client_without_configured_api_key(monkeypatch):
         "timeout": DEFAULT_TIMEOUT_SECONDS,
         "max_retries": DEFAULT_MAX_RETRIES,
     }
+
+
+def test_factory_uses_configured_local_temperature(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "local")
+    monkeypatch.setenv("LOCAL_LLM_TEMPERATURE", "0.7")
+
+    client = create_llm_client(load_env=False)
+
+    assert client.temperature == 0.7
 
 
 def test_factory_uses_configured_local_api_key(monkeypatch):

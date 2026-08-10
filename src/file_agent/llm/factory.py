@@ -12,6 +12,13 @@ DEFAULT_YANDEX_BASE_URL = "https://ai.api.cloud.yandex.net/v1"
 DEFAULT_YANDEX_MODEL = "qwen3.6-35b-a3b"
 DEFAULT_LOCAL_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_LOCAL_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+# Empirically, Qwen2.5 + vLLM's hermes tool-call parser reliably emits a
+# well-formed <tool_call> tag at temperature=0 but not at 0.2 (the
+# OpenAILLMClient default) - sampling noise makes the model miss the exact
+# special-token sequence often enough to break tool-calling. Plain (no-tools)
+# generation is unaffected either way, so this only needs to be low for the
+# local backend, not Yandex.
+DEFAULT_LOCAL_TEMPERATURE = 0.0
 DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_MAX_RETRIES = 0
 LOCAL_API_KEY_PLACEHOLDER = "not-used"
@@ -77,6 +84,7 @@ def _create_local_client() -> OpenAILLMClient:
     return OpenAILLMClient(
         client=client,
         model=_getenv("LOCAL_LLM_MODEL", DEFAULT_LOCAL_MODEL),
+        temperature=float(_getenv("LOCAL_LLM_TEMPERATURE", str(DEFAULT_LOCAL_TEMPERATURE))),
     )
 
 
