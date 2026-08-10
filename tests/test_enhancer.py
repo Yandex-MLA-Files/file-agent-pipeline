@@ -1,8 +1,13 @@
+import io
+
 import fitz
 from PIL import Image
+from pptx import Presentation
+from pptx.util import Inches
 
 from file_agent.document import Block, BlockType, Document
 from file_agent.parsers.enhancer import DocumentEnhancer
+from file_agent.parsers.pptx_parser import PPTXParser
 from file_agent.vlm.base import VLMClient
 
 
@@ -68,7 +73,33 @@ def test_enhancer_skips_blocks_without_bbox(tmp_path):
     assert figure_no_bbox.vlm_description is None
 
 
-def test_enhancer_ignores_non_pdf(tmp_path):
+def _make_pptx_with_picture(path):
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    image_bytes = io.BytesIO()
+    Image.new("RGB", (10, 10), color="blue").save(image_bytes, format="PNG")
+    image_bytes.seek(0)
+    slide.shapes.add_picture(
+        image_bytes, left=Inches(1), top=Inches(1), width=Inches(3), height=Inches(3)
+    )
+    presentation.save(path)
+
+
+def test_enhancer_describes_pptx_picture_block(tmp_path):
+    pptx_path = tmp_path / "deck.pptx"
+    _make_pptx_with_picture(pptx_path)
+    document = PPTXParser().parse(pptx_path)
+    picture_block = next(b for b in document.blocks if b.block_type == BlockType.IMAGE)
+
+    stub = StubVLMClient()
+    DocumentEnhancer(vlm_client=stub).enhance(document, pptx_path)
+
+    assert stub.calls == 1
+    assert picture_block.vlm_description == "STUB: a diagram"
+    assert "[Image description]: STUB: a diagram" in picture_block.text
+
+
+def test_enhancer_ignores_unsupported_formats(tmp_path):
     docx_path = tmp_path / "doc.docx"
     docx_path.write_bytes(b"not really a docx")
 

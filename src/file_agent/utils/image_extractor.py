@@ -4,8 +4,36 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 from PIL import Image
+from pptx import Presentation
 
 logger = logging.getLogger(__name__)
+
+
+def extract_image_from_pptx(
+    pptx_path: Path,
+    slide_number: int,
+    shape_index: int,
+) -> Image.Image | None:
+    """Read a picture shape's raw image bytes from a PPTX slide.
+
+    Unlike PDF, PPTX pictures need no rendering/cropping - python-pptx exposes
+    the original embedded image bytes directly.
+
+    :param pptx_path: path to the PPTX file.
+    :param slide_number: 1-indexed slide number.
+    :param shape_index: position of the picture shape in ``slide.shapes``.
+    :return: a PIL.Image, or None if the shape could not be read.
+    """
+    try:
+        presentation = Presentation(str(pptx_path))
+        slide = presentation.slides[slide_number - 1]
+        shape = slide.shapes[shape_index]
+        return Image.open(io.BytesIO(shape.image.blob))
+    except Exception as exc:
+        logger.warning(
+            "Could not extract image from slide %s, shape %s: %s", slide_number, shape_index, exc
+        )
+        return None
 
 
 def extract_image_from_pdf(

@@ -2,8 +2,9 @@ from pathlib import Path
 from typing import Any
 
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
-from file_agent.document import Block, Document
+from file_agent.document import Block, BlockType, Document
 from file_agent.parsers.base import BaseParser
 
 
@@ -26,12 +27,43 @@ class PPTXParser(BaseParser):
                     },
                 )
             )
+            blocks.extend(_picture_blocks(slide, slide_index, path.name))
 
         return Document(
             file_name=path.name,
             file_type="pptx",
             blocks=blocks,
         )
+
+
+def _picture_blocks(slide: Any, slide_index: int, source_file: str) -> list[Block]:
+    """One empty BlockType.IMAGE block per picture shape, ready for VLM description.
+
+    Text stays empty here (mirrors the PDF FIGURE/IMAGE convention) - the
+    description is filled in later by DocumentEnhancer, which turns the
+    picture's own bytes (via extract_image_from_pptx) into readable text.
+    """
+    blocks: list[Block] = []
+    for shape_index, shape in enumerate(slide.shapes):
+        if shape.shape_type != MSO_SHAPE_TYPE.PICTURE:
+            continue
+        left, top = shape.left.pt, shape.top.pt
+        blocks.append(
+            Block(
+                id=f"slide-{slide_index}-image-{shape_index}",
+                text="",
+                type=BlockType.IMAGE.value,
+                block_type=BlockType.IMAGE,
+                page_number=slide_index,
+                bbox=(left, top, left + shape.width.pt, top + shape.height.pt),
+                metadata={
+                    "source_file": source_file,
+                    "slide_number": slide_index,
+                    "shape_index": shape_index,
+                },
+            )
+        )
+    return blocks
 
 
 def _slide_to_text(slide: Any, slide_number: int) -> str:

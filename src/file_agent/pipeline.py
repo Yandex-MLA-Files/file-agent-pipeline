@@ -75,7 +75,10 @@ def _parse_by_suffix(
     if suffix == ".xlsx":
         return XLSXParser().parse(path)
     if suffix == ".pptx":
-        return PPTXParser().parse(path)
+        document = PPTXParser().parse(path)
+        if enable_vlm is not False:
+            _enhance_with_vlm(document, path, forced=enable_vlm is True)
+        return document
 
     raise ValueError(f"Unsupported file type: {suffix or '<no extension>'}")
 
@@ -142,7 +145,7 @@ def _resolve_ocr_policy(path: Path, enable_ocr: OcrMode):
 
 
 def _enhance_with_vlm(document: Document, path: Path, forced: bool) -> None:
-    if path.suffix.lower() != ".pdf":
+    if path.suffix.lower() not in {".pdf", ".pptx"}:
         return
 
     has_figures = any(

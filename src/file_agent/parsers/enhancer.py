@@ -4,8 +4,10 @@ from pathlib import Path
 
 from file_agent.document import Block, BlockType, Document
 from file_agent.telemetry import tracer
-from file_agent.utils.image_extractor import extract_image_from_pdf
+from file_agent.utils.image_extractor import extract_image_from_pdf, extract_image_from_pptx
 from file_agent.vlm.base import VLMClient
+
+SUPPORTED_SUFFIXES = {".pdf", ".pptx"}
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +35,10 @@ class DocumentEnhancer:
     """Enriches figure/image blocks with a VLM-generated textual description.
 
     Only blocks that a parser classified as figures and located with a bounding
-    box on a PDF page can be cropped and sent to the VLM. To keep the cost
-    predictable, tiny decorative images are skipped and at most
-    ``max_figures`` figures per document are described (largest first —
-    the big diagram matters more than a footer icon).
+    box (PDF page region, or PPTX shape position) can be extracted and sent to
+    the VLM. To keep the cost predictable, tiny decorative images are skipped
+    and at most ``max_figures`` figures per document are described (largest
+    first — the big diagram matters more than a footer icon).
     """
 
     def __init__(
@@ -58,9 +60,8 @@ class DocumentEnhancer:
         )
 
     def enhance(self, doc: Document, file_path: Path) -> Document:
-        if Path(file_path).suffix.lower() != ".pdf":
-            # Cropping figures requires rendering PDF page regions; other formats
-            # are not supported by the VLM enhancer yet.
+        suffix = Path(file_path).suffix.lower()
+        if suffix not in SUPPORTED_SUFFIXES:
             return doc
 
         candidates = [block for block in doc.blocks if self._should_describe(block)]
@@ -82,7 +83,12 @@ class DocumentEnhancer:
             described = 0
             for block in selected:
                 try:
-                    image = extract_image_from_pdf(file_path, block.page_number, block.bbox)
+                    if suffix == ".pdf":
+                        image = extract_image_from_pdf(file_path, block.page_number, block.bbox)
+                    else:
+                        image = extract_image_from_pptx(
+                            file_path, block.page_number, block.metadata["shape_index"]
+                        )
                     if image is None:
                         continue
 

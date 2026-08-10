@@ -1,6 +1,10 @@
+import io
+
+from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches
 
+from file_agent.document import BlockType
 from file_agent.parsers.pptx_parser import PPTXParser
 
 
@@ -69,3 +73,29 @@ def test_pptx_parser_preserves_slide_metadata(tmp_path):
     assert document.blocks[1].metadata["source_file"] == "sample.pptx"
     assert document.blocks[1].metadata["slide_number"] == 2
     assert document.blocks[1].metadata["shapes_count"] > 0
+
+
+def test_pptx_parser_emits_an_image_block_per_picture_shape(tmp_path):
+    file_path = tmp_path / "with_picture.pptx"
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    image_bytes = io.BytesIO()
+    Image.new("RGB", (10, 10), color="red").save(image_bytes, format="PNG")
+    image_bytes.seek(0)
+    slide.shapes.add_picture(
+        image_bytes, left=Inches(1), top=Inches(2), width=Inches(3), height=Inches(4)
+    )
+    presentation.save(file_path)
+
+    document = PPTXParser().parse(file_path)
+
+    image_blocks = [block for block in document.blocks if block.block_type == BlockType.IMAGE]
+    assert len(image_blocks) == 1
+
+    image_block = image_blocks[0]
+    assert image_block.text == ""
+    assert image_block.page_number == 1
+    assert image_block.metadata["slide_number"] == 1
+    assert image_block.metadata["shape_index"] == 0
+    assert image_block.bbox == (72.0, 144.0, 72.0 + 216.0, 144.0 + 288.0)  # 1"/2"/3"/4" in points
