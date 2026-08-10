@@ -1,3 +1,6 @@
+from opentelemetry import trace as otel_trace_api
+from opentelemetry.sdk.trace import TracerProvider
+
 from file_agent.agent import observability
 
 
@@ -108,3 +111,31 @@ def test_log_generation_and_tool_call_and_finish_trace_reach_the_client(monkeypa
     client = observability._get_client()
     assert [obs["as_type"] for obs in client.observations] == ["generation", "tool"]
     assert client.updated_span_output == "final answer"
+
+
+def test_agent_trace_detaches_from_an_ambient_otel_span(monkeypatch):
+    """Regression test: Langfuse's own tracer is OTel-based and parents new
+    spans on whatever span is active in the process-global OTel context. An
+    unrelated tracer (e.g. file_agent.telemetry's Jaeger tracer) leaving a
+    span active there must not become the parent of the Langfuse trace -
+    that produced a Langfuse "Unnamed trace" wrapper with no input/output,
+    with the real react_agent span buried one level underneath it."""
+    _reset_client(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    seen_span_during_trace = []
+
+    class SpyLangfuse(FakeLangfuse):
+        def start_as_current_observation(self, **kwargs):
+            seen_span_during_trace.append(otel_trace_api.get_current_span())
+            return super().start_as_current_observation(**kwargs)
+
+    monkeypatch.setattr(observability, "Langfuse", SpyLangfuse)
+
+    ambient_tracer = TracerProvider().get_tracer("file_agent")
+    with ambient_tracer.start_as_current_span("file_agent.run_react_agent") as ambient_span:
+        with observability.agent_trace("question"):
+            pass
+
+    assert seen_span_during_trace[0] is not ambient_span
