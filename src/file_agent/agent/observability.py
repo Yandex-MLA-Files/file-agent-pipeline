@@ -4,8 +4,30 @@ from contextlib import contextmanager
 from typing import Any
 
 from langfuse import Langfuse
+from langfuse.span_filter import is_default_export_span
+from opentelemetry.sdk.trace import ReadableSpan
 
 _client: Langfuse | None = None
+
+# file_agent.telemetry's tracer (file_agent.telemetry.tracer = trace.get_tracer("file_agent"))
+FILE_AGENT_INSTRUMENTATION_SCOPE = "file_agent"
+
+
+def _export_file_agent_spans_too(span: ReadableSpan) -> bool:
+    """LangfuseSpanProcessor's default should_export_span is an allowlist -
+    it only forwards spans from Langfuse's own tracer, spans carrying a
+    gen_ai.* attribute, or a fixed set of known LLM-instrumentation scope
+    names (langfuse._client.span_filter.KNOWN_LLM_INSTRUMENTATION_SCOPE_PREFIXES).
+    file_agent.telemetry's spans (parse_file, docling_parse, chunk_document,
+    retriever_index/search, run_react_agent, ...) match none of those, so
+    without this override they're silently dropped even though they reach
+    the shared TracerProvider fine - only the Langfuse-native
+    process_qa_record/llm_turn/tool:* spans would show up in a trace.
+    """
+    return is_default_export_span(span) or (
+        span.instrumentation_scope is not None
+        and span.instrumentation_scope.name == FILE_AGENT_INSTRUMENTATION_SCOPE
+    )
 
 
 def _get_client() -> Langfuse | None:
@@ -22,6 +44,7 @@ def _get_client() -> Langfuse | None:
             public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
             secret_key=os.environ["LANGFUSE_SECRET_KEY"],
             host=os.getenv("LANGFUSE_HOST", "http://localhost:3050"),
+            should_export_span=_export_file_agent_spans_too,
         )
     return _client
 

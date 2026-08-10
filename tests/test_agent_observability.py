@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from opentelemetry import trace as otel_trace_api
 from opentelemetry.sdk.trace import TracerProvider
 
@@ -83,6 +85,31 @@ def test_get_client_reuses_the_same_instance(monkeypatch):
     second = observability._get_client()
 
     assert first is second
+
+
+def test_get_client_exports_file_agent_spans_alongside_langfuse_defaults(monkeypatch):
+    """Regression test: LangfuseSpanProcessor's default should_export_span is
+    an allowlist (Langfuse's own tracer, gen_ai.* spans, known LLM
+    instrumentation scopes) that drops everything else - including
+    file_agent.telemetry's parse_file/chunk_document/retriever_* spans,
+    which are the whole point of bridging onto the shared TracerProvider.
+    _get_client() must override it to also allow the file_agent scope."""
+    _reset_client(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    client = observability._get_client()
+    should_export_span = client.kwargs["should_export_span"]
+
+    file_agent_span = SimpleNamespace(
+        instrumentation_scope=SimpleNamespace(name="file_agent"), attributes=None
+    )
+    unrelated_span = SimpleNamespace(
+        instrumentation_scope=SimpleNamespace(name="some_other_library"), attributes=None
+    )
+
+    assert should_export_span(file_agent_span) is True
+    assert should_export_span(unrelated_span) is False
 
 
 def test_pipeline_trace_is_a_noop_without_credentials(monkeypatch):
