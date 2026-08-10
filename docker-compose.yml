@@ -1,3 +1,12 @@
+# Explicit project name: the default (current directory's basename,
+# "file-agent-pipeline") collides with a teammate's identically-named clone
+# on the same shared Docker daemon, making `docker compose` report their
+# containers as "orphans" of this project. An explicit name here removes the
+# ambiguity for good (does not affect the already-prefixed container_name
+# values, only project-level bookkeeping like orphan detection and the
+# volume-name prefix).
+name: file-agent-aa
+
 x-langfuse-env: &langfuse-env
   DATABASE_URL: postgresql://langfuse:${LANGFUSE_POSTGRES_PASSWORD}@file-agent-langfuse-postgres:5432/langfuse
   CLICKHOUSE_URL: http://file-agent-langfuse-clickhouse:8123
