@@ -48,6 +48,7 @@ def generate_hf_qa_records(
     overlap: int = 100,
     retriever: Retriever | None = None,
     resume: bool = False,
+    answer_mode: str = "rag",
 ) -> BatchGenerationResult:
     validate_qa_dataset(dataset)
     if not isinstance(dataset_id, str) or not dataset_id.strip():
@@ -69,6 +70,7 @@ def generate_hf_qa_records(
         top_k=top_k,
         max_chars=max_chars,
         overlap=overlap,
+        answer_mode=answer_mode,
     )
     records: list[GeneratedQARecord] = []
     processed_count = 0
@@ -105,6 +107,7 @@ def generate_hf_qa_records(
                 overlap=overlap,
                 retriever=retriever,
                 document_loader=document_loader,
+                answer_mode=answer_mode,
             )
             _validate_generated_record(generated_record, record)
             _write_checkpoint(
@@ -167,6 +170,7 @@ def build_generation_parameters(
     top_k: int,
     max_chars: int,
     overlap: int,
+    answer_mode: str = "rag",
 ) -> dict[str, Any]:
     prompt_template = build_qa_prompt(
         question="{question}",
@@ -175,6 +179,7 @@ def build_generation_parameters(
     return {
         "dataset_id": dataset_id,
         "revision": revision,
+        "answer_mode": answer_mode,
         "model_id": _model_identifier(llm_client),
         "temperature": _optional_scalar_attribute(llm_client, "temperature"),
         "max_tokens": _optional_scalar_attribute(llm_client, "max_tokens"),

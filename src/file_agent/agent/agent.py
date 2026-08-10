@@ -174,7 +174,8 @@ class FileAgent:
         ]
         steps: list[AgentStep] = []
         sources: list[SearchResult] = []
-        seen_chunk_ids: set[str] = set()
+        # Chunk ids repeat across documents, so the id alone is not unique.
+        seen_chunk_keys: set[tuple[Any, str]] = set()
 
         with tracer.start_as_current_span("file_agent.agent_run") as span:
             span.set_attribute("file_agent.question", question)
@@ -199,8 +200,9 @@ class FileAgent:
                     step.arguments = arguments if isinstance(arguments, dict) else {}
                     step.observation, step_sources = self._execute(step.tool, step.arguments)
                     for result in step_sources:
-                        if result.chunk.id not in seen_chunk_ids:
-                            seen_chunk_ids.add(result.chunk.id)
+                        key = (result.chunk.metadata.get("source_file"), result.chunk.id)
+                        if key not in seen_chunk_keys:
+                            seen_chunk_keys.add(key)
                             sources.append(result)
 
                 steps.append(step)

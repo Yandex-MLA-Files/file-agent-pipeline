@@ -106,6 +106,73 @@ def test_process_qa_record_generates_answer_and_serializes_exact_contexts(tmp_pa
     assert "dataset_doc_id=q0001/second.txt" in prompt
 
 
+class ScriptedAgentLLM:
+    """Chat-capable fake that first calls the search tool, then answers."""
+
+    def __init__(self):
+        self.chat_calls: list[list[dict[str, str]]] = []
+        self._replies = [
+            'Thought: search\nAction: {"tool": "search_documents", '
+            '"arguments": {"query": "contexts"}}',
+            "Thought: done\nFinal Answer: Agent answer",
+        ]
+
+    def generate(self, prompt: str) -> str:
+        return self.chat([{"role": "user", "content": prompt}])
+
+    def chat(self, messages):
+        self.chat_calls.append(messages)
+        return self._replies.pop(0)
+
+
+def test_process_qa_record_agent_mode_uses_agent_answer_and_sources(tmp_path):
+    record = make_record()
+    document_paths = create_text_documents(tmp_path)
+    llm_client = ScriptedAgentLLM()
+    retriever = FakeRetriever()
+
+    result = process_qa_record(
+        record=record,
+        document_paths=document_paths,
+        llm_client=llm_client,
+        retriever=retriever,
+        answer_mode="agent",
+    )
+
+    assert result.answer_model == "Agent answer"
+    assert result.answer == "Gold answer"
+    # The agent decided the query itself; contexts come from its tool calls.
+    assert retriever.search_calls == [("contexts", 4)]
+    assert [context.document_id for context in result.contexts] == [
+        "q0001/first.txt",
+        "q0001/second.txt",
+    ]
+    assert retriever.clear_calls == 1
+    assert len(llm_client.chat_calls) == 2
+
+
+def test_process_qa_record_rejects_unknown_answer_mode(tmp_path):
+    with pytest.raises(ValueError, match="answer_mode"):
+        process_qa_record(
+            record=make_record(),
+            document_paths=create_text_documents(tmp_path),
+            llm_client=DummyLLM(),
+            retriever=FakeRetriever(),
+            answer_mode="chat",
+        )
+
+
+def test_process_qa_record_agent_mode_requires_chat_client(tmp_path):
+    with pytest.raises(ValueError, match="chat"):
+        process_qa_record(
+            record=make_record(),
+            document_paths=create_text_documents(tmp_path),
+            llm_client=DummyLLM(),
+            retriever=FakeRetriever(),
+            answer_mode="agent",
+        )
+
+
 def test_serialize_search_results_matches_small_to_big_llm_context():
     parent = "Complete parent section shown to the LLM"
     results = [
