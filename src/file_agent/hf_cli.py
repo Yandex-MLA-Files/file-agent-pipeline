@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from typing import Any
 
 from datasets import Dataset
 
+from file_agent.agent.loop import MAX_ITERATIONS_DEFAULT
 from file_agent.hf_batch import (
     BatchGenerationResult,
     build_generation_parameters,
@@ -18,7 +20,7 @@ from file_agent.hf_batch import (
 from file_agent.hf_dataset import QADatasetRecord, load_qa_dataset
 from file_agent.hf_output import GeneratedDatasetArtifacts, save_generated_qa_dataset
 from file_agent.llm.base import LLMClient
-from file_agent.llm.factory import create_generation_llm_client, create_router_llm_client
+from file_agent.llm.factory import create_generation_llm_client
 
 MANIFEST_SCHEMA_VERSION = 2
 MANIFEST_FILE_NAME = "run_manifest.json"
@@ -40,7 +42,7 @@ class HFGenerationConfig:
     overlap: int = 100
     limit: int | None = None
     resume: bool = False
-    use_router: bool = False
+    max_iterations: int = MAX_ITERATIONS_DEFAULT
 
     def __post_init__(self) -> None:
         _require_non_empty(self.dataset_id, "dataset_id")
@@ -59,6 +61,8 @@ class HFGenerationConfig:
             raise ValueError("overlap must be smaller than max_chars")
         if self.limit is not None and self.limit <= 0:
             raise ValueError("limit must be greater than 0")
+        if self.max_iterations <= 0:
+            raise ValueError("max_iterations must be greater than 0")
 
 
 @dataclass(frozen=True)
@@ -71,7 +75,6 @@ class HFGenerationRunResult:
 def run_hf_dataset_generation(
     config: HFGenerationConfig,
     llm_client: LLMClient | None = None,
-    router_llm_client: LLMClient | None = None,
 ) -> HFGenerationRunResult:
     """Run dataset loading, RAG generation, final export, and manifest writing."""
     _validate_output_directory(config.output_dir)
@@ -81,13 +84,6 @@ def run_hf_dataset_generation(
         if llm_client is not None
         else create_generation_llm_client(env_file=config.env_file)
     )
-    active_router_llm_client = None
-    if config.use_router:
-        active_router_llm_client = (
-            router_llm_client
-            if router_llm_client is not None
-            else create_router_llm_client(env_file=config.env_file)
-        )
     source_dataset = load_qa_dataset(
         dataset_id=config.dataset_id,
         config_name=config.config_name,
@@ -116,8 +112,7 @@ def run_hf_dataset_generation(
         max_chars=config.max_chars,
         overlap=config.overlap,
         resume=config.resume,
-        use_router=config.use_router,
-        router_llm_client=active_router_llm_client,
+        max_iterations=config.max_iterations,
     )
     artifacts = save_generated_qa_dataset(
         source_dataset=selected_dataset,
@@ -129,7 +124,6 @@ def run_hf_dataset_generation(
         dataset=selected_dataset,
         available_rows=available_rows,
         llm_client=active_llm_client,
-        router_llm_client=active_router_llm_client,
         batch_result=batch_result,
         artifacts=artifacts,
     )
@@ -160,9 +154,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=_positive_int, help="Process only the first N rows")
     parser.add_argument("--resume", action="store_true", help="Reuse matching row checkpoints")
     parser.add_argument(
-        "--use-router",
-        action="store_true",
-        help="Route through the query classifier + planner (v1) instead of plain RAG (v0)",
+        "--max-iterations",
+        type=_positive_int,
+        default=int(os.getenv("AGENT_MAX_ITERATIONS", MAX_ITERATIONS_DEFAULT)),
+        help="Hard cap on ReAct tool-calling turns per question (default: 6, "
+        "or $AGENT_MAX_ITERATIONS)",
     )
     parser.add_argument(
         "--log-level",
@@ -195,7 +191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             overlap=args.overlap,
             limit=args.limit,
             resume=args.resume,
-            use_router=args.use_router,
+            max_iterations=args.max_iterations,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -237,7 +233,6 @@ def _build_manifest(
     llm_client: LLMClient,
     batch_result: BatchGenerationResult,
     artifacts: GeneratedDatasetArtifacts,
-    router_llm_client: LLMClient | None = None,
 ) -> dict[str, Any]:
     generation_parameters = build_generation_parameters(
         dataset_id=config.dataset_id,
@@ -247,8 +242,7 @@ def _build_manifest(
         top_k=config.top_k,
         max_chars=config.max_chars,
         overlap=config.overlap,
-        use_router=config.use_router,
-        router_llm_client=router_llm_client,
+        max_iterations=config.max_iterations,
     )
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,

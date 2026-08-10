@@ -1,3 +1,18 @@
+x-langfuse-env: &langfuse-env
+  DATABASE_URL: postgresql://langfuse:${LANGFUSE_POSTGRES_PASSWORD}@file-agent-langfuse-postgres:5432/langfuse
+  CLICKHOUSE_URL: http://file-agent-langfuse-clickhouse:8123
+  CLICKHOUSE_USER: langfuse
+  CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+  REDIS_CONNECTION_STRING: redis://:${LANGFUSE_REDIS_PASSWORD}@file-agent-langfuse-redis:6379
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://file-agent-langfuse-minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_ACCESS_KEY}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_SECRET_KEY}
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  SALT: ${LANGFUSE_SALT}
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+
 services:
   jaeger:
     image: jaegertracing/all-in-one:1.60
@@ -32,6 +47,9 @@ services:
       - --gpu-memory-utilization
       - "0.90"
       - --enforce-eager
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - hermes
     volumes:
       - /mnt/storage-1/file-agent-pipe/huggingface/vllm:/root/.cache/huggingface
     deploy:
@@ -57,5 +75,116 @@ services:
       - vllm
       - jaeger
 
+  # Own self-hosted Langfuse stack for the ReAct agent's LLM-turn/tool-call
+  # tracing (separate from OTel/Jaeger, which keeps tracing the parsing/
+  # chunking/retrieval layers unchanged). Deliberately NOT on network_mode:
+  # host and NOT using the plain "langfuse-*" names other project clones on
+  # this shared box already use - only langfuse-web publishes a host port,
+  # on 127.0.0.1:3050 instead of the default 3000, to avoid colliding with
+  # a teammate's own stack. Verify that port is actually free before first
+  # bring-up (`ss -tlnp`).
+  file-agent-langfuse-postgres:
+    image: postgres:16
+    container_name: file-agent-langfuse-postgres
+    restart: unless-stopped
+    networks: [file-agent-langfuse-net]
+    environment:
+      - POSTGRES_USER=langfuse
+      - POSTGRES_PASSWORD=${LANGFUSE_POSTGRES_PASSWORD}
+      - POSTGRES_DB=langfuse
+    volumes:
+      - file_agent_langfuse_postgres_data:/var/lib/postgresql/data
+
+  file-agent-langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24
+    container_name: file-agent-langfuse-clickhouse
+    restart: unless-stopped
+    networks: [file-agent-langfuse-net]
+    environment:
+      - CLICKHOUSE_USER=langfuse
+      - CLICKHOUSE_PASSWORD=${LANGFUSE_CLICKHOUSE_PASSWORD}
+    volumes:
+      - file_agent_langfuse_clickhouse_data:/var/lib/clickhouse
+
+  file-agent-langfuse-redis:
+    image: redis:7-alpine
+    container_name: file-agent-langfuse-redis
+    restart: unless-stopped
+    networks: [file-agent-langfuse-net]
+    command: ["redis-server", "--requirepass", "${LANGFUSE_REDIS_PASSWORD}"]
+
+  file-agent-langfuse-minio:
+    image: minio/minio:latest
+    container_name: file-agent-langfuse-minio
+    restart: unless-stopped
+    networks: [file-agent-langfuse-net]
+    command: server /data
+    environment:
+      - MINIO_ROOT_USER=${LANGFUSE_S3_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${LANGFUSE_S3_SECRET_KEY}
+    volumes:
+      - file_agent_langfuse_minio_data:/data
+
+  file-agent-langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: file-agent-langfuse-worker
+    restart: unless-stopped
+    networks: [file-agent-langfuse-net]
+    depends_on:
+      - file-agent-langfuse-postgres
+      - file-agent-langfuse-clickhouse
+      - file-agent-langfuse-redis
+      - file-agent-langfuse-minio
+    environment:
+      <<: *langfuse-env
+
+  file-agent-langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: file-agent-langfuse-web
+    restart: unless-stopped
+    networks: [file-agent-langfuse-net]
+    ports:
+      - "127.0.0.1:3050:3000"
+    depends_on:
+      - file-agent-langfuse-worker
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_URL: http://localhost:3050
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+
+  # Own self-hosted MLflow for eval_pipeline experiment tracking (params +
+  # RagasJudge metrics per run — v0/v1/v2 comparison). A teammate already
+  # runs a container literally named "file-agent-mlflow" on 0.0.0.0:5000 on
+  # this shared box, so this one uses a distinct name/port and stays on
+  # localhost only. SQLite backend store is enough at this scale — no
+  # separate Postgres needed, unlike Langfuse.
+  file-agent-mlflow-eval:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: file-agent-mlflow-eval
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5050:5000"
+    volumes:
+      - file_agent_mlflow_data:/mlflow
+    command:
+      - mlflow
+      - server
+      - --backend-store-uri
+      - sqlite:////mlflow/mlflow.db
+      - --default-artifact-root
+      - /mlflow/artifacts
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+
+networks:
+  file-agent-langfuse-net:
+    name: file-agent-langfuse-net
+
 volumes:
   jaeger_data:
+  file_agent_langfuse_postgres_data:
+  file_agent_langfuse_clickhouse_data:
+  file_agent_langfuse_minio_data:
+  file_agent_mlflow_data:

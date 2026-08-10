@@ -42,8 +42,22 @@ class ScriptedOpenAI:
 def _chat_completion(content: str | None, include_choice: bool = True):
     choices = []
     if include_choice:
-        choices.append(SimpleNamespace(message=SimpleNamespace(content=content)))
+        choices.append(SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=None)))
     return SimpleNamespace(choices=choices)
+
+
+def _tool_call_completion(content, tool_calls):
+    message = SimpleNamespace(
+        content=content,
+        tool_calls=[
+            SimpleNamespace(
+                id=call_id,
+                function=SimpleNamespace(name=name, arguments=arguments_json),
+            )
+            for call_id, name, arguments_json in tool_calls
+        ],
+    )
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
 def test_generate_uses_openai_chat_completions():
@@ -129,3 +143,101 @@ def test_generate_raises_after_exhausting_retries():
         client.generate("Question")
 
     assert len(openai_client.completions.calls) == 3
+
+
+def test_generate_with_tools_parses_tool_calls_from_the_response():
+    openai_client = FakeOpenAI(
+        _tool_call_completion(None, [("call-1", "search_documents", '{"query": "foo"}')])
+    )
+    client = OpenAILLMClient(client=openai_client, model="test-model")
+
+    response = client.generate_with_tools(
+        messages=[{"role": "user", "content": "Question"}],
+        tools=[{"name": "search_documents", "description": "...", "parameters": {}}],
+    )
+
+    assert response.content is None
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0].id == "call-1"
+    assert response.tool_calls[0].name == "search_documents"
+    assert response.tool_calls[0].arguments == {"query": "foo"}
+    assert openai_client.completions.calls == [
+        {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Question"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_documents",
+                        "description": "...",
+                        "parameters": {},
+                    },
+                }
+            ],
+            "tool_choice": "auto",
+            "temperature": 0.2,
+            "max_tokens": 2000,
+        }
+    ]
+
+
+def test_generate_with_tools_parses_final_answer_without_tool_calls():
+    openai_client = FakeOpenAI(_chat_completion("Final answer"))
+    client = OpenAILLMClient(client=openai_client, model="test-model")
+
+    response = client.generate_with_tools(messages=[{"role": "user", "content": "Q"}], tools=[])
+
+    assert response.content == "Final answer"
+    assert response.tool_calls == []
+
+
+def test_generate_with_tools_treats_content_none_with_tool_calls_as_non_empty():
+    """A None-content, populated-tool_calls response is valid and must not retry."""
+    openai_client = ScriptedOpenAI([_tool_call_completion(None, [("call-1", "calculate", "{}")])])
+    client = OpenAILLMClient(
+        client=openai_client, model="test-model", empty_response_retries=2, retry_delay_seconds=0
+    )
+
+    response = client.generate_with_tools(messages=[], tools=[])
+
+    assert len(openai_client.completions.calls) == 1
+    assert response.tool_calls[0].name == "calculate"
+
+
+def test_generate_with_tools_retries_on_genuinely_empty_response():
+    openai_client = ScriptedOpenAI(
+        [
+            _tool_call_completion(None, []),
+            _chat_completion("Final answer"),
+        ]
+    )
+    client = OpenAILLMClient(
+        client=openai_client, model="test-model", empty_response_retries=2, retry_delay_seconds=0
+    )
+
+    response = client.generate_with_tools(messages=[], tools=[])
+
+    assert response.content == "Final answer"
+    assert len(openai_client.completions.calls) == 2
+
+
+def test_generate_with_tools_raises_after_exhausting_retries():
+    openai_client = ScriptedOpenAI([_tool_call_completion(None, []) for _ in range(3)])
+    client = OpenAILLMClient(
+        client=openai_client, model="test-model", empty_response_retries=2, retry_delay_seconds=0
+    )
+
+    with pytest.raises(ValueError, match="empty response"):
+        client.generate_with_tools(messages=[], tools=[])
+
+
+def test_generate_with_tools_turns_malformed_arguments_into_a_parse_error():
+    openai_client = FakeOpenAI(
+        _tool_call_completion(None, [("call-1", "calculate", "not valid json")])
+    )
+    client = OpenAILLMClient(client=openai_client, model="test-model")
+
+    response = client.generate_with_tools(messages=[], tools=[])
+
+    assert "_parse_error" in response.tool_calls[0].arguments

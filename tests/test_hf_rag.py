@@ -9,31 +9,48 @@ from file_agent.hf_rag import (
     process_qa_record,
     serialize_search_results,
 )
-from file_agent.qa import NO_CONTEXT_MESSAGE
+from file_agent.llm.base import ToolCall, ToolCallResponse
 from file_agent.rag import load_documents
 from file_agent.retrieval import SearchResult
 
 
-class DummyLLM:
-    def __init__(self, answer="Generated answer"):
-        self.answer = answer
-        self.prompts: list[str] = []
+class ScriptedToolLLM:
+    """Replays one ToolCallResponse per generate_with_tools() call, in order."""
 
-    def generate(self, prompt: str) -> str:
-        self.prompts.append(prompt)
-        return self.answer
+    model = "fake/model"
 
-
-class ScriptedLLM:
-    """Returns each response in order, one per generate() call."""
-
-    def __init__(self, responses: list[str]):
+    def __init__(self, responses: list[ToolCallResponse]):
         self.responses = list(responses)
-        self.prompts: list[str] = []
+        self.calls: list[dict] = []
 
     def generate(self, prompt: str) -> str:
-        self.prompts.append(prompt)
+        raise AssertionError("the ReAct agent must use generate_with_tools, not generate")
+
+    def generate_with_tools(self, messages, tools, tool_choice="auto") -> ToolCallResponse:
+        self.calls.append({"messages": messages, "tools": tools, "tool_choice": tool_choice})
         return self.responses.pop(0)
+
+
+class FailingLLM:
+    def generate(self, prompt: str) -> str:
+        raise AssertionError("unused")
+
+    def generate_with_tools(self, messages, tools, tool_choice="auto"):
+        raise RuntimeError("Generation failed")
+
+
+def tool_call(name: str, arguments: dict, call_id: str = "call-1") -> ToolCallResponse:
+    call = ToolCall(id=call_id, name=name, arguments=arguments)
+    return ToolCallResponse(content=None, tool_calls=[call])
+
+
+def final_answer(text: str) -> ToolCallResponse:
+    return ToolCallResponse(content=text, tool_calls=[])
+
+
+def search_then_answer(query: str, answer: str, top_k: int | None = None) -> list[ToolCallResponse]:
+    arguments = {"query": query} if top_k is None else {"query": query, "top_k": top_k}
+    return [tool_call("search_documents", arguments), final_answer(answer)]
 
 
 class FakeRetriever:
@@ -78,7 +95,7 @@ def create_text_documents(tmp_path):
 def test_process_qa_record_generates_answer_and_serializes_exact_contexts(tmp_path):
     record = make_record()
     document_paths = create_text_documents(tmp_path)
-    llm_client = DummyLLM()
+    llm_client = ScriptedToolLLM(search_then_answer(record.question, "Generated answer"))
     retriever = FakeRetriever()
 
     result = process_qa_record(
@@ -97,7 +114,7 @@ def test_process_qa_record_generates_answer_and_serializes_exact_contexts(tmp_pa
     assert retriever.index_calls == 1
     assert retriever.search_calls == [(record.question, 2)]
     assert retriever.clear_calls == 1
-    assert len(llm_client.prompts) == 1
+    assert len(llm_client.calls) == 2  # tool-call turn + final-answer turn
 
     first_context, second_context = result.contexts
     assert first_context.rank == 1
@@ -111,11 +128,6 @@ def test_process_qa_record_generates_answer_and_serializes_exact_contexts(tmp_pa
     assert second_context.text == "Second retrieved context"
     assert second_context.retrieval_text == "Second retrieved context"
     assert second_context.score == 0.5
-
-    prompt = llm_client.prompts[0]
-    assert prompt.index(first_context.text) < prompt.index(second_context.text)
-    assert "dataset_doc_id=q0001/first.txt" in prompt
-    assert "dataset_doc_id=q0001/second.txt" in prompt
 
 
 def test_serialize_search_results_matches_small_to_big_llm_context():
@@ -169,7 +181,7 @@ def test_generated_record_converts_to_output_dictionary(tmp_path):
     result = process_qa_record(
         record=make_record(),
         document_paths=create_text_documents(tmp_path),
-        llm_client=DummyLLM(),
+        llm_client=ScriptedToolLLM([final_answer("Generated answer")]),
         top_k=1,
         retriever=FakeRetriever(),
     )
@@ -185,7 +197,7 @@ def test_generated_record_converts_to_output_dictionary(tmp_path):
         "answer",
     ]
     assert output["doc_ids"] == ["q0001/first.txt", "q0001/second.txt"]
-    assert output["contexts"][0] == result.contexts[0].to_dict()
+    assert output["contexts"] == []
 
 
 def test_process_hf_qa_record_downloads_documents_before_processing(monkeypatch, tmp_path):
@@ -205,7 +217,7 @@ def test_process_hf_qa_record_downloads_documents_before_processing(monkeypatch,
     result = process_hf_qa_record(
         record=record,
         dataset_id="owner/rag-qa",
-        llm_client=DummyLLM(),
+        llm_client=ScriptedToolLLM([final_answer("Generated answer")]),
         revision="commit-sha",
         cache_dir=tmp_path / "cache",
         token="test-token",
@@ -224,44 +236,6 @@ def test_process_hf_qa_record_downloads_documents_before_processing(monkeypatch,
     ]
 
 
-def test_process_qa_record_routes_through_classifier_when_use_router_is_true(tmp_path):
-    record = make_record()
-    document_paths = create_text_documents(tmp_path)
-    llm_client = ScriptedLLM(['{"query_type": "simple"}', "Generated answer"])
-    retriever = FakeRetriever()
-
-    result = process_qa_record(
-        record=record,
-        document_paths=document_paths,
-        llm_client=llm_client,
-        top_k=2,
-        retriever=retriever,
-        use_router=True,
-    )
-
-    assert result.answer_model == "Generated answer"
-    assert len(llm_client.prompts) == 2  # classify + generate
-    assert retriever.search_calls == [(record.question, 2)]
-
-
-def test_process_qa_record_defaults_to_plain_rag_without_use_router(tmp_path):
-    record = make_record()
-    document_paths = create_text_documents(tmp_path)
-    llm_client = DummyLLM()
-    retriever = FakeRetriever()
-
-    result = process_qa_record(
-        record=record,
-        document_paths=document_paths,
-        llm_client=llm_client,
-        top_k=2,
-        retriever=retriever,
-    )
-
-    assert result.answer_model == "Generated answer"
-    assert len(llm_client.prompts) == 1  # no classification call
-
-
 def test_process_qa_record_rejects_mismatched_document_paths(tmp_path):
     document_paths = create_text_documents(tmp_path)
 
@@ -269,7 +243,7 @@ def test_process_qa_record_rejects_mismatched_document_paths(tmp_path):
         process_qa_record(
             record=make_record(),
             document_paths=document_paths[:1],
-            llm_client=DummyLLM(),
+            llm_client=ScriptedToolLLM([]),
             retriever=FakeRetriever(),
         )
 
@@ -286,7 +260,7 @@ def test_process_qa_record_uses_supplied_document_loader(tmp_path):
     result = process_qa_record(
         record=record,
         document_paths=document_paths,
-        llm_client=DummyLLM(),
+        llm_client=ScriptedToolLLM([final_answer("Generated answer")]),
         retriever=FakeRetriever(),
         document_loader=recording_loader,
     )
@@ -295,13 +269,18 @@ def test_process_qa_record_uses_supplied_document_loader(tmp_path):
     assert loader_calls == [document_paths]
 
 
-def test_process_qa_record_preserves_no_context_result(tmp_path):
+def test_process_qa_record_reports_no_matching_passages_to_the_llm(tmp_path):
     class EmptyRetriever(FakeRetriever):
         def search(self, query: str, top_k: int = 5):
             self.search_calls.append((query, top_k))
             return []
 
-    llm_client = DummyLLM()
+    llm_client = ScriptedToolLLM(
+        [
+            tool_call("search_documents", {"query": "Which contexts were found?"}),
+            final_answer("No relevant information was found."),
+        ]
+    )
     retriever = EmptyRetriever()
 
     result = process_qa_record(
@@ -311,17 +290,16 @@ def test_process_qa_record_preserves_no_context_result(tmp_path):
         retriever=retriever,
     )
 
-    assert result.answer_model == NO_CONTEXT_MESSAGE
+    assert result.answer_model == "No relevant information was found."
     assert result.contexts == ()
-    assert llm_client.prompts == []
     assert retriever.clear_calls == 1
+    # The tool observation fed back to the LLM confirms no passages, not a crash.
+    tool_message = llm_client.calls[1]["messages"][-1]
+    assert tool_message["role"] == "tool"
+    assert tool_message["content"] == "No matching passages found."
 
 
 def test_process_qa_record_clears_retriever_when_generation_fails(tmp_path):
-    class FailingLLM:
-        def generate(self, prompt: str) -> str:
-            raise RuntimeError("Generation failed")
-
     retriever = FakeRetriever()
 
     with pytest.raises(RuntimeError, match="Generation failed"):

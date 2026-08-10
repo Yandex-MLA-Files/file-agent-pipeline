@@ -8,10 +8,8 @@ from file_agent.document import Document
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.base import LLMClient
 from file_agent.pipeline import parse_file
-from file_agent.planner import plan_subqueries
 from file_agent.qa import answer_question_with_context
 from file_agent.retrieval import Retriever, SearchResult
-from file_agent.router import QueryType, classify_query
 from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
@@ -23,7 +21,6 @@ class RAGResponse:
     sources: list[SearchResult]
     documents_count: int
     chunks_count: int
-    query_type: QueryType | None = None
 
 
 def load_documents(file_paths: Iterable[str | Path]) -> list[Document]:
@@ -104,94 +101,6 @@ def answer_indexed_documents(
 
         span.set_attribute("file_agent.result_count", len(results))
         return response
-
-
-def answer_indexed_documents_with_routing(
-    question: str,
-    llm_client: LLMClient,
-    retriever: Retriever,
-    documents_count: int,
-    chunks_count: int,
-    top_k: int = 5,
-    router_llm_client: LLMClient | None = None,
-) -> RAGResponse:
-    active_router_llm_client = router_llm_client or llm_client
-    with tracer.start_as_current_span("file_agent.answer_indexed_documents_with_routing") as span:
-        query_type = classify_query(question, active_router_llm_client)
-        span.set_attribute("file_agent.query_type", query_type.value)
-
-        if query_type == QueryType.COMPLEX:
-            response = answer_indexed_documents_with_plan(
-                question=question,
-                llm_client=llm_client,
-                retriever=retriever,
-                documents_count=documents_count,
-                chunks_count=chunks_count,
-                top_k=top_k,
-                router_llm_client=active_router_llm_client,
-            )
-        else:
-            response = answer_indexed_documents(
-                question=question,
-                llm_client=llm_client,
-                retriever=retriever,
-                documents_count=documents_count,
-                chunks_count=chunks_count,
-                top_k=top_k,
-            )
-        response.query_type = query_type
-        return response
-
-
-def answer_indexed_documents_with_plan(
-    question: str,
-    llm_client: LLMClient,
-    retriever: Retriever,
-    documents_count: int,
-    chunks_count: int,
-    top_k: int = 5,
-    router_llm_client: LLMClient | None = None,
-) -> RAGResponse:
-    active_router_llm_client = router_llm_client or llm_client
-    with tracer.start_as_current_span("file_agent.answer_indexed_documents_with_plan") as span:
-        span.set_attribute("file_agent.question", question)
-
-        subqueries = plan_subqueries(question, active_router_llm_client)
-        span.set_attribute("file_agent.subquery_count", len(subqueries))
-
-        results_by_subquery = [
-            retriever.search(query=subquery, top_k=top_k) for subquery in subqueries
-        ]
-        results = merge_search_results(results_by_subquery, top_k=top_k)
-        span.set_attribute("file_agent.result_count", len(results))
-
-        return answer_with_results(
-            question=question,
-            results=results,
-            llm_client=llm_client,
-            documents_count=documents_count,
-            chunks_count=chunks_count,
-        )
-
-
-def merge_search_results(
-    results_by_subquery: list[list[SearchResult]],
-    top_k: int,
-) -> list[SearchResult]:
-    """Combine per-subquery search results into one ranked, deduplicated list.
-
-    The same chunk can be found by several subqueries; keep its best score so
-    the merged context stays bounded to top_k regardless of subquery count.
-    """
-    best_by_chunk_id: dict[str, SearchResult] = {}
-    for results in results_by_subquery:
-        for result in results:
-            existing = best_by_chunk_id.get(result.chunk.id)
-            if existing is None or result.score > existing.score:
-                best_by_chunk_id[result.chunk.id] = result
-
-    merged = sorted(best_by_chunk_id.values(), key=lambda result: result.score, reverse=True)
-    return merged[:top_k]
 
 
 def answer_with_results(

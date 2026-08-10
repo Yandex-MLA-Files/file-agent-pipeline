@@ -157,141 +157,6 @@ def test_run_hf_dataset_generation_orchestrates_limited_run_and_writes_manifest(
     }
 
 
-def test_run_hf_dataset_generation_creates_router_client_only_when_use_router(
-    monkeypatch,
-    tmp_path,
-):
-    source_dataset = make_source_dataset()
-    generation_client = DummyLLM()
-    router_client = DummyLLM()
-    calls = {}
-
-    def fake_create_generation_llm_client(**kwargs):
-        return generation_client
-
-    def fake_create_router_llm_client(**kwargs):
-        calls["router_created"] = kwargs
-        return router_client
-
-    def fake_load_qa_dataset(**kwargs):
-        return source_dataset
-
-    def fake_generate_hf_qa_records(**kwargs):
-        calls["generate"] = kwargs
-        selected_dataset = kwargs["dataset"]
-        records = tuple(generated_record_from_row(row) for row in selected_dataset)
-        return BatchGenerationResult(records=records, processed_count=1, resumed_count=0)
-
-    def fake_save_generated_qa_dataset(**kwargs):
-        output_dir = tmp_path / "run"
-        parquet_path = output_dir / "answers.parquet"
-        hf_dataset_path = output_dir / "hf_dataset"
-        output_dir.mkdir(parents=True)
-        parquet_path.write_text("parquet", encoding="utf-8")
-        hf_dataset_path.mkdir()
-        return GeneratedDatasetArtifacts(
-            parquet_path=parquet_path,
-            hf_dataset_path=hf_dataset_path,
-            row_count=1,
-        )
-
-    monkeypatch.setattr(
-        "file_agent.hf_cli.create_generation_llm_client",
-        fake_create_generation_llm_client,
-    )
-    monkeypatch.setattr(
-        "file_agent.hf_cli.create_router_llm_client",
-        fake_create_router_llm_client,
-    )
-    monkeypatch.setattr("file_agent.hf_cli.load_qa_dataset", fake_load_qa_dataset)
-    monkeypatch.setattr(
-        "file_agent.hf_cli.generate_hf_qa_records",
-        fake_generate_hf_qa_records,
-    )
-    monkeypatch.setattr(
-        "file_agent.hf_cli.save_generated_qa_dataset",
-        fake_save_generated_qa_dataset,
-    )
-    monkeypatch.setattr("file_agent.hf_cli._utc_timestamp", lambda: "2026-07-19T10:00:00Z")
-
-    run_hf_dataset_generation(
-        HFGenerationConfig(
-            dataset_id="owner/rag-qa",
-            output_dir=tmp_path / "run",
-            limit=1,
-            use_router=True,
-        )
-    )
-
-    assert "router_created" in calls
-    assert calls["generate"]["router_llm_client"] is router_client
-    assert calls["generate"]["llm_client"] is generation_client
-
-
-def test_run_hf_dataset_generation_skips_router_client_without_use_router(
-    monkeypatch,
-    tmp_path,
-):
-    source_dataset = make_source_dataset()
-    generation_client = DummyLLM()
-    calls = {}
-
-    def fake_create_generation_llm_client(**kwargs):
-        return generation_client
-
-    def fail_if_called(**kwargs):
-        raise AssertionError("Router client must not be created when use_router is False")
-
-    def fake_load_qa_dataset(**kwargs):
-        return source_dataset
-
-    def fake_generate_hf_qa_records(**kwargs):
-        calls["generate"] = kwargs
-        selected_dataset = kwargs["dataset"]
-        records = tuple(generated_record_from_row(row) for row in selected_dataset)
-        return BatchGenerationResult(records=records, processed_count=1, resumed_count=0)
-
-    def fake_save_generated_qa_dataset(**kwargs):
-        output_dir = tmp_path / "run"
-        parquet_path = output_dir / "answers.parquet"
-        hf_dataset_path = output_dir / "hf_dataset"
-        output_dir.mkdir(parents=True)
-        parquet_path.write_text("parquet", encoding="utf-8")
-        hf_dataset_path.mkdir()
-        return GeneratedDatasetArtifacts(
-            parquet_path=parquet_path,
-            hf_dataset_path=hf_dataset_path,
-            row_count=1,
-        )
-
-    monkeypatch.setattr(
-        "file_agent.hf_cli.create_generation_llm_client",
-        fake_create_generation_llm_client,
-    )
-    monkeypatch.setattr("file_agent.hf_cli.create_router_llm_client", fail_if_called)
-    monkeypatch.setattr("file_agent.hf_cli.load_qa_dataset", fake_load_qa_dataset)
-    monkeypatch.setattr(
-        "file_agent.hf_cli.generate_hf_qa_records",
-        fake_generate_hf_qa_records,
-    )
-    monkeypatch.setattr(
-        "file_agent.hf_cli.save_generated_qa_dataset",
-        fake_save_generated_qa_dataset,
-    )
-    monkeypatch.setattr("file_agent.hf_cli._utc_timestamp", lambda: "2026-07-19T10:00:00Z")
-
-    run_hf_dataset_generation(
-        HFGenerationConfig(
-            dataset_id="owner/rag-qa",
-            output_dir=tmp_path / "run",
-            limit=1,
-            use_router=False,
-        )
-    )
-
-    assert calls["generate"]["router_llm_client"] is None
-
-
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -357,6 +222,7 @@ def test_main_maps_cli_arguments_and_prints_artifact_paths(monkeypatch, tmp_path
         return expected_result
 
     monkeypatch.setattr("file_agent.hf_cli.run_hf_dataset_generation", fake_run)
+    monkeypatch.delenv("AGENT_MAX_ITERATIONS", raising=False)
 
     exit_code = main(
         [
@@ -400,7 +266,7 @@ def test_main_maps_cli_arguments_and_prints_artifact_paths(monkeypatch, tmp_path
     assert str(output_dir / "hf_dataset") in output
 
 
-def test_main_parses_use_router_flag(monkeypatch, tmp_path, capsys):
+def test_main_parses_max_iterations_flag(monkeypatch, tmp_path, capsys):
     output_dir = tmp_path / "run"
     expected_result = HFGenerationRunResult(
         batch=BatchGenerationResult(records=(), processed_count=0, resumed_count=0),
@@ -418,6 +284,7 @@ def test_main_parses_use_router_flag(monkeypatch, tmp_path, capsys):
         return expected_result
 
     monkeypatch.setattr("file_agent.hf_cli.run_hf_dataset_generation", fake_run)
+    monkeypatch.delenv("AGENT_MAX_ITERATIONS", raising=False)
 
     exit_code = main(
         [
@@ -425,9 +292,10 @@ def test_main_parses_use_router_flag(monkeypatch, tmp_path, capsys):
             "owner/rag-qa",
             "--output-dir",
             str(output_dir),
-            "--use-router",
+            "--max-iterations",
+            "3",
         ]
     )
 
     assert exit_code == 0
-    assert calls[0].use_router is True
+    assert calls[0].max_iterations == 3

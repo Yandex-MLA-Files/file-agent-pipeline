@@ -9,6 +9,8 @@ from typing import Any
 
 from datasets import Dataset
 
+from file_agent.agent.loop import MAX_ITERATIONS_DEFAULT
+from file_agent.agent.tools import ALL_TOOL_NAMES
 from file_agent.document import Document
 from file_agent.hf_dataset import QADatasetRecord, validate_qa_dataset
 from file_agent.hf_rag import DocumentLoader, GeneratedQARecord, process_hf_qa_record
@@ -18,9 +20,10 @@ from file_agent.qa import build_qa_prompt
 from file_agent.rag import load_documents
 from file_agent.retrieval import Retriever
 
-CHECKPOINT_SCHEMA_VERSION = 2
+CHECKPOINT_SCHEMA_VERSION = 3
 CHECKPOINTS_DIRECTORY_NAME = "checkpoints"
 RAG_PIPELINE_VERSION = "section-token-small-to-big-v1"
+AGENT_PIPELINE_VERSION = "react-tool-calling-v1"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -48,8 +51,7 @@ def generate_hf_qa_records(
     overlap: int = 100,
     retriever: Retriever | None = None,
     resume: bool = False,
-    use_router: bool = False,
-    router_llm_client: LLMClient | None = None,
+    max_iterations: int = MAX_ITERATIONS_DEFAULT,
 ) -> BatchGenerationResult:
     validate_qa_dataset(dataset)
     if not isinstance(dataset_id, str) or not dataset_id.strip():
@@ -71,8 +73,7 @@ def generate_hf_qa_records(
         top_k=top_k,
         max_chars=max_chars,
         overlap=overlap,
-        use_router=use_router,
-        router_llm_client=router_llm_client,
+        max_iterations=max_iterations,
     )
     records: list[GeneratedQARecord] = []
     processed_count = 0
@@ -109,8 +110,7 @@ def generate_hf_qa_records(
                 overlap=overlap,
                 retriever=retriever,
                 document_loader=document_loader,
-                use_router=use_router,
-                router_llm_client=router_llm_client,
+                max_iterations=max_iterations,
             )
             _validate_generated_record(generated_record, record)
             _write_checkpoint(
@@ -173,8 +173,7 @@ def build_generation_parameters(
     top_k: int,
     max_chars: int,
     overlap: int,
-    use_router: bool = False,
-    router_llm_client: LLMClient | None = None,
+    max_iterations: int = MAX_ITERATIONS_DEFAULT,
 ) -> dict[str, Any]:
     prompt_template = build_qa_prompt(
         question="{question}",
@@ -186,12 +185,11 @@ def build_generation_parameters(
         "model_id": _model_identifier(llm_client),
         "temperature": _optional_scalar_attribute(llm_client, "temperature"),
         "max_tokens": _optional_scalar_attribute(llm_client, "max_tokens"),
-        "router_model_id": (
-            _model_identifier(router_llm_client) if router_llm_client is not None else None
-        ),
         "retriever": _component_identifier(retriever) if retriever is not None else "default",
         "rag_pipeline_version": RAG_PIPELINE_VERSION,
-        "use_router": use_router,
+        "agent_pipeline_version": AGENT_PIPELINE_VERSION,
+        "max_iterations": max_iterations,
+        "tool_names": list(ALL_TOOL_NAMES),
         "embedding_model": os.getenv("EMBEDDING_MODEL") or DEFAULT_SEMANTIC_MODEL_NAME,
         "ocr_engine": os.getenv("OCR_ENGINE", "easyocr").strip().lower(),
         "ocr_langs": os.getenv("OCR_LANGS", "ru,en").strip(),

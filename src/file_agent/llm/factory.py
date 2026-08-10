@@ -45,16 +45,6 @@ def create_generation_llm_client(
     return _create_local_client()
 
 
-def create_router_llm_client(
-    env_file: str | Path | None = ".env",
-    load_env: bool = True,
-) -> LLMClient:
-    """Router/Planner classification client: always the Yandex backend (deepseek)."""
-    if load_env:
-        load_dotenv(env_file)
-    return _create_yandex_client()
-
-
 def _create_yandex_client() -> OpenAILLMClient:
     api_key = _getenv("YANDEX_API_KEY")
     folder_id = _getenv("YANDEX_FOLDER_ID")

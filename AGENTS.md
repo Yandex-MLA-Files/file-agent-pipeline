@@ -26,8 +26,9 @@ Users can upload one or more documents, preview extracted text, find relevant ch
   figures, formulas), plus Markdown, HTML, XLSX, and PPTX parsers.
 - Automatic per-page OCR routing for PDFs (`parsers/routing.py`): OCR is enabled
   only for scanned/image pages, decided locally with no network calls.
-- Optional VLM description of figures/diagrams in PDFs (off by default, with
-  graceful degradation when no VLM endpoint is reachable).
+- Optional VLM description of figures/diagrams in PDFs and picture shapes in
+  PPTX slides (off by default, with graceful degradation when no VLM endpoint
+  is reachable).
 - Section-aware, token-budgeted chunking: blocks are grouped by heading, then
   whole sections are packed up to the retrieval encoder's token window (large
   tables split by rows, continuation chunks keep their heading as a breadcrumb,
@@ -40,9 +41,21 @@ Users can upload one or more documents, preview extracted text, find relevant ch
   `off` / `smolvlm` local / `openai` endpoint) and a bounded per-document cost.
 - In-memory LanceDB hybrid retrieval combining BM25 full-text search, semantic vector search, and reciprocal rank fusion (RRF).
 - A QA prompt layer and end-to-end RAG orchestration.
-- An `LLMClient` adapter built on the official OpenAI Python SDK.
+- A ReAct tool-calling agent (`agent/loop.py`) that answers questions by
+  reasoning and calling tools in a bounded loop (native OpenAI `tools=`, not
+  prompt-embedded JSON): full-text/semantic search over indexed chunks, a
+  restricted arithmetic evaluator, and — only when an `.xlsx` document is
+  present — sandboxed pandas/openpyxl code execution in an isolated,
+  network-disabled, resource-capped ephemeral Docker container per call. A
+  hard iteration cap guarantees the loop always terminates with an answer.
+- An `LLMClient` adapter built on the official OpenAI Python SDK, including
+  native tool-calling (`generate_with_tools`).
 - Yandex AI Studio and local OpenAI-compatible LLM backends.
 - A Streamlit UI for multi-file upload, preview, search, and answer generation.
+- Langfuse tracing for the agent loop (one trace per question, one generation
+  per LLM turn, one span per tool call) alongside the existing OpenTelemetry/
+  Jaeger tracing of the parsing/chunking/retrieval layers — the two systems
+  are intentionally separate, not bridged.
 - Pytest coverage for the main layers.
 
 Supported extensions: `.md`, `.txt`, `.pdf`, `.docx`, `.html`, `.htm`, `.xlsx`, `.pptx`.
@@ -51,6 +64,7 @@ Supported extensions: `.md`, `.txt`, `.pdf`, `.docx`, `.html`, `.htm`, `.xlsx`, 
 
 ```text
 app.py                         # Streamlit UI
+docker/sandbox.Dockerfile      # Image for the sandboxed spreadsheet tool
 src/file_agent/
   document.py                 # Document and Block models
   pipeline.py                 # Parser selection by extension
@@ -58,13 +72,18 @@ src/file_agent/
   retrieval.py                # Shared Retriever interface and SearchResult
   lancedb_retriever.py        # In-memory LanceDB hybrid retrieval
   qa.py                       # Context assembly and QA prompt
-  rag.py                      # End-to-end RAG orchestration
+  rag.py                      # Document loading/chunking/indexing + single-shot RAG
+  agent/                      # ReAct tool-calling agent
+    loop.py                   # Agent loop: LLM turns, tool dispatch, iteration cap
+    tools.py                  # Tool/ToolResult, search + calculator + spreadsheet tools
+    sandbox.py                # Isolated Docker execution for the spreadsheet tool
+    observability.py          # Langfuse trace/generation/span helpers
   parsers/                    # Supported file parsers
     docling_parser.py         # Structured PDF/DOCX parsing (Docling)
     routing.py                # Per-page OCR decision heuristics
     enhancer.py               # VLM description of figures/diagrams
   vlm/                        # VLM interface and OpenAI-compatible client
-  utils/image_extractor.py    # Crop PDF page regions to images for the VLM
+  utils/image_extractor.py    # PDF page-region crops and PPTX picture bytes for the VLM
   llm/                        # LLM interface, adapter, and factory
 tests/                        # Pytest suite
 docs/local_inference.md       # Local LLM endpoint setup
@@ -110,15 +129,28 @@ docs/local_inference.md       # Local LLM endpoint setup
 Do not add the following without a separate task:
 
 - LangChain or LangGraph;
-- complex agent architecture;
 - a standalone vector database or FAISS;
-- image analysis for PPTX files;
-- Excel formula evaluation.
+- Excel formula evaluation (the sandbox tool reads pandas/openpyxl cached
+  values via `data_only=True` semantics, same as the XLSX parser — it does
+  not evaluate live formulas).
 
-OCR and VLM support are implemented for PDF only: OCR via Docling with automatic
-per-page routing (engine via `OCR_ENGINE`: `easyocr` default, reads Cyrillic +
-Latin, or `rapidocr`; languages via `OCR_LANGS`, default `ru,en`), and VLM figure
-description via an OpenAI-compatible endpoint.
+"Complex agent architecture" was excluded here until the ReAct tool-calling
+rewrite (`agent/`) explicitly lifted it, replacing the earlier Router/Planner
+architecture — see `agent/loop.py` for the current scope (bounded tool-calling
+loop, not open-ended planning/replanning).
+
+"Image analysis for PPTX files" was excluded here until VLM figure description
+was extended to picture shapes in `.pptx` slides (`parsers/pptx_parser.py`
+emits `BlockType.IMAGE` blocks per picture shape; `parsers/enhancer.py`
+extracts the shape's raw image bytes via `extract_image_from_pptx` — no
+page rendering/cropping needed, unlike PDF).
+
+OCR is implemented for PDF only (Docling with automatic per-page routing,
+engine via `OCR_ENGINE`: `easyocr` default, reads Cyrillic + Latin, or
+`rapidocr`; languages via `OCR_LANGS`, default `ru,en`). VLM figure/image
+description covers both PDF (cropped page regions) and PPTX (picture shape
+bytes) via the same OpenAI-compatible endpoint and `VLM_MAX_FIGURES`/
+`VLM_MIN_FIGURE_AREA` cost controls.
 
 The XLSX parser uses `data_only=True`: it reads cached formula values but does not calculate formulas.
 
@@ -143,6 +175,29 @@ Local OpenAI-compatible backend:
 - `LOCAL_LLM_API_KEY`;
 - `LOCAL_LLM_MODEL`.
 
+ReAct agent:
+
+- `AGENT_MAX_ITERATIONS` (default 6): hard cap on tool-calling turns per question.
+- `SANDBOX_IMAGE` (default `file-agent-sandbox:latest`): image for the
+  sandboxed spreadsheet tool, built once via
+  `docker build -t file-agent-sandbox -f docker/sandbox.Dockerfile .`.
+- vLLM must be started with `--enable-auto-tool-choice --tool-call-parser hermes`
+  (see `docker-compose.yml`) for tool-calling to work against the local Qwen
+  endpoint — verify the parser name/support against the deployed vLLM version
+  before relying on it.
+
+Langfuse (self-hosted, own stack — see `docker-compose.yml`'s
+`file-agent-langfuse-*` services):
+
+- `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`;
+- `LANGFUSE_POSTGRES_PASSWORD`, `LANGFUSE_CLICKHOUSE_PASSWORD`,
+  `LANGFUSE_REDIS_PASSWORD`, `LANGFUSE_S3_ACCESS_KEY`, `LANGFUSE_S3_SECRET_KEY`,
+  `LANGFUSE_SALT`, `LANGFUSE_ENCRYPTION_KEY`, `LANGFUSE_NEXTAUTH_SECRET`
+  (self-host infra secrets, only needed to run the `file-agent-langfuse-*`
+  compose services, not by the application code itself).
+- Agent tracing degrades to a silent no-op when `LANGFUSE_PUBLIC_KEY`/
+  `LANGFUSE_SECRET_KEY` are unset (e.g. in tests).
+
 Never make real API requests in tests or add working credentials to code, fixtures, logs, or documentation.
 
 ## Stack
@@ -156,6 +211,7 @@ Never make real API requests in tests or add working credentials to code, fixtur
 - sentence-transformers;
 - LanceDB;
 - openai;
+- Langfuse;
 - pytest.
 
 ## Change guidelines

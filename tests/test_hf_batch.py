@@ -102,7 +102,7 @@ def test_generate_hf_qa_records_processes_in_order_and_writes_checkpoints(
     checkpoint_paths = sorted((tmp_path / "checkpoints").glob("*.json"))
     assert [path.name for path in checkpoint_paths] == ["000000.json", "000001.json"]
     first_checkpoint = json.loads(checkpoint_paths[0].read_text(encoding="utf-8"))
-    assert first_checkpoint["schema_version"] == 2
+    assert first_checkpoint["schema_version"] == 3
     assert first_checkpoint["parameters"]["dataset_id"] == "owner/rag-qa"
     assert first_checkpoint["parameters"]["revision"] == "commit-sha"
     assert first_checkpoint["parameters"]["model_id"] == "fake/model"
@@ -112,7 +112,7 @@ def test_generate_hf_qa_records_processes_in_order_and_writes_checkpoints(
     assert first_checkpoint["result"] == result.records[0].to_dict()
 
 
-def test_generate_hf_qa_records_passes_use_router_to_processor_and_checkpoint(
+def test_generate_hf_qa_records_passes_max_iterations_to_processor_and_checkpoint(
     monkeypatch,
     tmp_path,
 ):
@@ -124,16 +124,16 @@ def test_generate_hf_qa_records_passes_use_router_to_processor_and_checkpoint(
         dataset_id="owner/rag-qa",
         llm_client=DummyLLM(),
         output_dir=tmp_path,
-        use_router=True,
+        max_iterations=3,
     )
 
-    assert calls[0][1]["use_router"] is True
+    assert calls[0][1]["max_iterations"] == 3
     checkpoint = json.loads((tmp_path / "checkpoints" / "000000.json").read_text(encoding="utf-8"))
-    assert checkpoint["parameters"]["use_router"] is True
+    assert checkpoint["parameters"]["max_iterations"] == 3
     assert result.records[0].id == "q0001"
 
 
-def test_generate_hf_qa_records_rejects_use_router_change_on_resume(
+def test_generate_hf_qa_records_rejects_max_iterations_change_on_resume(
     monkeypatch,
     tmp_path,
 ):
@@ -143,7 +143,7 @@ def test_generate_hf_qa_records_rejects_use_router_change_on_resume(
         dataset_id="owner/rag-qa",
         llm_client=DummyLLM(),
         output_dir=tmp_path,
-        use_router=False,
+        max_iterations=6,
     )
 
     with pytest.raises(ValueError, match="parameters do not match"):
@@ -152,7 +152,7 @@ def test_generate_hf_qa_records_rejects_use_router_change_on_resume(
             dataset_id="owner/rag-qa",
             llm_client=DummyLLM(),
             output_dir=tmp_path,
-            use_router=True,
+            max_iterations=3,
             resume=True,
         )
 

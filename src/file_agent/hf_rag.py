@@ -4,17 +4,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from file_agent.agent.loop import MAX_ITERATIONS_DEFAULT, run_react_agent
+from file_agent.agent.tools import build_default_tools
 from file_agent.document import Document
 from file_agent.hf_dataset import QADatasetRecord, download_record_documents
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.base import LLMClient
 from file_agent.qa import select_context_passages
-from file_agent.rag import (
-    answer_indexed_documents,
-    answer_indexed_documents_with_routing,
-    index_documents,
-    load_documents,
-)
+from file_agent.rag import index_documents, load_documents
 from file_agent.retrieval import Retriever, SearchResult
 
 DocumentLoader = Callable[[list[str | Path]], list[Document]]
@@ -143,8 +140,7 @@ def process_hf_qa_record(
     overlap: int = 100,
     retriever: Retriever | None = None,
     document_loader: DocumentLoader | None = None,
-    use_router: bool = False,
-    router_llm_client: LLMClient | None = None,
+    max_iterations: int = MAX_ITERATIONS_DEFAULT,
 ) -> GeneratedQARecord:
     document_paths = download_record_documents(
         record=record,
@@ -162,8 +158,7 @@ def process_hf_qa_record(
         overlap=overlap,
         retriever=retriever,
         document_loader=document_loader,
-        use_router=use_router,
-        router_llm_client=router_llm_client,
+        max_iterations=max_iterations,
     )
 
 
@@ -176,8 +171,7 @@ def process_qa_record(
     overlap: int = 100,
     retriever: Retriever | None = None,
     document_loader: DocumentLoader | None = None,
-    use_router: bool = False,
-    router_llm_client: LLMClient | None = None,
+    max_iterations: int = MAX_ITERATIONS_DEFAULT,
 ) -> GeneratedQARecord:
     if len(document_paths) != len(record.doc_ids):
         raise ValueError("document_paths count must match record.doc_ids count")
@@ -191,31 +185,22 @@ def process_qa_record(
 
     active_retriever = retriever if retriever is not None else LanceDBRetriever()
     try:
-        chunks = index_documents(
+        index_documents(
             documents=documents,
             retriever=active_retriever,
             max_chars=max_chars,
             overlap=overlap,
         )
-        if use_router:
-            response = answer_indexed_documents_with_routing(
-                question=record.question,
-                llm_client=llm_client,
-                router_llm_client=router_llm_client,
-                retriever=active_retriever,
-                documents_count=len(documents),
-                chunks_count=len(chunks),
-                top_k=top_k,
-            )
-        else:
-            response = answer_indexed_documents(
-                question=record.question,
-                llm_client=llm_client,
-                retriever=active_retriever,
-                documents_count=len(documents),
-                chunks_count=len(chunks),
-                top_k=top_k,
-            )
+        document_path_map = {Path(path).name: Path(path) for path in document_paths}
+        tools = build_default_tools(
+            active_retriever, document_paths=document_path_map, default_top_k=top_k
+        )
+        response = run_react_agent(
+            question=record.question,
+            llm_client=llm_client,
+            tools=tools,
+            max_iterations=max_iterations,
+        )
         contexts = serialize_search_results(response.sources)
 
         return GeneratedQARecord(
