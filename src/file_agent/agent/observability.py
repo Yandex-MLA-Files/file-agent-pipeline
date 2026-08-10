@@ -6,12 +6,16 @@ from typing import Any
 from langfuse import Langfuse
 
 _client: Langfuse | None = None
-_enabled = bool(os.getenv("LANGFUSE_PUBLIC_KEY")) and bool(os.getenv("LANGFUSE_SECRET_KEY"))
 
 
 def _get_client() -> Langfuse | None:
+    # Checked fresh on every call, not cached at import time: .env is loaded
+    # lazily (inside create_generation_llm_client, well after this module is
+    # first imported via the hf_cli -> agent.loop -> agent.observability
+    # import chain), so freezing this at import time would miss credentials
+    # that only exist in .env, not already in the shell environment.
     global _client
-    if not _enabled:
+    if not (os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY")):
         return None
     if _client is None:
         _client = Langfuse(
