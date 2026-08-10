@@ -10,6 +10,7 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
+from file_agent.agent import answer_with_agent
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.factory import create_llm_client
 from file_agent.rag import (
@@ -144,6 +145,16 @@ else:
         value=5,
         step=1,
     )
+    answer_mode = st.radio(
+        "Answer mode",
+        options=["Single-pass RAG", "Agent (multi-step)"],
+        horizontal=True,
+        help=(
+            "Single-pass RAG answers from one retrieval with the question as "
+            "the query. The agent lets the LLM plan its own tool calls "
+            "(search, document overview, reading sections) before answering."
+        ),
+    )
     generate_answer = st.button("Generate answer")
     results = []
     normalized_query = query.strip()
@@ -203,6 +214,7 @@ else:
         if not normalized_query:
             st.warning("Enter a question before generating an answer.")
         else:
+            agent_steps = []
             try:
                 with (
                     resume_span(st.session_state.get("ingest_span")),
@@ -210,18 +222,47 @@ else:
                 ):
                     question_span.set_attribute("file_agent.question", normalized_query)
                     question_span.set_attribute("file_agent.top_k", int(top_k))
-                    response = answer_with_results(
-                        question=normalized_query,
-                        results=results,
-                        llm_client=create_llm_client(),
-                        documents_count=len(documents),
-                        chunks_count=len(chunks),
-                    )
+                    question_span.set_attribute("file_agent.answer_mode", answer_mode)
+                    if answer_mode == "Agent (multi-step)":
+                        response = answer_with_agent(
+                            question=normalized_query,
+                            llm_client=create_llm_client(),
+                            retriever=retriever,
+                            documents=documents,
+                        )
+                        agent_steps = response.steps
+                    else:
+                        response = answer_with_results(
+                            question=normalized_query,
+                            results=results,
+                            llm_client=create_llm_client(),
+                            documents_count=len(documents),
+                            chunks_count=len(chunks),
+                        )
             except Exception as exc:
                 st.error(f"Could not generate answer: {exc}")
             else:
                 st.subheader("Answer")
                 st.write(response.answer)
+
+                if agent_steps:
+                    with st.expander(f"Agent steps ({len(agent_steps)})"):
+                        for step_index, step in enumerate(agent_steps, start=1):
+                            st.markdown(f"**Step {step_index}**")
+                            if step.thought:
+                                st.write(f"Thought: {step.thought}")
+                            if step.tool:
+                                st.code(
+                                    f"{step.tool}({step.arguments or {}})",
+                                    language="text",
+                                )
+                            if step.observation:
+                                st.text_area(
+                                    "Observation",
+                                    value=step.observation[: CHUNK_PREVIEW_LIMIT * 2],
+                                    height=140,
+                                    key=f"agent-observation-{step_index}",
+                                )
 
                 if response.sources:
                     st.subheader("Sources")
