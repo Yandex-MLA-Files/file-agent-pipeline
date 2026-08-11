@@ -19,8 +19,15 @@ DEFAULT_LOCAL_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 # generation is unaffected either way, so this only needs to be low for the
 # local backend, not Yandex.
 DEFAULT_LOCAL_TEMPERATURE = 0.0
-DEFAULT_TIMEOUT_SECONDS = 60
-DEFAULT_MAX_RETRIES = 0
+# 60s/0 retries was too brittle for long batch runs (generate_hf_dataset.py /
+# generate_baseline_rag_dataset.py): a single slow vLLM response - e.g. GPU
+# contention from another process sharing the box, or just a longer-than-usual
+# generation - crashed the whole run with no automatic recovery, only
+# --resume from the last checkpoint. The openai SDK's own max_retries already
+# retries timeouts/connection errors/429/5xx with exponential backoff, so
+# raising both absorbs transient blips without any code of our own.
+DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_MAX_RETRIES = 3
 LOCAL_API_KEY_PLACEHOLDER = "not-used"
 
 
