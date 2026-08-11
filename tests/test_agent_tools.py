@@ -123,7 +123,7 @@ def test_run_python_attaches_no_evidence_when_there_is_no_output(monkeypatch):
     assert result.sources == []
 
 
-def test_run_python_attaches_no_evidence_on_timeout_or_error(monkeypatch):
+def test_run_python_attaches_no_evidence_on_timeout(monkeypatch):
     monkeypatch.setattr(
         tools_module,
         "run_sandboxed_code",
@@ -131,19 +131,43 @@ def test_run_python_attaches_no_evidence_on_timeout_or_error(monkeypatch):
             stdout="", stderr="", exit_code=1, timed_out=True, truncated=False
         ),
     )
-    timeout_result = run_python({}, "while True: pass")
+    result = run_python({}, "while True: pass")
 
+    assert result.sources == []
+
+
+def test_run_python_attaches_the_error_as_evidence(monkeypatch):
+    """A failed run is the only thing an answer like "there is no such sheet"
+    can rest on; without evidence RagasJudge scores that answer as ungrounded."""
     monkeypatch.setattr(
         tools_module,
         "run_sandboxed_code",
         lambda **kwargs: SandboxResult(
-            stdout="", stderr="boom", exit_code=1, timed_out=False, truncated=False
+            stdout="",
+            stderr="ValueError: Worksheet named 'Comparison' not found",
+            exit_code=1,
+            timed_out=False,
+            truncated=False,
         ),
     )
-    error_result = run_python({}, "raise ValueError()")
+    result = run_python({}, "pd.read_excel('/data/a.xlsx', sheet_name='Comparison')")
 
-    assert timeout_result.sources == []
-    assert error_result.sources == []
+    assert len(result.sources) == 1
+    assert "Worksheet named 'Comparison' not found" in result.sources[0].chunk.text
+    assert result.sources[0].chunk.metadata["dataset_doc_id"] == "run_python"
+
+
+def test_run_python_attaches_no_evidence_when_a_failure_says_nothing(monkeypatch):
+    monkeypatch.setattr(
+        tools_module,
+        "run_sandboxed_code",
+        lambda **kwargs: SandboxResult(
+            stdout="", stderr="", exit_code=1, timed_out=False, truncated=False
+        ),
+    )
+    result = run_python({}, "raise SystemExit(1)")
+
+    assert result.sources == []
 
 
 def test_run_python_works_without_any_documents(monkeypatch):
@@ -185,10 +209,30 @@ def test_list_documents_summarizes_pages_sheets_and_headings():
     assert documents[1]["sheets"] == ["Sheet1", "Sheet2"]
 
 
+def test_list_documents_attaches_its_output_as_evidence():
+    """Sheet/page/slide questions are answered from this output alone, so it
+    has to reach the exported contexts - otherwise a correct answer scores 0."""
+    xlsx_document = Document(
+        file_name="data.xlsx",
+        file_type=".xlsx",
+        blocks=[Block(id="b1", text="1\t2", type="xlsx_sheet", metadata={"sheet_name": "Sheet1"})],
+    )
+
+    result = list_documents([xlsx_document])
+
+    assert len(result.sources) == 1
+    source = result.sources[0]
+    assert "data.xlsx" in source.chunk.text
+    assert "Sheet1" in source.chunk.text
+    assert source.chunk.metadata["dataset_doc_id"] == "list_documents"
+    assert source.score == 1.0
+
+
 def test_list_documents_handles_no_documents():
     result = list_documents([])
 
     assert result.content == '{"documents": []}'
+    assert result.sources == []
 
 
 def test_build_default_tools_always_includes_all_three_tools():

@@ -23,7 +23,7 @@ from file_agent.retrieval import Retriever
 CHECKPOINT_SCHEMA_VERSION = 3
 CHECKPOINTS_DIRECTORY_NAME = "checkpoints"
 RAG_PIPELINE_VERSION = "section-token-small-to-big-v1"
-AGENT_PIPELINE_VERSION = "react-tool-calling-v1"
+AGENT_PIPELINE_VERSION = "react-tool-calling-v2"
 LOGGER = logging.getLogger(__name__)
 
 

@@ -16,11 +16,8 @@ from file_agent.retrieval import Retriever, SearchResult
 # not as the per-row tool list itself.
 ALL_TOOL_NAMES = ("search_documents", "list_documents", "run_python")
 
-# Sentinel "document_id" for run_python's synthetic evidence chunks (see
-# _sandbox_evidence): they aren't tied to one parsed source document, but
-# RetrievedContext.from_dict requires a non-empty document_id when a
-# checkpoint is reloaded on --resume, so this can't be left blank.
-_SANDBOX_EVIDENCE_DOCUMENT_ID = "run_python"
+# Tool-generated evidence carries the tool name as its document_id sentinel:
+# RetrievedContext.from_dict rejects a blank one when a checkpoint reloads.
 
 
 @dataclass(frozen=True)
@@ -59,7 +56,14 @@ def list_documents(documents: Sequence[Document]) -> ToolResult:
                 "headings": len(document.metadata.get("table_of_contents") or []),
             }
         )
-    return ToolResult(content=json.dumps({"documents": entries}, ensure_ascii=False, default=str))
+
+    content = json.dumps({"documents": entries}, ensure_ascii=False, default=str)
+    # Structure questions (sheet names, slide/page counts) are answered from
+    # this output alone, so it has to reach the exported contexts as evidence.
+    sources = (
+        [_tool_evidence("list_documents", f"Document structure:\n{content}")] if entries else []
+    )
+    return ToolResult(content=content, sources=sources)
 
 
 def _unique_metadata_values(blocks: list[Block], key: str) -> list[str]:
@@ -87,7 +91,16 @@ def run_python(document_paths: Mapping[str, Path], code: str) -> ToolResult:
         return ToolResult(content="Error: execution timed out, simplify/narrow the computation.")
     if result.exit_code != 0:
         error_output = result.stderr or result.stdout
-        return ToolResult(content=f"Error: code raised an exception:\n{error_output}")
+        # A failed run is still what the answer rests on when the agent reports
+        # the failure (e.g. "no such sheet"), so export it rather than nothing.
+        sources = (
+            [_tool_evidence("run_python", f"Executed Python:\n{code}\n\nError:\n{error_output}")]
+            if error_output.strip()
+            else []
+        )
+        return ToolResult(
+            content=f"Error: code raised an exception:\n{error_output}", sources=sources
+        )
 
     stdout = result.stdout.strip()
     output = stdout or "(no output - use print() to return a result)"
@@ -99,17 +112,20 @@ def run_python(document_paths: Mapping[str, Path], code: str) -> ToolResult:
     # otherwise an answer computed entirely via run_python (no search call)
     # would export empty/unrelated contexts, and RagasJudge's faithfulness/
     # context_recall would score a correct answer as ungrounded.
-    sources = [_sandbox_evidence(code, stdout)] if stdout else []
+    sources = (
+        [_tool_evidence("run_python", f"Executed Python:\n{code}\n\nOutput:\n{stdout}")]
+        if stdout
+        else []
+    )
     return ToolResult(content=output, sources=sources)
 
 
-def _sandbox_evidence(code: str, stdout: str) -> SearchResult:
-    text = f"Executed Python:\n{code}\n\nOutput:\n{stdout}"
+def _tool_evidence(tool_name: str, text: str) -> SearchResult:
     return SearchResult(
         chunk=Chunk(
-            id=f"run_python:{uuid.uuid4().hex[:12]}",
+            id=f"{tool_name}:{uuid.uuid4().hex[:12]}",
             text=text,
-            metadata={"source": "run_python", "dataset_doc_id": _SANDBOX_EVIDENCE_DOCUMENT_ID},
+            metadata={"source": tool_name, "dataset_doc_id": tool_name},
         ),
         score=1.0,
     )
