@@ -217,8 +217,14 @@ services:
       - server
       - --backend-store-uri
       - sqlite:////mlflow/mlflow.db
+      # mlflow-artifacts:/ (not a plain /mlflow/artifacts path) so clients
+      # upload artifacts over this server's HTTP proxy instead of trying to
+      # write straight to the container's filesystem - eval_pipeline's
+      # run_eval.py runs on the host, not in this container, so a plain path
+      # here makes mlflow.log_artifact() fail with a host-side
+      # PermissionError on /mlflow (that path only exists in the container).
       - --default-artifact-root
-      - /mlflow/artifacts
+      - mlflow-artifacts:/
       - --host
       - 0.0.0.0
       - --port
