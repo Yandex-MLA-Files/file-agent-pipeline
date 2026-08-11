@@ -1,19 +1,21 @@
 import ast
+import json
 import operator
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from file_agent.agent.sandbox import run_sandboxed_code
+from file_agent.document import Block, Document
 from file_agent.qa import build_context_from_results
 from file_agent.retrieval import Retriever, SearchResult
 
-# The full tool catalog this pipeline version can register (search_documents
-# and calculate always; run_python_on_spreadsheet only when an XLSX is
-# present). Used as a stable pipeline-capability fingerprint in checkpoint
-# parameters, not as the per-row tool list itself.
-ALL_TOOL_NAMES = ("search_documents", "calculate", "run_python_on_spreadsheet")
+# The full tool catalog this pipeline version can register (search_documents,
+# calculate, and list_documents always; run_python_on_spreadsheet only when
+# an XLSX is present). Used as a stable pipeline-capability fingerprint in
+# checkpoint parameters, not as the per-row tool list itself.
+ALL_TOOL_NAMES = ("search_documents", "calculate", "list_documents", "run_python_on_spreadsheet")
 
 _CALC_OPERATORS: dict[type, Callable[..., float]] = {
     ast.Add: operator.add,
@@ -70,6 +72,43 @@ def _eval_calc_node(node: ast.expr) -> float:
     raise ValueError(f"unsupported expression element: {ast.dump(node)}")
 
 
+def list_documents(documents: Sequence[Document]) -> ToolResult:
+    entries = []
+    for document in documents:
+        sheets = _unique_metadata_values(document.blocks, "sheet_name")
+        slides = _integer_metadata_values(document.blocks, "slide_number")
+        entries.append(
+            {
+                "file_name": document.file_name,
+                "file_type": document.file_type,
+                "total_pages": document.metadata.get("total_pages") or None,
+                "total_slides": max(slides, default=None),
+                "sheets": sheets,
+                "headings": len(document.metadata.get("table_of_contents") or []),
+            }
+        )
+    return ToolResult(content=json.dumps({"documents": entries}, ensure_ascii=False, default=str))
+
+
+def _unique_metadata_values(blocks: list[Block], key: str) -> list[str]:
+    values: list[str] = []
+    for block in blocks:
+        value = block.metadata.get(key)
+        if isinstance(value, str) and value not in values:
+            values.append(value)
+    return values
+
+
+def _integer_metadata_values(blocks: list[Block], key: str) -> list[int]:
+    return sorted(
+        {
+            value
+            for block in blocks
+            if isinstance((value := block.metadata.get(key)), int) and not isinstance(value, bool)
+        }
+    )
+
+
 def run_python_on_spreadsheet(
     document_paths: Mapping[str, Path], file_name: str, code: str
 ) -> ToolResult:
@@ -94,6 +133,7 @@ def run_python_on_spreadsheet(
 def build_default_tools(
     retriever: Retriever,
     document_paths: Mapping[str, Path] | None = None,
+    documents: Sequence[Document] | None = None,
     default_top_k: int = 5,
 ) -> list[Tool]:
     tools = [
@@ -138,6 +178,17 @@ def build_default_tools(
                 "required": ["expression"],
             },
             handler=lambda expression: calculate(expression),
+        ),
+        Tool(
+            name="list_documents",
+            description=(
+                "List the uploaded documents and their structure (file type, page/"
+                "slide/sheet counts, heading count). Call this first when unsure "
+                "which documents or sheets are available, before a targeted search "
+                "or run_python_on_spreadsheet."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+            handler=lambda: list_documents(documents or []),
         ),
     ]
 

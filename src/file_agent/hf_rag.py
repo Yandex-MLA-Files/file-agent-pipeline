@@ -195,7 +195,10 @@ def process_qa_record(
             )
             document_path_map = {Path(path).name: Path(path) for path in document_paths}
             tools = build_default_tools(
-                active_retriever, document_paths=document_path_map, default_top_k=top_k
+                active_retriever,
+                document_paths=document_path_map,
+                documents=documents,
+                default_top_k=top_k,
             )
             response = run_react_agent(
                 question=record.question,

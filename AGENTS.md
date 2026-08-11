@@ -44,8 +44,10 @@ Users can upload one or more documents, preview extracted text, find relevant ch
 - A ReAct tool-calling agent (`agent/loop.py`) that answers questions by
   reasoning and calling tools in a bounded loop (native OpenAI `tools=`, not
   prompt-embedded JSON): full-text/semantic search over indexed chunks, a
-  restricted arithmetic evaluator, and — only when an `.xlsx` document is
-  present — sandboxed pandas/openpyxl code execution in an isolated,
+  restricted arithmetic evaluator, a document-listing tool (file names, page/
+  slide/sheet counts, heading count — always registered, lets the agent see
+  what's available instead of guessing), and — only when an `.xlsx` document
+  is present — sandboxed pandas/openpyxl code execution in an isolated,
   network-disabled, resource-capped ephemeral Docker container per call. A
   hard iteration cap guarantees the loop always terminates with an answer.
 - An `LLMClient` adapter built on the official OpenAI Python SDK, including
@@ -84,7 +86,7 @@ src/file_agent/
   rag.py                      # Document loading/chunking/indexing + single-shot RAG
   agent/                      # ReAct tool-calling agent
     loop.py                   # Agent loop: LLM turns, tool dispatch, iteration cap
-    tools.py                  # Tool/ToolResult, search + calculator + spreadsheet tools
+    tools.py                  # Tool/ToolResult, search + calculator + list_documents + spreadsheet tools
     sandbox.py                # Isolated Docker execution for the spreadsheet tool
     observability.py          # Langfuse trace/generation/span helpers
   parsers/                    # Supported file parsers

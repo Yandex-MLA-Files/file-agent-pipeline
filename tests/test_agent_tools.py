@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from file_agent.agent import tools as tools_module
@@ -5,10 +6,12 @@ from file_agent.agent.sandbox import SandboxResult
 from file_agent.agent.tools import (
     build_default_tools,
     calculate,
+    list_documents,
     run_python_on_spreadsheet,
     search_documents,
 )
 from file_agent.chunking import Chunk
+from file_agent.document import Block, Document
 from file_agent.retrieval import SearchResult
 
 
@@ -115,10 +118,42 @@ def test_run_python_on_spreadsheet_returns_stdout_on_success(monkeypatch):
     assert result.content == "42"
 
 
-def test_build_default_tools_always_includes_search_and_calculate():
+def test_list_documents_summarizes_pages_sheets_and_headings():
+    pdf_document = Document(
+        file_name="report.pdf",
+        file_type=".pdf",
+        blocks=[Block(id="b1", text="Intro", type="heading", page_number=1)],
+        metadata={"total_pages": 3, "table_of_contents": [{"title": "Intro"}]},
+    )
+    xlsx_document = Document(
+        file_name="data.xlsx",
+        file_type=".xlsx",
+        blocks=[
+            Block(id="b2", text="1\t2", type="xlsx_sheet", metadata={"sheet_name": "Sheet1"}),
+            Block(id="b3", text="3\t4", type="xlsx_sheet", metadata={"sheet_name": "Sheet2"}),
+        ],
+    )
+
+    result = list_documents([pdf_document, xlsx_document])
+    documents = json.loads(result.content)["documents"]
+
+    assert documents[0]["file_name"] == "report.pdf"
+    assert documents[0]["total_pages"] == 3
+    assert documents[0]["headings"] == 1
+    assert documents[1]["file_name"] == "data.xlsx"
+    assert documents[1]["sheets"] == ["Sheet1", "Sheet2"]
+
+
+def test_list_documents_handles_no_documents():
+    result = list_documents([])
+
+    assert result.content == '{"documents": []}'
+
+
+def test_build_default_tools_always_includes_search_calculate_and_list_documents():
     tools = build_default_tools(FakeRetriever([]))
 
-    assert {tool.name for tool in tools} == {"search_documents", "calculate"}
+    assert {tool.name for tool in tools} == {"search_documents", "calculate", "list_documents"}
 
 
 def test_build_default_tools_adds_spreadsheet_tool_only_for_xlsx_documents():

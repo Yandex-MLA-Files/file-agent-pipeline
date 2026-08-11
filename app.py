@@ -229,6 +229,7 @@ else:
                     tools = build_default_tools(
                         retriever,
                         document_paths=st.session_state.get("document_paths"),
+                        documents=documents,
                         default_top_k=int(top_k),
                     )
                     response = run_react_agent(
