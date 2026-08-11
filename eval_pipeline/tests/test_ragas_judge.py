@@ -312,6 +312,23 @@ def test_evaluate_writes_separate_trace_files_for_separate_runs(patched_metrics,
     assert len(run_ids) == 2
 
 
+def test_evaluate_stores_last_usage_and_trace_path_for_the_caller(patched_metrics, tmp_path):
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
+    assert judge.last_usage is None
+    assert judge.last_trace_path is None
+
+    judge.evaluate(_run_df(2))
+
+    assert judge.last_usage is not None
+    assert judge.last_usage["n_rows"] == 2
+    assert judge.last_usage["model"] == "test-model"
+    assert "cost_rub" in judge.last_usage
+
+    assert judge.last_trace_path is not None
+    assert judge.last_trace_path.is_file()
+    assert judge.last_trace_path.parent == tmp_path
+
+
 def test_evaluate_appends_a_usage_log_entry(patched_metrics, tmp_path):
     judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
 

@@ -117,7 +117,7 @@ def _usage_cost(input_tokens: int, output_tokens: int, cached_tokens: int) -> fl
 
 def _log_usage(
     path: str | Path, usage_cb: _TokenUsageCallback, n_rows: int, fallback_model: str = ""
-) -> None:
+) -> dict[str, Any]:
     entry = {
         "timestamp": datetime.now(UTC).isoformat(),
         "model": usage_cb.model or fallback_model,
@@ -133,6 +133,7 @@ def _log_usage(
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return entry
 
 
 def _json_default_trace(obj):
@@ -187,7 +188,7 @@ def _log_judge_trace(
     path: str | Path,
     run_df: pd.DataFrame,
     row_traces: list[dict[str, Any]],
-) -> None:
+) -> Path:
 
     run_id = str(uuid.uuid4())
     now = datetime.now(UTC)
@@ -209,6 +210,7 @@ def _log_judge_trace(
                 "reasoning_trace": row_trace["calls"],
             }
             f.write(json.dumps(entry, ensure_ascii=False, default=_json_default_trace) + "\n")
+    return run_path
 
 
 def _build_default_llm(model: str) -> BaseRagasLLM:
@@ -279,6 +281,11 @@ class RagasJudge:
             context_precision,
             context_recall,
         ]
+        # Populated by evaluate(): cost/token totals and the trace file path
+        # for the *last* call, so callers (e.g. run_eval.py) can forward them
+        # to MLflow without re-deriving anything evaluate() already computed.
+        self.last_usage: dict[str, Any] | None = None
+        self.last_trace_path: Path | None = None
 
     def evaluate(self, run_df: pd.DataFrame) -> pd.DataFrame:
         ragas_df = run_df.rename(columns=RUN_TO_RAGAS_COLUMNS)[list(RUN_TO_RAGAS_COLUMNS.values())]
@@ -299,10 +306,10 @@ class RagasJudge:
                 max_retries=self.max_retries,
             ),
         )
-        _log_usage(self.usage_log_path, usage_cb, len(run_df), self._model_name)
+        self.last_usage = _log_usage(self.usage_log_path, usage_cb, len(run_df), self._model_name)
         run_id = str(result.run_id) if result.run_id is not None else None
         row_traces = _parse_row_traces(result.ragas_traces, run_id)
-        _log_judge_trace(self.trace_log_path, run_df, row_traces)
+        self.last_trace_path = _log_judge_trace(self.trace_log_path, run_df, row_traces)
 
         scores = result.to_pandas()
         df = run_df.copy()

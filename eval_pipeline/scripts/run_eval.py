@@ -52,6 +52,14 @@ def main() -> None:
     report = build_report(scored_df, judge.metric_names, args.negative_example_pattern)
     report_path = save_report(report, scored_df, args.out)
     append_run_log(report, judge.metric_names, args.run, args.out, JUDGE_NAME, args.runs_log)
+
+    metrics = report_to_mlflow_metrics(report, judge.metric_names)
+    if judge.last_usage is not None:
+        metrics["cost_rub"] = judge.last_usage["cost_rub"]
+        metrics["input_tokens"] = judge.last_usage["input_tokens"]
+        metrics["output_tokens"] = judge.last_usage["output_tokens"]
+        metrics["cached_tokens"] = judge.last_usage["cached_tokens"]
+
     log_mlflow_run(
         run_name=Path(args.out).name,
         params={
@@ -59,7 +67,12 @@ def main() -> None:
             "judge": JUDGE_NAME,
             "judge_model": os.environ.get("JUDGE_MODEL", ""),
         },
-        metrics=report_to_mlflow_metrics(report, judge.metric_names),
+        metrics=metrics,
+        artifact_paths=[
+            path
+            for path in (report_path, Path(args.out) / "scored.parquet", judge.last_trace_path)
+            if path is not None
+        ],
     )
 
     print(f"Done: {len(run_df)} examples, report saved to {report_path}")

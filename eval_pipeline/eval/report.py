@@ -103,12 +103,18 @@ def log_mlflow_run(
     params: dict[str, Any],
     metrics: dict[str, float],
     tags: dict[str, str] | None = None,
+    artifact_paths: list[str | Path] | None = None,
 ) -> None:
     """Log one MLflow run for comparing eval runs (params + RagasJudge metrics).
 
     A silent no-op when MLFLOW_TRACKING_URI isn't set, so a missing/unreachable
     MLflow server never breaks a normal `run_eval.py`/`compare_runs.py` call —
     same posture as Langfuse tracing in the main app.
+
+    artifact_paths are attached as downloadable files on the run (report.json,
+    scored.parquet, the judge's per-row reasoning trace, ...) - skips any path
+    that doesn't exist rather than failing the whole run, since none of these
+    are more essential than the metrics themselves.
     """
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
     if not tracking_uri:
@@ -121,3 +127,6 @@ def log_mlflow_run(
         mlflow.log_metrics(metrics)
         if tags:
             mlflow.set_tags(tags)
+        for artifact_path in artifact_paths or []:
+            if Path(artifact_path).is_file():
+                mlflow.log_artifact(str(artifact_path))

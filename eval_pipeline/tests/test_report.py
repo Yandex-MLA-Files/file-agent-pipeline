@@ -171,3 +171,38 @@ def test_log_mlflow_run_logs_params_metrics_and_tags_when_configured(monkeypatch
     assert calls["params"] == {"judge": "ragas"}
     assert calls["metrics"] == {"faithfulness_mean": 0.9}
     assert calls["tags"] == {"query_type": "complex"}
+
+
+def test_log_mlflow_run_logs_existing_artifact_paths_and_skips_missing_ones(monkeypatch, tmp_path):
+    import mlflow
+
+    from eval.report import log_mlflow_run
+
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://localhost:5050")
+    existing_path = tmp_path / "report.json"
+    existing_path.write_text("{}", encoding="utf-8")
+    missing_path = tmp_path / "does_not_exist.jsonl"
+    logged_artifacts = []
+
+    class FakeRunContext:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    monkeypatch.setattr(mlflow, "set_tracking_uri", lambda uri: None)
+    monkeypatch.setattr(mlflow, "set_experiment", lambda name: None)
+    monkeypatch.setattr(mlflow, "start_run", lambda **kwargs: FakeRunContext())
+    monkeypatch.setattr(mlflow, "log_params", lambda params: None)
+    monkeypatch.setattr(mlflow, "log_metrics", lambda metrics: None)
+    monkeypatch.setattr(mlflow, "log_artifact", lambda path: logged_artifacts.append(path))
+
+    log_mlflow_run(
+        run_name="v0",
+        params={},
+        metrics={},
+        artifact_paths=[existing_path, missing_path],
+    )
+
+    assert logged_artifacts == [str(existing_path)]
