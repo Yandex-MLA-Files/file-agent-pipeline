@@ -74,6 +74,13 @@ Users can upload one or more documents, preview extracted text, find relevant ch
   — both backends read the same shared OTel `TracerProvider` once
   `configure_telemetry()` has run (`hf_cli.main()` for the eval pipeline,
   module-level in `app.py` for the Streamlit UI).
+- A plain single-shot RAG baseline generator (`generate_baseline_rag_dataset.py`
+  / `src/file_agent/baseline_cli.py`) for the HF eval dataset - one search,
+  one LLM call, no tools, no Langfuse trace - kept only to produce a
+  RagasJudge comparison point against the ReAct agent pipeline. Writes the
+  same `answers.parquet`/manifest shape as `generate_hf_dataset.py` but with
+  its own checkpoint/manifest schema versions, intentionally uncoupled from
+  the agent pipeline's.
 - Pytest coverage for the main layers.
 
 Supported extensions: `.md`, `.txt`, `.pdf`, `.docx`, `.html`, `.htm`, `.xlsx`, `.pptx`.
