@@ -173,6 +173,26 @@ The bounded VLM enhancer (`VLM_BACKEND`) remains the right place for
 image-only content: it turns figures into indexed, searchable text — the
 same amortized model.
 
+OCR engine quality, measured on a real scanned lecture slide (Russian text
+with formulas), original plus degraded variants:
+
+- EasyOCR (default) reads Cyrillic correctly (confidence 0.72-0.81,
+  ~3 s/page on GPU) and tolerates moderate skew; beyond roughly ±7° the
+  characters survive but the *reading order* starts to scramble. Half
+  resolution costs almost nothing.
+- RapidOCR transliterates Cyrillic into Latin lookalikes ("Критерий" →
+  "KpNTepnn") — its confidence stays high, so the failure is silent. Keep
+  it only for Latin/CJK documents, as already noted in AGENTS.md.
+- A multimodal LLM (vision-enabled Qwen3.5-9B on an OpenAI-compatible
+  endpoint) transcribes the same page with correct structure and formulas
+  as LaTeX, and is unaffected even by -12° skew — at ~20 s/page, roughly
+  7x slower than EasyOCR. For badly skewed or photographed documents it is
+  the quality ceiling; the practical integration point is the existing
+  `VLM_BACKEND=openai` hook rather than replacing the per-page OCR router.
+  Note the reference deployment serves the model with
+  `--language-model-only`, which disables image input — a separate
+  vision-enabled instance is required.
+
 ## Serving notes (vLLM on V100)
 
 The agent works with plain `vllm serve <model>` — no tool-choice or
