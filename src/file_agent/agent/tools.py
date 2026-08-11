@@ -1,10 +1,12 @@
 import json
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from file_agent.agent.sandbox import run_sandboxed_code
+from file_agent.chunking import Chunk
 from file_agent.document import Block, Document
 from file_agent.qa import build_context_from_results
 from file_agent.retrieval import Retriever, SearchResult
@@ -13,6 +15,12 @@ from file_agent.retrieval import Retriever, SearchResult
 # Used as a stable pipeline-capability fingerprint in checkpoint parameters,
 # not as the per-row tool list itself.
 ALL_TOOL_NAMES = ("search_documents", "list_documents", "run_python")
+
+# Sentinel "document_id" for run_python's synthetic evidence chunks (see
+# _sandbox_evidence): they aren't tied to one parsed source document, but
+# RetrievedContext.from_dict requires a non-empty document_id when a
+# checkpoint is reloaded on --resume, so this can't be left blank.
+_SANDBOX_EVIDENCE_DOCUMENT_ID = "run_python"
 
 
 @dataclass(frozen=True)
@@ -81,10 +89,30 @@ def run_python(document_paths: Mapping[str, Path], code: str) -> ToolResult:
         error_output = result.stderr or result.stdout
         return ToolResult(content=f"Error: code raised an exception:\n{error_output}")
 
-    output = result.stdout.strip() or "(no output - use print() to return a result)"
+    stdout = result.stdout.strip()
+    output = stdout or "(no output - use print() to return a result)"
     if result.truncated:
         output += "\n[output truncated]"
-    return ToolResult(content=output)
+
+    # A successful run's code+output becomes an evidence "source", exported
+    # to eval_pipeline's contexts alongside search_documents' sources -
+    # otherwise an answer computed entirely via run_python (no search call)
+    # would export empty/unrelated contexts, and RagasJudge's faithfulness/
+    # context_recall would score a correct answer as ungrounded.
+    sources = [_sandbox_evidence(code, stdout)] if stdout else []
+    return ToolResult(content=output, sources=sources)
+
+
+def _sandbox_evidence(code: str, stdout: str) -> SearchResult:
+    text = f"Executed Python:\n{code}\n\nOutput:\n{stdout}"
+    return SearchResult(
+        chunk=Chunk(
+            id=f"run_python:{uuid.uuid4().hex[:12]}",
+            text=text,
+            metadata={"source": "run_python", "dataset_doc_id": _SANDBOX_EVIDENCE_DOCUMENT_ID},
+        ),
+        score=1.0,
+    )
 
 
 def build_default_tools(

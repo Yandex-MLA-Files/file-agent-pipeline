@@ -92,6 +92,60 @@ def test_run_python_returns_stdout_on_success(monkeypatch):
     assert result.content == "42"
 
 
+def test_run_python_attaches_evidence_source_on_successful_output(monkeypatch):
+    monkeypatch.setattr(
+        tools_module,
+        "run_sandboxed_code",
+        lambda **kwargs: SandboxResult(
+            stdout="7366.0\n", stderr="", exit_code=0, timed_out=False, truncated=False
+        ),
+    )
+    result = run_python({}, "print(2250 + 2170 + 1536 + 1410)")
+
+    assert len(result.sources) == 1
+    source = result.sources[0]
+    assert "2250 + 2170 + 1536 + 1410" in source.chunk.text
+    assert "7366.0" in source.chunk.text
+    assert source.chunk.metadata["dataset_doc_id"] == "run_python"
+    assert source.score == 1.0
+
+
+def test_run_python_attaches_no_evidence_when_there_is_no_output(monkeypatch):
+    monkeypatch.setattr(
+        tools_module,
+        "run_sandboxed_code",
+        lambda **kwargs: SandboxResult(
+            stdout="", stderr="", exit_code=0, timed_out=False, truncated=False
+        ),
+    )
+    result = run_python({}, "x = 1")
+
+    assert result.sources == []
+
+
+def test_run_python_attaches_no_evidence_on_timeout_or_error(monkeypatch):
+    monkeypatch.setattr(
+        tools_module,
+        "run_sandboxed_code",
+        lambda **kwargs: SandboxResult(
+            stdout="", stderr="", exit_code=1, timed_out=True, truncated=False
+        ),
+    )
+    timeout_result = run_python({}, "while True: pass")
+
+    monkeypatch.setattr(
+        tools_module,
+        "run_sandboxed_code",
+        lambda **kwargs: SandboxResult(
+            stdout="", stderr="boom", exit_code=1, timed_out=False, truncated=False
+        ),
+    )
+    error_result = run_python({}, "raise ValueError()")
+
+    assert timeout_result.sources == []
+    assert error_result.sources == []
+
+
 def test_run_python_works_without_any_documents(monkeypatch):
     monkeypatch.setattr(
         tools_module,

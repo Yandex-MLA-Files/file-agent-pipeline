@@ -50,8 +50,13 @@ Users can upload one or more documents, preview extracted text, find relevant ch
   resource-capped ephemeral Docker container per call, for arithmetic,
   aggregation, and any other computation a text search can't answer — every
   uploaded document is mounted read-only under `/data/<file name>` for that
-  call, not only `.xlsx` files. All three tools are always registered; a
-  hard iteration cap guarantees the loop always terminates with an answer.
+  call, not only `.xlsx` files. A successful run's code+output becomes an
+  "evidence" source alongside search_documents' retrieved chunks (both feed
+  `AgentResponse.sources`, exported as `contexts`) — otherwise an answer
+  computed entirely via `run_python` would export empty/unrelated contexts,
+  and RagasJudge's faithfulness/context_recall would score a correct answer
+  as ungrounded. All three tools are always registered; a hard iteration
+  cap guarantees the loop always terminates with an answer.
 - An `LLMClient` adapter built on the official OpenAI Python SDK, including
   native tool-calling (`generate_with_tools`).
 - Yandex AI Studio and local OpenAI-compatible LLM backends.
