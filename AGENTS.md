@@ -51,13 +51,20 @@ Users can upload one or more documents, preview extracted text, find relevant ch
 - An `LLMClient` adapter built on the official OpenAI Python SDK, including
   native tool-calling (`generate_with_tools`).
 - Yandex AI Studio and local OpenAI-compatible LLM backends.
-- A Streamlit UI for multi-file upload, preview, search, and answer generation.
-- Unified per-question tracing in the HF eval-dataset pipeline: one Langfuse
-  trace covers parsing, chunking, indexing, and the ReAct agent loop (one
-  generation per LLM turn, one span per tool call), bridged with the existing
-  OpenTelemetry/Jaeger spans of the parsing/chunking/retrieval layers rather
-  than duplicating instrumentation — both backends read the same shared OTel
-  `TracerProvider` once `configure_telemetry()` has run (see `hf_cli.main()`).
+- A Streamlit UI (`app.py`) for multi-file upload, preview, search, and
+  agent-driven answer generation — "Generate answer" runs the same
+  `run_react_agent` as the HF eval-dataset pipeline (search/calculate/
+  sandbox tools included), not a separate simplified path. Uploaded files
+  are kept on disk for the session's lifetime (not an auto-deleted temp
+  dir) so the spreadsheet sandbox tool can mount them on any later question.
+- Unified per-question tracing, both in the HF eval-dataset pipeline and in
+  the Streamlit app: one Langfuse trace covers parsing, chunking, indexing,
+  and the ReAct agent loop (one generation per LLM turn, one span per tool
+  call), bridged with the existing OpenTelemetry/Jaeger spans of the
+  parsing/chunking/retrieval layers rather than duplicating instrumentation
+  — both backends read the same shared OTel `TracerProvider` once
+  `configure_telemetry()` has run (`hf_cli.main()` for the eval pipeline,
+  module-level in `app.py` for the Streamlit UI).
 - Pytest coverage for the main layers.
 
 Supported extensions: `.md`, `.txt`, `.pdf`, `.docx`, `.html`, `.htm`, `.xlsx`, `.pptx`.

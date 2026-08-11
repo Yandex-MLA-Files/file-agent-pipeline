@@ -1,4 +1,5 @@
 import hashlib
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -10,13 +11,12 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
+from file_agent.agent.loop import run_react_agent
+from file_agent.agent.observability import finish_trace, pipeline_trace
+from file_agent.agent.tools import build_default_tools
 from file_agent.lancedb_retriever import LanceDBRetriever
-from file_agent.llm.factory import create_llm_client
-from file_agent.rag import (
-    answer_with_results,
-    index_documents,
-    load_documents,
-)
+from file_agent.llm.factory import create_generation_llm_client
+from file_agent.rag import index_documents, load_documents
 from file_agent.telemetry import configure_telemetry, resume_span, span_identity, tracer
 
 configure_telemetry()
@@ -33,6 +33,8 @@ RETRIEVAL_STATE_KEYS = (
     "search_cache_key",
     "search_results",
     "ingest_span",
+    "document_paths",
+    "upload_dir",
 )
 
 
@@ -48,6 +50,10 @@ def _clear_retrieval_state() -> None:
     retriever = st.session_state.get("lancedb_retriever")
     if retriever is not None:
         retriever.clear()
+
+    upload_dir = st.session_state.get("upload_dir")
+    if upload_dir is not None:
+        shutil.rmtree(upload_dir, ignore_errors=True)
 
     for key in RETRIEVAL_STATE_KEYS:
         st.session_state.pop(key, None)
@@ -68,26 +74,34 @@ else:
     files_fingerprint = _uploaded_files_fingerprint(uploaded_files)
 
     if st.session_state.get("indexed_files_fingerprint") != files_fingerprint:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            file_paths: list[Path] = []
-            for uploaded_file in uploaded_files:
-                file_path = Path(temp_dir) / Path(uploaded_file.name).name
-                file_path.write_bytes(uploaded_file.getbuffer())
-                file_paths.append(file_path)
+        # Kept on disk for the session's lifetime (not an auto-cleaned
+        # TemporaryDirectory) - the agent's spreadsheet sandbox tool needs the
+        # real uploaded file on disk for every question, not just at ingest
+        # time. Replaced/removed below once no longer needed.
+        upload_dir = Path(tempfile.mkdtemp(prefix="file-agent-app-"))
+        file_paths: list[Path] = []
+        for uploaded_file in uploaded_files:
+            file_path = upload_dir / Path(uploaded_file.name).name
+            file_path.write_bytes(uploaded_file.getbuffer())
+            file_paths.append(file_path)
 
-            try:
-                with tracer.start_as_current_span("file_agent.ingest_files") as ingest_span:
-                    documents = load_documents(file_paths)
-                    retriever = LanceDBRetriever()
-                    chunks = index_documents(documents, retriever)
-                    ingest_span_identity = span_identity(ingest_span)
-            except Exception as exc:
-                st.error(f"Could not parse or index uploaded files: {exc}")
-                st.stop()
+        try:
+            with tracer.start_as_current_span("file_agent.ingest_files") as ingest_span:
+                documents = load_documents(file_paths)
+                retriever = LanceDBRetriever()
+                chunks = index_documents(documents, retriever)
+                ingest_span_identity = span_identity(ingest_span)
+        except Exception as exc:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            st.error(f"Could not parse or index uploaded files: {exc}")
+            st.stop()
 
         previous_retriever = st.session_state.get("lancedb_retriever")
         if previous_retriever is not None:
             previous_retriever.clear()
+        previous_upload_dir = st.session_state.get("upload_dir")
+        if previous_upload_dir is not None:
+            shutil.rmtree(previous_upload_dir, ignore_errors=True)
 
         st.session_state["indexed_files_fingerprint"] = files_fingerprint
         st.session_state["indexed_documents"] = documents
@@ -97,6 +111,8 @@ else:
         )
         st.session_state["lancedb_retriever"] = retriever
         st.session_state["ingest_span"] = ingest_span_identity
+        st.session_state["document_paths"] = {path.name: path for path in file_paths}
+        st.session_state["upload_dir"] = upload_dir
 
     documents = st.session_state["indexed_documents"]
     chunks = st.session_state["indexed_chunks"]
@@ -205,23 +221,28 @@ else:
         else:
             try:
                 with (
-                    resume_span(st.session_state.get("ingest_span")),
+                    pipeline_trace(normalized_query),
                     tracer.start_as_current_span("file_agent.ask_question") as question_span,
                 ):
                     question_span.set_attribute("file_agent.question", normalized_query)
                     question_span.set_attribute("file_agent.top_k", int(top_k))
-                    response = answer_with_results(
-                        question=normalized_query,
-                        results=results,
-                        llm_client=create_llm_client(),
-                        documents_count=len(documents),
-                        chunks_count=len(chunks),
+                    tools = build_default_tools(
+                        retriever,
+                        document_paths=st.session_state.get("document_paths"),
+                        default_top_k=int(top_k),
                     )
+                    response = run_react_agent(
+                        question=normalized_query,
+                        llm_client=create_generation_llm_client(),
+                        tools=tools,
+                    )
+                    finish_trace(output=response.answer)
             except Exception as exc:
                 st.error(f"Could not generate answer: {exc}")
             else:
                 st.subheader("Answer")
                 st.write(response.answer)
+                st.caption(f"{response.iterations} agent iteration(s)")
 
                 if response.sources:
                     st.subheader("Sources")
