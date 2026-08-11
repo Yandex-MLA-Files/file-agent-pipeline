@@ -43,22 +43,24 @@ Users can upload one or more documents, preview extracted text, find relevant ch
 - A QA prompt layer and end-to-end RAG orchestration.
 - A ReAct tool-calling agent (`agent/loop.py`) that answers questions by
   reasoning and calling tools in a bounded loop (native OpenAI `tools=`, not
-  prompt-embedded JSON): full-text/semantic search over indexed chunks, a
-  restricted arithmetic evaluator, a document-listing tool (file names, page/
-  slide/sheet counts, heading count — always registered, lets the agent see
-  what's available instead of guessing), and — only when an `.xlsx` document
-  is present — sandboxed pandas/openpyxl code execution in an isolated,
-  network-disabled, resource-capped ephemeral Docker container per call. A
+  prompt-embedded JSON): full-text/semantic search over indexed chunks; a
+  document-listing tool (file names, page/slide/sheet counts, heading count,
+  lets the agent see what's available instead of guessing); and sandboxed
+  Python (pandas/openpyxl) code execution in an isolated, network-disabled,
+  resource-capped ephemeral Docker container per call, for arithmetic,
+  aggregation, and any other computation a text search can't answer — every
+  uploaded document is mounted read-only under `/data/<file name>` for that
+  call, not only `.xlsx` files. All three tools are always registered; a
   hard iteration cap guarantees the loop always terminates with an answer.
 - An `LLMClient` adapter built on the official OpenAI Python SDK, including
   native tool-calling (`generate_with_tools`).
 - Yandex AI Studio and local OpenAI-compatible LLM backends.
 - A Streamlit UI (`app.py`) for multi-file upload, preview, search, and
   agent-driven answer generation — "Generate answer" runs the same
-  `run_react_agent` as the HF eval-dataset pipeline (search/calculate/
-  sandbox tools included), not a separate simplified path. Uploaded files
+  `run_react_agent` as the HF eval-dataset pipeline (search/list_documents/
+  run_python tools included), not a separate simplified path. Uploaded files
   are kept on disk for the session's lifetime (not an auto-deleted temp
-  dir) so the spreadsheet sandbox tool can mount them on any later question.
+  dir) so the sandbox tool can mount them on any later question.
 - Unified per-question tracing, both in the HF eval-dataset pipeline and in
   the Streamlit app: one Langfuse trace covers parsing, chunking, indexing,
   and the ReAct agent loop (one generation per LLM turn, one span per tool
@@ -75,7 +77,7 @@ Supported extensions: `.md`, `.txt`, `.pdf`, `.docx`, `.html`, `.htm`, `.xlsx`, 
 
 ```text
 app.py                         # Streamlit UI
-docker/sandbox.Dockerfile      # Image for the sandboxed spreadsheet tool
+docker/sandbox.Dockerfile      # Image for the sandboxed run_python tool
 src/file_agent/
   document.py                 # Document and Block models
   pipeline.py                 # Parser selection by extension
@@ -86,8 +88,8 @@ src/file_agent/
   rag.py                      # Document loading/chunking/indexing + single-shot RAG
   agent/                      # ReAct tool-calling agent
     loop.py                   # Agent loop: LLM turns, tool dispatch, iteration cap
-    tools.py                  # Tool/ToolResult, search + calculator + list_documents + spreadsheet tools
-    sandbox.py                # Isolated Docker execution for the spreadsheet tool
+    tools.py                  # Tool/ToolResult, search_documents + list_documents + run_python
+    sandbox.py                # Isolated Docker execution for run_python
     observability.py          # Langfuse trace/generation/span helpers
   parsers/                    # Supported file parsers
     docling_parser.py         # Structured PDF/DOCX parsing (Docling)
@@ -194,7 +196,7 @@ ReAct agent:
 
 - `AGENT_MAX_ITERATIONS` (default 6): hard cap on tool-calling turns per question.
 - `SANDBOX_IMAGE` (default `file-agent-sandbox:latest`): image for the
-  sandboxed spreadsheet tool, built once via
+  sandboxed `run_python` tool, built once via
   `docker build -t file-agent-sandbox -f docker/sandbox.Dockerfile .`.
 - vLLM must be started with `--enable-auto-tool-choice --tool-call-parser hermes`
   (see `docker-compose.yml`) for tool-calling to work against the local Qwen

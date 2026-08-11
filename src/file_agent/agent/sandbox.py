@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,7 +26,7 @@ class SandboxResult:
 
 
 def run_sandboxed_code(
-    source_path: Path,
+    source_paths: Mapping[str, Path],
     code: str,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     memory_limit_mb: int = DEFAULT_MEMORY_LIMIT_MB,
@@ -33,20 +34,34 @@ def run_sandboxed_code(
     max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
     image: str = DEFAULT_SANDBOX_IMAGE,
 ) -> SandboxResult:
-    """Run untrusted Python against one input file in an isolated, ephemeral container.
+    """Run untrusted Python against all available documents in an isolated, ephemeral container.
 
     No network, read-only rootfs, dropped capabilities, and hard resource
     limits - the container is the security boundary, not the Python code.
+    Every entry in source_paths (file_name -> local path) is mounted
+    read-only under /data/<file_name>, so the sandboxed code can open
+    whichever files it needs by their real name.
     """
-    source_path = Path(source_path).resolve()
-    if not source_path.is_file():
-        return SandboxResult(
-            stdout="",
-            stderr=f"Input file not found: {source_path}",
-            exit_code=1,
-            timed_out=False,
-            truncated=False,
-        )
+    resolved_paths: dict[str, Path] = {}
+    for file_name, source_path in source_paths.items():
+        if ":" in file_name:
+            return SandboxResult(
+                stdout="",
+                stderr=f"Unsupported file name for mounting: {file_name}",
+                exit_code=1,
+                timed_out=False,
+                truncated=False,
+            )
+        resolved_path = Path(source_path).resolve()
+        if not resolved_path.is_file():
+            return SandboxResult(
+                stdout="",
+                stderr=f"Input file not found: {resolved_path}",
+                exit_code=1,
+                timed_out=False,
+                truncated=False,
+            )
+        resolved_paths[file_name] = resolved_path
 
     container_name = f"sandbox-{uuid.uuid4().hex[:12]}"
     with tempfile.TemporaryDirectory(prefix="file-agent-sandbox-") as tmp_dir:
@@ -76,14 +91,10 @@ def run_sandboxed_code(
             "1000:1000",
             "-v",
             f"{code_path}:/sandbox/code.py:ro",
-            "-v",
-            f"{source_path}:/data/input.xlsx:ro",
-            "--workdir",
-            "/sandbox",
-            image,
-            "python",
-            "/sandbox/code.py",
         ]
+        for file_name, resolved_path in resolved_paths.items():
+            command += ["-v", f"{resolved_path}:/data/{file_name}:ro"]
+        command += ["--workdir", "/sandbox", image, "python", "/sandbox/code.py"]
 
         try:
             completed = subprocess.run(

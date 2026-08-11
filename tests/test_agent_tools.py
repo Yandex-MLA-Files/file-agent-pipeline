@@ -5,9 +5,8 @@ from file_agent.agent import tools as tools_module
 from file_agent.agent.sandbox import SandboxResult
 from file_agent.agent.tools import (
     build_default_tools,
-    calculate,
     list_documents,
-    run_python_on_spreadsheet,
+    run_python,
     search_documents,
 )
 from file_agent.chunking import Chunk
@@ -54,32 +53,7 @@ def test_search_documents_reports_no_matches_without_crashing():
     assert result.sources == []
 
 
-def test_calculate_evaluates_arithmetic():
-    result = calculate("(1200 - 950) / 950 * 100")
-
-    assert result.content == str((1200 - 950) / 950 * 100)
-
-
-def test_calculate_rejects_non_arithmetic_expressions():
-    result = calculate("__import__('os').system('echo pwned')")
-
-    assert result.content.startswith("Error:")
-
-
-def test_calculate_rejects_division_by_zero():
-    result = calculate("1 / 0")
-
-    assert result.content.startswith("Error:")
-
-
-def test_run_python_on_spreadsheet_rejects_unknown_file_name():
-    result = run_python_on_spreadsheet({"known.xlsx": Path("known.xlsx")}, "missing.xlsx", "pass")
-
-    assert "unknown file_name" in result.content
-    assert "known.xlsx" in result.content
-
-
-def test_run_python_on_spreadsheet_reports_timeout(monkeypatch):
+def test_run_python_reports_timeout(monkeypatch):
     monkeypatch.setattr(
         tools_module,
         "run_sandboxed_code",
@@ -87,12 +61,12 @@ def test_run_python_on_spreadsheet_reports_timeout(monkeypatch):
             stdout="", stderr="", exit_code=1, timed_out=True, truncated=False
         ),
     )
-    result = run_python_on_spreadsheet({"a.xlsx": Path("a.xlsx")}, "a.xlsx", "while True: pass")
+    result = run_python({"a.xlsx": Path("a.xlsx")}, "while True: pass")
 
     assert "timed out" in result.content
 
 
-def test_run_python_on_spreadsheet_reports_exception_output(monkeypatch):
+def test_run_python_reports_exception_output(monkeypatch):
     monkeypatch.setattr(
         tools_module,
         "run_sandboxed_code",
@@ -100,12 +74,12 @@ def test_run_python_on_spreadsheet_reports_exception_output(monkeypatch):
             stdout="", stderr="Traceback: KeyError", exit_code=1, timed_out=False, truncated=False
         ),
     )
-    result = run_python_on_spreadsheet({"a.xlsx": Path("a.xlsx")}, "a.xlsx", "raise KeyError")
+    result = run_python({"a.xlsx": Path("a.xlsx")}, "raise KeyError")
 
     assert "KeyError" in result.content
 
 
-def test_run_python_on_spreadsheet_returns_stdout_on_success(monkeypatch):
+def test_run_python_returns_stdout_on_success(monkeypatch):
     monkeypatch.setattr(
         tools_module,
         "run_sandboxed_code",
@@ -113,9 +87,22 @@ def test_run_python_on_spreadsheet_returns_stdout_on_success(monkeypatch):
             stdout="42\n", stderr="", exit_code=0, timed_out=False, truncated=False
         ),
     )
-    result = run_python_on_spreadsheet({"a.xlsx": Path("a.xlsx")}, "a.xlsx", "print(42)")
+    result = run_python({"a.xlsx": Path("a.xlsx")}, "print(42)")
 
     assert result.content == "42"
+
+
+def test_run_python_works_without_any_documents(monkeypatch):
+    monkeypatch.setattr(
+        tools_module,
+        "run_sandboxed_code",
+        lambda **kwargs: SandboxResult(
+            stdout="7\n", stderr="", exit_code=0, timed_out=False, truncated=False
+        ),
+    )
+    result = run_python({}, "print(3 + 4)")
+
+    assert result.content == "7"
 
 
 def test_list_documents_summarizes_pages_sheets_and_headings():
@@ -150,22 +137,21 @@ def test_list_documents_handles_no_documents():
     assert result.content == '{"documents": []}'
 
 
-def test_build_default_tools_always_includes_search_calculate_and_list_documents():
+def test_build_default_tools_always_includes_all_three_tools():
     tools = build_default_tools(FakeRetriever([]))
 
-    assert {tool.name for tool in tools} == {"search_documents", "calculate", "list_documents"}
+    assert {tool.name for tool in tools} == {"search_documents", "list_documents", "run_python"}
 
 
-def test_build_default_tools_adds_spreadsheet_tool_only_for_xlsx_documents():
-    without_xlsx = build_default_tools(
-        FakeRetriever([]), document_paths={"notes.txt": Path("notes.txt")}
-    )
-    with_xlsx = build_default_tools(
-        FakeRetriever([]), document_paths={"data.xlsx": Path("data.xlsx")}
+def test_build_default_tools_run_python_description_lists_available_files():
+    tools = build_default_tools(
+        FakeRetriever([]),
+        document_paths={"data.xlsx": Path("data.xlsx"), "notes.txt": Path("notes.txt")},
     )
 
-    assert "run_python_on_spreadsheet" not in {tool.name for tool in without_xlsx}
-    assert "run_python_on_spreadsheet" in {tool.name for tool in with_xlsx}
+    run_python_tool = next(tool for tool in tools if tool.name == "run_python")
+    assert "data.xlsx" in run_python_tool.description
+    assert "notes.txt" in run_python_tool.description
 
 
 def test_build_default_tools_search_schema_uses_the_given_default_top_k():
