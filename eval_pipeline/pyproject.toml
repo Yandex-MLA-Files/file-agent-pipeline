@@ -12,6 +12,7 @@ dependencies = [
     "sentence-transformers>=3.0",
     "langchain-huggingface>=1.2.2",
     "mlflow>=2.16",
+    "torch>=2.4",
 ]
 
 [dependency-groups]
@@ -19,6 +20,14 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
 ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
 
 [tool.ruff]
 line-length = 100
