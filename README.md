@@ -10,11 +10,12 @@ RAG pipeline for answering questions about documents:
 PDF and DOCX parsing uses Docling. OCR is enabled automatically for scanned PDF
 pages. Optional VLM processing is disabled by default.
 
-LangGraph orchestrates two independent workflows:
+LangGraph orchestrates the ingestion, standard QA, and tool-agent workflows:
 
 ```text
 ingestion: files/documents -> parsing -> chunking -> indexing
 QA:        question -> retrieval -> answer generation -> response
+agent:     conversation -> model -> document tools -> model -> response
 ```
 
 Keeping ingestion separate lets the Streamlit application index uploaded files
@@ -26,6 +27,7 @@ The QA workflow has two modes configured in `.env`:
 RAG_MODE=standard    # retrieve -> generate
 RAG_MODE=tool_agent  # model -> document tools -> model -> final answer
 RAG_MAX_TOOL_ROUNDS=4
+RAG_HISTORY_TURNS=6  # completed user/assistant pairs kept in memory
 ```
 
 The tool agent can search the index multiple times, optionally restrict search to
@@ -44,6 +46,22 @@ retrieval results. All tools receive the active retriever and parsed documents
 through LangGraph runtime context. Tool execution is bounded by
 `RAG_MAX_TOOL_ROUNDS`; after the limit, the model must answer from the
 observations already collected.
+
+The tool-agent graph is compiled with a LangGraph in-memory checkpointer. The
+Streamlit session keeps a stable `thread_id`, so follow-up questions can use the
+last `RAG_HISTORY_TURNS` completed user/assistant pairs to resolve references such
+as "and in the second quarter?" or "what are the penalties there?". Tool calls
+and tool observations stay available during the active turn, but are removed
+from the long-lived checkpoint after the final answer. Conversation history is
+context, not evidence: each new question must call a document tool before making
+new factual claims about the uploaded files.
+
+The Streamlit UI indexes an unchanged set of uploaded documents only once. **New
+chat** creates a fresh `thread_id` and clears the visible messages without
+re-indexing those documents. Uploading a different file set automatically starts
+a new chat and performs ingestion for the new set. The current checkpointer is
+process-local; it can later be replaced by a SQLite or PostgreSQL checkpointer
+without changing the graph nodes.
 
 `tool_agent` requires an OpenAI-compatible model and endpoint with native tool
 calling support. The standard mode continues to work with text-generation-only

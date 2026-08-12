@@ -2,13 +2,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+)
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
+from langgraph.types import Overwrite
 
 from file_agent.agent_tools import (
     DOCUMENT_TOOLS,
+    TOOL_AGENT_SYSTEM_PROMPT,
     TOOL_LIMIT_MESSAGE,
     ToolAgentContext,
 )
@@ -72,6 +83,7 @@ def append_strings(current: list[str], new: list[str]) -> list[str]:
 
 class ToolAgentState(MessagesState):
     question: str
+    conversation_history: list[BaseMessage]
     sources: Annotated[list[SearchResult], merge_search_results]
     search_queries: Annotated[list[str], append_strings]
     documents_count: int
@@ -229,6 +241,28 @@ def build_qa_graph():
     return builder.compile(name="rag_qa")
 
 
+def prepare_tool_agent_turn_node(
+    state: ToolAgentState,
+    runtime: Runtime[ToolAgentContext],
+) -> dict:
+    """Build this turn's working messages from compact persisted conversation history."""
+    history = _trim_conversation_history(
+        list(state.get("conversation_history", [])),
+        runtime.context.max_history_turns,
+    )
+    return {
+        "messages": [
+            RemoveMessage(id=REMOVE_ALL_MESSAGES),
+            SystemMessage(content=TOOL_AGENT_SYSTEM_PROMPT),
+            *history,
+            HumanMessage(content=state["question"]),
+        ],
+        "conversation_history": history,
+        "sources": Overwrite([]),
+        "search_queries": Overwrite([]),
+    }
+
+
 def tool_agent_model_node(
     state: ToolAgentState,
     runtime: Runtime[ToolAgentContext],
@@ -259,15 +293,27 @@ def route_tool_agent(
     return "build_response"
 
 
-def build_tool_agent_response_node(state: ToolAgentState) -> dict:
+def build_tool_agent_response_node(
+    state: ToolAgentState,
+    runtime: Runtime[ToolAgentContext],
+) -> dict:
     last_message = state["messages"][-1]
     if not isinstance(last_message, AIMessage) or last_message.tool_calls:
         raise ValueError("Tool agent did not return a final answer")
 
+    answer = str(last_message.content).strip()
     search_queries = list(state.get("search_queries", []))
+    history = _trim_conversation_history(
+        [
+            *state.get("conversation_history", []),
+            HumanMessage(content=state["question"]),
+            AIMessage(content=answer),
+        ],
+        runtime.context.max_history_turns,
+    )
     return {
         "response": RAGResponse(
-            answer=str(last_message.content).strip(),
+            answer=answer,
             sources=list(state.get("sources", [])),
             documents_count=state.get("documents_count", 0),
             chunks_count=state.get("chunks_count", 0),
@@ -275,22 +321,29 @@ def build_tool_agent_response_node(state: ToolAgentState) -> dict:
             retry_count=max(0, len(search_queries) - 1),
             stop_reason="tool_agent_completed",
             tool_calls=_collect_tool_calls(state["messages"]),
-        )
+        ),
+        "conversation_history": history,
+        # Tool calls and observations remain available for the full current run,
+        # then are removed from the latest checkpoint. Only compact Q/A pairs live
+        # into the next turn.
+        "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)],
     }
 
 
-def build_tool_agent_graph():
+def build_tool_agent_graph(checkpointer: BaseCheckpointSaver | None = None):
     builder = StateGraph(
         ToolAgentState,
         context_schema=ToolAgentContext,
     )
+    builder.add_node("prepare_turn", prepare_tool_agent_turn_node)
     builder.add_node("agent_model", tool_agent_model_node)
     builder.add_node(
         "tools",
         ToolNode(DOCUMENT_TOOLS, handle_tool_errors=True),
     )
     builder.add_node("build_response", build_tool_agent_response_node)
-    builder.add_edge(START, "agent_model")
+    builder.add_edge(START, "prepare_turn")
+    builder.add_edge("prepare_turn", "agent_model")
     builder.add_conditional_edges(
         "agent_model",
         route_tool_agent,
@@ -301,7 +354,29 @@ def build_tool_agent_graph():
     )
     builder.add_edge("tools", "agent_model")
     builder.add_edge("build_response", END)
-    return builder.compile(name="rag_tool_agent")
+    return builder.compile(name="rag_tool_agent", checkpointer=checkpointer)
+
+
+def _trim_conversation_history(
+    messages: list[BaseMessage],
+    max_history_turns: int,
+) -> list[BaseMessage]:
+    if max_history_turns < 1:
+        raise ValueError("max_history_turns must be greater than zero")
+
+    # Persist only complete user/final-assistant pairs. Tool calls, ToolMessages,
+    # system instructions, and any malformed fragments are intentionally omitted.
+    pairs: list[tuple[HumanMessage, AIMessage]] = []
+    pending_user: HumanMessage | None = None
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            pending_user = message
+        elif isinstance(message, AIMessage) and not message.tool_calls and pending_user is not None:
+            pairs.append((pending_user, message))
+            pending_user = None
+
+    trimmed_pairs = pairs[-max_history_turns:]
+    return [message for pair in trimmed_pairs for message in pair]
 
 
 def _count_tool_rounds(messages: list[BaseMessage]) -> int:
@@ -325,4 +400,5 @@ def _collect_tool_calls(messages: list[BaseMessage]) -> list[dict]:
 
 ingestion_graph = build_ingestion_graph()
 qa_graph = build_qa_graph()
-tool_agent_graph = build_tool_agent_graph()
+tool_agent_checkpointer = InMemorySaver()
+tool_agent_graph = build_tool_agent_graph(checkpointer=tool_agent_checkpointer)

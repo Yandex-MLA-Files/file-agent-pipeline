@@ -19,6 +19,7 @@ MAX_TOOL_PASSAGE_LENGTH = 3500
 MAX_TOOL_CONTENT_LENGTH = 12000
 MAX_TABLE_ROWS = 50
 MAX_TABLE_ROW_LENGTH = 4000
+DEFAULT_HISTORY_TURNS = 6
 
 TOOL_AGENT_SYSTEM_PROMPT = """You answer questions about uploaded documents.
 
@@ -28,6 +29,13 @@ the user names one document. After a search, call read_source_context when the
 returned passage is incomplete. Use list_documents and get_document_outline to
 navigate available files, then read_document_section for a specific section,
 read_document_location for a page, slide, or sheet, and read_table for tabular data.
+
+Conversation history is provided only to understand follow-up references such as
+"and in the second quarter?", "what about penalties there?", or "compare it with
+the first document". It is not evidence. For every new user turn, use at least one
+document tool before making new factual claims about document contents. Resolve the
+reference from history, then retrieve or read fresh evidence for the current answer.
+Never continue a document fact from a previous answer without checking the documents.
 
 Base the final answer only on tool results. Preserve the language of the user's
 question. Cite available source metadata such as source_file, page_number,
@@ -49,6 +57,7 @@ class ToolAgentContext:
     retriever: Retriever
     documents: list[Document]
     max_tool_rounds: int = 4
+    max_history_turns: int = DEFAULT_HISTORY_TURNS
 
 
 @tool

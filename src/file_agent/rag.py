@@ -1,13 +1,12 @@
 import json
 import os
+import uuid
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal, cast
 
-from langchain_core.messages import HumanMessage, SystemMessage
-
 from file_agent.agent_tools import (
-    TOOL_AGENT_SYSTEM_PROMPT,
+    DEFAULT_HISTORY_TURNS,
     ToolAgentContext,
 )
 from file_agent.chunking import Chunk
@@ -47,6 +46,7 @@ __all__ = [
     "ingest_files",
     "load_documents",
     "resolve_max_tool_rounds",
+    "resolve_history_turns",
     "resolve_rag_mode",
 ]
 
@@ -95,6 +95,8 @@ def answer_indexed_documents(
     documents: list[Document] | None = None,
     mode: str | None = None,
     max_tool_rounds: int | None = None,
+    thread_id: str | None = None,
+    max_history_turns: int | None = None,
 ) -> RAGResponse:
     with tracer.start_as_current_span("file_agent.answer_indexed_documents") as span:
         span.set_attribute("file_agent.question", question)
@@ -116,6 +118,8 @@ def answer_indexed_documents(
                 documents_count=documents_count,
                 chunks_count=chunks_count,
                 max_tool_rounds=max_tool_rounds,
+                thread_id=thread_id,
+                max_history_turns=max_history_turns,
             )
         else:
             state = qa_graph.invoke(
@@ -157,6 +161,8 @@ def answer_with_results(
     documents: list[Document] | None = None,
     mode: str | None = None,
     max_tool_rounds: int | None = None,
+    thread_id: str | None = None,
+    max_history_turns: int | None = None,
 ) -> RAGResponse:
     with tracer.start_as_current_span("file_agent.answer_with_results") as span:
         span.set_attribute("file_agent.question", question)
@@ -186,6 +192,8 @@ def answer_with_results(
                 documents_count=documents_count,
                 chunks_count=chunks_count,
                 max_tool_rounds=max_tool_rounds,
+                thread_id=thread_id,
+                max_history_turns=max_history_turns,
             )
         else:
             state = qa_graph.invoke(
@@ -224,6 +232,8 @@ def answer_files(
     retriever: Retriever | None = None,
     mode: str | None = None,
     max_tool_rounds: int | None = None,
+    thread_id: str | None = None,
+    max_history_turns: int | None = None,
 ) -> RAGResponse:
     active_retriever = retriever or LanceDBRetriever()
     documents, chunks = ingest_files(
@@ -242,6 +252,8 @@ def answer_files(
         documents=documents,
         mode=mode,
         max_tool_rounds=max_tool_rounds,
+        thread_id=thread_id,
+        max_history_turns=max_history_turns,
     )
 
 
@@ -255,6 +267,8 @@ def answer_documents(
     retriever: Retriever | None = None,
     mode: str | None = None,
     max_tool_rounds: int | None = None,
+    thread_id: str | None = None,
+    max_history_turns: int | None = None,
 ) -> RAGResponse:
     active_retriever = retriever or LanceDBRetriever()
     chunks = ingest_documents(
@@ -273,6 +287,8 @@ def answer_documents(
         documents=documents,
         mode=mode,
         max_tool_rounds=max_tool_rounds,
+        thread_id=thread_id,
+        max_history_turns=max_history_turns,
     )
 
 
@@ -299,6 +315,22 @@ def resolve_max_tool_rounds(max_tool_rounds: int | None = None) -> int:
     return value
 
 
+def resolve_history_turns(max_history_turns: int | None = None) -> int:
+    value: int
+    if max_history_turns is not None:
+        value = max_history_turns
+    else:
+        raw_value = os.getenv("RAG_HISTORY_TURNS", str(DEFAULT_HISTORY_TURNS))
+        try:
+            value = int(raw_value)
+        except ValueError as exc:
+            raise ValueError("RAG_HISTORY_TURNS must be an integer") from exc
+
+    if value < 1:
+        raise ValueError("RAG_HISTORY_TURNS must be greater than zero")
+    return value
+
+
 def _answer_with_tool_agent(
     question: str,
     llm_client: LLMClient,
@@ -307,27 +339,29 @@ def _answer_with_tool_agent(
     documents_count: int,
     chunks_count: int,
     max_tool_rounds: int | None,
+    thread_id: str | None,
+    max_history_turns: int | None,
 ) -> RAGResponse:
     if not isinstance(llm_client, ToolCallingLLMClient):
         raise TypeError("The configured LLM client does not support native tool calling")
 
+    active_thread_id = thread_id.strip() if thread_id is not None else uuid.uuid4().hex
+    if not active_thread_id:
+        raise ValueError("thread_id must not be empty")
+
     state = tool_agent_graph.invoke(
         {
-            "messages": [
-                SystemMessage(content=TOOL_AGENT_SYSTEM_PROMPT),
-                HumanMessage(content=question),
-            ],
             "question": question,
-            "sources": [],
-            "search_queries": [],
             "documents_count": documents_count,
             "chunks_count": chunks_count,
         },
+        config={"configurable": {"thread_id": active_thread_id}},
         context=ToolAgentContext(
             llm_client=llm_client,
             retriever=retriever,
             documents=documents,
             max_tool_rounds=resolve_max_tool_rounds(max_tool_rounds),
+            max_history_turns=resolve_history_turns(max_history_turns),
         ),
     )
     return state["response"]

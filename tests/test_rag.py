@@ -7,6 +7,7 @@ from file_agent.rag import (
     answer_files,
     answer_indexed_documents,
     answer_with_results,
+    resolve_history_turns,
     resolve_max_tool_rounds,
     resolve_rag_mode,
 )
@@ -214,6 +215,12 @@ def test_rag_mode_and_tool_round_limit_can_come_from_environment(monkeypatch):
     assert resolve_max_tool_rounds() == 4
 
 
+def test_history_turn_limit_can_come_from_environment(monkeypatch):
+    monkeypatch.setenv("RAG_HISTORY_TURNS", "5")
+
+    assert resolve_history_turns() == 5
+
+
 @pytest.mark.parametrize("mode", ["unknown", "agent"])
 def test_resolve_rag_mode_rejects_unknown_modes(mode):
     with pytest.raises(ValueError, match="Unsupported RAG_MODE"):
@@ -231,6 +238,19 @@ def test_resolve_max_tool_rounds_rejects_non_integer_environment_value(monkeypat
 
     with pytest.raises(ValueError, match="must be an integer"):
         resolve_max_tool_rounds()
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_resolve_history_turns_rejects_non_positive_values(value):
+    with pytest.raises(ValueError, match="greater than zero"):
+        resolve_history_turns(value)
+
+
+def test_resolve_history_turns_rejects_non_integer_environment_value(monkeypatch):
+    monkeypatch.setenv("RAG_HISTORY_TURNS", "many")
+
+    with pytest.raises(ValueError, match="must be an integer"):
+        resolve_history_turns()
 
 
 def test_standard_mode_does_not_read_tool_round_setting(monkeypatch):

@@ -1,11 +1,11 @@
 import json
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from file_agent.agent_tools import (
     DOCUMENT_TOOLS,
-    TOOL_AGENT_SYSTEM_PROMPT,
     ToolAgentContext,
     search_documents,
 )
@@ -94,13 +94,7 @@ def make_search_result() -> SearchResult:
 def invoke_tool_agent(llm_client, retriever, max_tool_rounds=4, documents=None):
     return build_tool_agent_graph().invoke(
         {
-            "messages": [
-                SystemMessage(content=TOOL_AGENT_SYSTEM_PROMPT),
-                HumanMessage(content="When is the deadline?"),
-            ],
             "question": "When is the deadline?",
-            "sources": [],
-            "search_queries": [],
             "documents_count": 1,
             "chunks_count": 1,
         },
@@ -111,6 +105,12 @@ def invoke_tool_agent(llm_client, retriever, max_tool_rounds=4, documents=None):
             max_tool_rounds=max_tool_rounds,
         ),
     )
+
+
+def tool_messages_seen_by_model(llm_client):
+    return [
+        message for message in llm_client.calls[-1]["messages"] if isinstance(message, ToolMessage)
+    ]
 
 
 @pytest.mark.parametrize("document_tool", DOCUMENT_TOOLS)
@@ -159,7 +159,8 @@ def test_tool_agent_searches_documents_and_returns_sources():
         }
     ]
     assert retriever.search_calls == [("project deadline", 3, None)]
-    assert any(isinstance(message, ToolMessage) for message in state["messages"])
+    assert tool_messages_seen_by_model(llm_client)
+    assert state["messages"] == []
     assert llm_client.responses == []
 
 
@@ -184,7 +185,7 @@ def test_tool_agent_can_list_documents_without_retrieval():
 
     state = invoke_tool_agent(llm_client, retriever)
 
-    tool_messages = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+    tool_messages = tool_messages_seen_by_model(llm_client)
     assert "plan.md" in str(tool_messages[0].content)
     assert state["response"].sources == []
     assert retriever.search_calls == []
@@ -238,7 +239,7 @@ def test_tool_agent_returns_tool_errors_to_model():
 
     state = invoke_tool_agent(llm_client, FakeRetriever())
 
-    tool_messages = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+    tool_messages = tool_messages_seen_by_model(llm_client)
     assert "document is not indexed" in str(tool_messages[0].content)
     assert state["response"].answer == "The requested document is not indexed."
 
@@ -282,9 +283,7 @@ def test_tool_agent_can_filter_search_by_source_file():
 
     assert retriever.search_calls == [("project deadline", 3, "plan.md")]
     assert state["response"].sources == [make_search_result()]
-    tool_message = next(
-        message for message in state["messages"] if isinstance(message, ToolMessage)
-    )
+    tool_message = tool_messages_seen_by_model(llm_client)[0]
     payload = json.loads(str(tool_message.content))
     assert payload["source_file"] == "plan.md"
     assert payload["results_count"] == 1
@@ -330,7 +329,7 @@ def test_tool_agent_can_read_full_context_after_search():
 
     state = invoke_tool_agent(llm_client, FakeRetriever([result]))
 
-    tool_messages = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+    tool_messages = tool_messages_seen_by_model(llm_client)
     search_payload = json.loads(str(tool_messages[0].content))
     context_payload = json.loads(str(tool_messages[1].content))
     assert search_payload["results"][0]["text"].endswith("...")
@@ -437,7 +436,7 @@ def test_tool_agent_can_navigate_outline_and_read_section():
         documents=[make_structured_document()],
     )
 
-    tool_messages = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+    tool_messages = tool_messages_seen_by_model(llm_client)
     outline = json.loads(str(tool_messages[0].content))
     section = json.loads(str(tool_messages[1].content))
     assert outline["table_of_contents"][0]["section_id"] == "heading-main"
@@ -465,11 +464,12 @@ def _invoke_single_read_tool(tool_name, arguments, documents):
             AIMessage(content="Answer based on the selected location."),
         ]
     )
-    return invoke_tool_agent(
+    state = invoke_tool_agent(
         llm_client,
         FakeRetriever(),
         documents=documents,
     )
+    return state, llm_client
 
 
 @pytest.mark.parametrize(
@@ -532,11 +532,9 @@ def test_tool_agent_can_read_document_locations(
     metadata_key,
     metadata_value,
 ):
-    state = _invoke_single_read_tool("read_document_location", arguments, documents)
+    state, llm_client = _invoke_single_read_tool("read_document_location", arguments, documents)
 
-    tool_message = next(
-        message for message in state["messages"] if isinstance(message, ToolMessage)
-    )
+    tool_message = tool_messages_seen_by_model(llm_client)[0]
     payload = json.loads(str(tool_message.content))
     assert expected_text in payload["text"]
     assert payload["location"][metadata_key] == metadata_value
@@ -558,7 +556,7 @@ def test_tool_agent_can_read_table_rows_with_pagination():
         ],
     )
 
-    state = _invoke_single_read_tool(
+    state, llm_client = _invoke_single_read_tool(
         "read_table",
         {
             "source_file": "budget.xlsx",
@@ -569,11 +567,193 @@ def test_tool_agent_can_read_table_rows_with_pagination():
         [document],
     )
 
-    tool_message = next(
-        message for message in state["messages"] if isinstance(message, ToolMessage)
-    )
+    tool_message = tool_messages_seen_by_model(llm_client)[0]
     payload = json.loads(str(tool_message.content))
     assert payload["format"] == "tsv"
     assert payload["rows"] == ["A\t1", "B\t2"]
     assert payload["next_offset"] == 3
     assert state["response"].sources[0].chunk.metadata["table_id"] == "sheet-1"
+
+
+def invoke_persistent_turn(
+    graph,
+    llm_client,
+    retriever,
+    question,
+    thread_id="conversation-1",
+    max_history_turns=6,
+):
+    return graph.invoke(
+        {
+            "question": question,
+            "documents_count": 1,
+            "chunks_count": 1,
+        },
+        config={"configurable": {"thread_id": thread_id}},
+        context=ToolAgentContext(
+            llm_client=llm_client,
+            retriever=retriever,
+            documents=[make_document()],
+            max_history_turns=max_history_turns,
+        ),
+    )
+
+
+def test_persistent_agent_uses_compact_history_and_retrieves_again_each_turn():
+    first_result = make_search_result()
+    second_result = SearchResult(
+        chunk=Chunk(
+            id="quarter-2",
+            text="Second-quarter revenue was 150 million rubles.",
+            metadata={"source_file": "plan.md", "page_number": 3},
+        ),
+        score=0.95,
+    )
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "first-quarter revenue"},
+                        "id": "turn-1-search",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="First-quarter revenue was 120 million rubles."),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "second-quarter revenue"},
+                        "id": "turn-2-search",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Second-quarter revenue was 150 million rubles."),
+        ]
+    )
+    retriever = FakeRetriever([first_result])
+    checkpointer = InMemorySaver()
+    graph = build_tool_agent_graph(checkpointer=checkpointer)
+
+    first_state = invoke_persistent_turn(
+        graph,
+        llm_client,
+        retriever,
+        "What was the first-quarter revenue?",
+    )
+    retriever.results = [second_result]
+    second_state = invoke_persistent_turn(
+        graph,
+        llm_client,
+        retriever,
+        "And in the second?",
+    )
+
+    second_turn_input = llm_client.calls[2]["messages"]
+    assert [message.content for message in second_turn_input[1:]] == [
+        "What was the first-quarter revenue?",
+        "First-quarter revenue was 120 million rubles.",
+        "And in the second?",
+    ]
+    assert not any(isinstance(message, ToolMessage) for message in second_turn_input)
+    assert not any(
+        isinstance(message, AIMessage) and message.tool_calls for message in second_turn_input
+    )
+    assert retriever.search_calls == [
+        ("first-quarter revenue", 5, None),
+        ("second-quarter revenue", 5, None),
+    ]
+    assert first_state["sources"] == [first_result]
+    assert second_state["sources"] == [second_result]
+    assert second_state["response"].sources == [second_result]
+    assert second_state["messages"] == []
+
+    persisted = graph.get_state({"configurable": {"thread_id": "conversation-1"}}).values
+    assert persisted["messages"] == []
+    assert [message.content for message in persisted["conversation_history"]] == [
+        "What was the first-quarter revenue?",
+        "First-quarter revenue was 120 million rubles.",
+        "And in the second?",
+        "Second-quarter revenue was 150 million rubles.",
+    ]
+
+
+def test_persistent_agent_limits_history_to_complete_recent_pairs():
+    llm_client = FakeToolCallingLLM([AIMessage(content=f"Answer {turn}") for turn in range(1, 5)])
+    graph = build_tool_agent_graph(checkpointer=InMemorySaver())
+
+    for turn in range(1, 5):
+        state = invoke_persistent_turn(
+            graph,
+            llm_client,
+            FakeRetriever(),
+            f"Question {turn}",
+            thread_id="bounded-history",
+            max_history_turns=2,
+        )
+
+    fourth_turn_input = llm_client.calls[3]["messages"]
+    assert [message.content for message in fourth_turn_input[1:]] == [
+        "Question 2",
+        "Answer 2",
+        "Question 3",
+        "Answer 3",
+        "Question 4",
+    ]
+    assert [message.content for message in state["conversation_history"]] == [
+        "Question 3",
+        "Answer 3",
+        "Question 4",
+        "Answer 4",
+    ]
+    assert state["messages"] == []
+
+
+def test_different_thread_id_starts_without_previous_conversation():
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(content="First thread answer"),
+            AIMessage(content="New thread answer"),
+        ]
+    )
+    graph = build_tool_agent_graph(checkpointer=InMemorySaver())
+
+    invoke_persistent_turn(
+        graph,
+        llm_client,
+        FakeRetriever(),
+        "Question in the first chat",
+        thread_id="thread-one",
+    )
+    state = invoke_persistent_turn(
+        graph,
+        llm_client,
+        FakeRetriever(),
+        "Question in a new chat",
+        thread_id="thread-two",
+    )
+
+    assert [message.content for message in llm_client.calls[1]["messages"][1:]] == [
+        "Question in a new chat"
+    ]
+    assert [message.content for message in state["conversation_history"]] == [
+        "Question in a new chat",
+        "New thread answer",
+    ]
+
+
+def test_grounding_prompt_requires_fresh_document_evidence_for_followups():
+    first_model_messages = FakeToolCallingLLM([AIMessage(content="Answer")])
+
+    invoke_tool_agent(first_model_messages, FakeRetriever())
+
+    system_prompt = str(first_model_messages.calls[0]["messages"][0].content)
+    assert "Conversation history" in system_prompt
+    assert "It is not evidence" in system_prompt
+    assert "For every new user turn" in system_prompt
