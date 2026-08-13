@@ -86,6 +86,15 @@ def test_factory_uses_configured_local_api_key(monkeypatch):
     assert client.client.kwargs["api_key"] == "local-api-key"
 
 
+def test_factory_applies_explicit_generation_parameters(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "local")
+
+    client = create_llm_client(load_env=False, temperature=0.0, max_tokens=1500)
+
+    assert client.temperature == 0.0
+    assert client.max_tokens == 1500
+
+
 def test_factory_configures_local_thinking_mode(monkeypatch):
     monkeypatch.setenv("LLM_BACKEND", "local")
     monkeypatch.setenv("LOCAL_LLM_ENABLE_THINKING", "false")

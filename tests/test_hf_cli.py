@@ -110,7 +110,11 @@ def test_run_hf_dataset_generation_orchestrates_limited_run_and_writes_manifest(
     )
     result = run_hf_dataset_generation(config)
 
-    assert calls["llm"] == {"env_file": tmp_path / ".env"}
+    assert calls["llm"] == {
+        "env_file": tmp_path / ".env",
+        "temperature": 0.0,
+        "max_tokens": 2000,
+    }
     assert calls["load"] == {
         "dataset_id": "owner/rag-qa",
         "config_name": "default",
@@ -125,10 +129,12 @@ def test_run_hf_dataset_generation_orchestrates_limited_run_and_writes_manifest(
     assert calls["generate"]["max_chars"] == 800
     assert calls["generate"]["overlap"] == 80
     assert calls["generate"]["resume"] is True
+    assert calls["generate"]["rag_mode"] == "standard"
+    assert calls["generate"]["max_tool_rounds"] is None
     assert calls["save"]["records"] == result.batch.records
 
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert manifest["created_at_utc"] == "2026-07-19T10:00:00Z"
     assert manifest["dataset"] == {
         "id": "owner/rag-qa",
@@ -142,7 +148,12 @@ def test_run_hf_dataset_generation_orchestrates_limited_run_and_writes_manifest(
     }
     assert len(manifest["dataset"]["records_sha256"]) == 64
     assert manifest["generation"]["model_id"] == "fake/model"
-    assert manifest["generation"]["rag_pipeline_version"] == "section-token-small-to-big-v1"
+    assert (
+        manifest["generation"]["rag_pipeline_version"]
+        == "section-token-small-to-big-agent-evidence-v2"
+    )
+    assert manifest["generation"]["rag_mode"] == "standard"
+    assert manifest["generation"]["max_tool_rounds"] is None
     assert manifest["generation"]["top_k"] == 3
     assert manifest["generation"]["prompt_sha256"]
     assert manifest["generation"]["resume_requested"] is True
@@ -242,6 +253,14 @@ def test_main_maps_cli_arguments_and_prints_artifact_paths(monkeypatch, tmp_path
             "--limit",
             "2",
             "--resume",
+            "--rag-mode",
+            "tool_agent",
+            "--max-tool-rounds",
+            "6",
+            "--temperature",
+            "0.1",
+            "--max-tokens",
+            "1500",
         ]
     )
 
@@ -257,6 +276,10 @@ def test_main_maps_cli_arguments_and_prints_artifact_paths(monkeypatch, tmp_path
             overlap=80,
             limit=2,
             resume=True,
+            rag_mode="tool_agent",
+            max_tool_rounds=6,
+            temperature=0.1,
+            max_tokens=1500,
         )
     ]
     output = capsys.readouterr().out

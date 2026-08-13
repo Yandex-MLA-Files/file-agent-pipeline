@@ -63,6 +63,24 @@ def test_generate_uses_openai_chat_completions():
     ]
 
 
+def test_client_accumulates_request_and_token_usage():
+    response = _chat_completion("Generated answer")
+    response.usage = SimpleNamespace(
+        prompt_tokens=10,
+        completion_tokens=4,
+        total_tokens=14,
+    )
+    client = OpenAILLMClient(client=FakeOpenAI(response), model="test-model")
+
+    client.generate("Question")
+    client.generate("Another question")
+
+    assert client.request_count == 2
+    assert client.prompt_tokens == 20
+    assert client.completion_tokens == 8
+    assert client.total_tokens == 28
+
+
 def test_generate_passes_qwen_thinking_setting():
     openai_client = FakeOpenAI(_chat_completion("Generated answer"))
     client = OpenAILLMClient(

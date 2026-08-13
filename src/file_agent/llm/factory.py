@@ -14,12 +14,16 @@ DEFAULT_LOCAL_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_LOCAL_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_MAX_RETRIES = 0
+DEFAULT_TEMPERATURE = 0.2
+DEFAULT_MAX_TOKENS = 2000
 LOCAL_API_KEY_PLACEHOLDER = "not-used"
 
 
 def create_llm_client(
     env_file: str | Path | None = ".env",
     load_env: bool = True,
+    temperature: float = DEFAULT_TEMPERATURE,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> LLMClient:
     if load_env:
         load_dotenv(env_file)
@@ -27,15 +31,15 @@ def create_llm_client(
     backend = os.getenv("LLM_BACKEND", DEFAULT_LLM_BACKEND).strip().lower()
 
     if backend == "yandex":
-        return _create_yandex_client()
+        return _create_yandex_client(temperature=temperature, max_tokens=max_tokens)
 
     if backend == "local":
-        return _create_local_client()
+        return _create_local_client(temperature=temperature, max_tokens=max_tokens)
 
     raise ValueError(f"Unsupported LLM_BACKEND: {backend}")
 
 
-def _create_yandex_client() -> OpenAILLMClient:
+def _create_yandex_client(temperature: float, max_tokens: int) -> OpenAILLMClient:
     api_key = _getenv("YANDEX_API_KEY")
     folder_id = _getenv("YANDEX_FOLDER_ID")
     model = _getenv("YANDEX_MODEL", DEFAULT_YANDEX_MODEL)
@@ -56,10 +60,12 @@ def _create_yandex_client() -> OpenAILLMClient:
     return OpenAILLMClient(
         client=client,
         model=_build_yandex_model_uri(folder_id=folder_id, model=model),
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
 
-def _create_local_client() -> OpenAILLMClient:
+def _create_local_client(temperature: float, max_tokens: int) -> OpenAILLMClient:
     client = _create_openai_client(
         api_key=_getenv("LOCAL_LLM_API_KEY") or LOCAL_API_KEY_PLACEHOLDER,
         base_url=_getenv("LOCAL_LLM_BASE_URL", DEFAULT_LOCAL_BASE_URL),
@@ -67,6 +73,8 @@ def _create_local_client() -> OpenAILLMClient:
     return OpenAILLMClient(
         client=client,
         model=_getenv("LOCAL_LLM_MODEL", DEFAULT_LOCAL_MODEL),
+        temperature=temperature,
+        max_tokens=max_tokens,
         enable_thinking=_get_optional_bool("LOCAL_LLM_ENABLE_THINKING"),
     )
 

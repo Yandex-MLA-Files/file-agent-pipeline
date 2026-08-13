@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 from collections.abc import Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, convert_to_openai_messages
@@ -26,9 +27,19 @@ class OpenAILLMClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.enable_thinking = enable_thinking
+        self.request_count = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
 
         if not self.model:
             raise ValueError("model is required")
+        if not math.isfinite(self.temperature) or not 0 <= self.temperature <= 2:
+            raise ValueError("temperature must be between 0 and 2")
+        if not isinstance(self.max_tokens, int) or isinstance(self.max_tokens, bool):
+            raise ValueError("max_tokens must be an integer")
+        if self.max_tokens <= 0:
+            raise ValueError("max_tokens must be greater than zero")
 
     def generate(self, prompt: str) -> str:
         with tracer.start_as_current_span("file_agent.llm_generate") as span:
@@ -76,6 +87,7 @@ class OpenAILLMClient:
             )
 
             usage = getattr(response, "usage", None)
+            self._record_usage(usage)
             if usage is not None:
                 span.set_attribute("file_agent.prompt_tokens", usage.prompt_tokens)
                 span.set_attribute("file_agent.completion_tokens", usage.completion_tokens)
@@ -178,6 +190,7 @@ class OpenAILLMClient:
             )
 
             usage = getattr(response, "usage", None)
+            self._record_usage(usage)
             if usage is not None:
                 span.set_attribute("file_agent.prompt_tokens", usage.prompt_tokens)
                 span.set_attribute("file_agent.completion_tokens", usage.completion_tokens)
@@ -204,3 +217,11 @@ class OpenAILLMClient:
         if self.enable_thinking is None:
             return
         request["extra_body"] = {"chat_template_kwargs": {"enable_thinking": self.enable_thinking}}
+
+    def _record_usage(self, usage: object | None) -> None:
+        self.request_count += 1
+        if usage is None:
+            return
+        self.prompt_tokens += int(getattr(usage, "prompt_tokens", 0) or 0)
+        self.completion_tokens += int(getattr(usage, "completion_tokens", 0) or 0)
+        self.total_tokens += int(getattr(usage, "total_tokens", 0) or 0)

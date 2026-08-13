@@ -9,18 +9,20 @@ from typing import Any
 
 from datasets import Dataset
 
+from file_agent.agent_tools import TOOL_AGENT_SYSTEM_PROMPT
 from file_agent.document import Document
 from file_agent.hf_dataset import QADatasetRecord, validate_qa_dataset
 from file_agent.hf_rag import DocumentLoader, GeneratedQARecord, process_hf_qa_record
 from file_agent.lancedb_retriever import DEFAULT_SEMANTIC_MODEL_NAME
 from file_agent.llm.base import LLMClient
 from file_agent.qa import build_qa_prompt
-from file_agent.rag import load_documents
+from file_agent.rag import load_documents, resolve_max_tool_rounds, resolve_rag_mode
 from file_agent.retrieval import Retriever
+from file_agent.vlm.base import VLMClient
 
-CHECKPOINT_SCHEMA_VERSION = 2
+CHECKPOINT_SCHEMA_VERSION = 3
 CHECKPOINTS_DIRECTORY_NAME = "checkpoints"
-RAG_PIPELINE_VERSION = "section-token-small-to-big-v1"
+RAG_PIPELINE_VERSION = "section-token-small-to-big-agent-evidence-v2"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -48,6 +50,9 @@ def generate_hf_qa_records(
     overlap: int = 100,
     retriever: Retriever | None = None,
     resume: bool = False,
+    rag_mode: str | None = None,
+    max_tool_rounds: int | None = None,
+    vlm_client: VLMClient | None = None,
 ) -> BatchGenerationResult:
     validate_qa_dataset(dataset)
     if not isinstance(dataset_id, str) or not dataset_id.strip():
@@ -61,6 +66,10 @@ def generate_hf_qa_records(
         resume=resume,
     )
 
+    active_rag_mode = resolve_rag_mode(rag_mode)
+    active_max_tool_rounds = (
+        resolve_max_tool_rounds(max_tool_rounds) if active_rag_mode == "tool_agent" else None
+    )
     parameters = build_generation_parameters(
         dataset_id=dataset_id,
         revision=revision,
@@ -69,6 +78,8 @@ def generate_hf_qa_records(
         top_k=top_k,
         max_chars=max_chars,
         overlap=overlap,
+        rag_mode=active_rag_mode,
+        max_tool_rounds=active_max_tool_rounds,
     )
     records: list[GeneratedQARecord] = []
     processed_count = 0
@@ -105,8 +116,11 @@ def generate_hf_qa_records(
                 overlap=overlap,
                 retriever=retriever,
                 document_loader=document_loader,
+                rag_mode=active_rag_mode,
+                max_tool_rounds=active_max_tool_rounds,
+                vlm_client=vlm_client,
             )
-            _validate_generated_record(generated_record, record)
+            _validate_generated_record(generated_record, record, active_rag_mode)
             _write_checkpoint(
                 checkpoint_path=checkpoint_path,
                 parameters=parameters,
@@ -167,10 +181,20 @@ def build_generation_parameters(
     top_k: int,
     max_chars: int,
     overlap: int,
+    rag_mode: str | None = None,
+    max_tool_rounds: int | None = None,
 ) -> dict[str, Any]:
-    prompt_template = build_qa_prompt(
-        question="{question}",
-        context="{context}",
+    active_rag_mode = resolve_rag_mode(rag_mode)
+    active_max_tool_rounds = (
+        resolve_max_tool_rounds(max_tool_rounds) if active_rag_mode == "tool_agent" else None
+    )
+    prompt_template = (
+        TOOL_AGENT_SYSTEM_PROMPT
+        if active_rag_mode == "tool_agent"
+        else build_qa_prompt(
+            question="{question}",
+            context="{context}",
+        )
     )
     return {
         "dataset_id": dataset_id,
@@ -178,6 +202,10 @@ def build_generation_parameters(
         "model_id": _model_identifier(llm_client),
         "temperature": _optional_scalar_attribute(llm_client, "temperature"),
         "max_tokens": _optional_scalar_attribute(llm_client, "max_tokens"),
+        "enable_thinking": _optional_scalar_attribute(llm_client, "enable_thinking"),
+        "rag_mode": active_rag_mode,
+        "max_tool_rounds": active_max_tool_rounds,
+        "require_evidence_tool": active_rag_mode == "tool_agent",
         "retriever": _component_identifier(retriever) if retriever is not None else "default",
         "rag_pipeline_version": RAG_PIPELINE_VERSION,
         "embedding_model": os.getenv("EMBEDDING_MODEL") or DEFAULT_SEMANTIC_MODEL_NAME,
@@ -291,13 +319,18 @@ def _load_checkpoint(
         raise ValueError(f"Checkpoint result must be a JSON object: {checkpoint_path}")
 
     generated_record = GeneratedQARecord.from_dict(result_value)
-    _validate_generated_record(generated_record, source_record)
+    _validate_generated_record(
+        generated_record,
+        source_record,
+        str(expected_parameters["rag_mode"]),
+    )
     return generated_record
 
 
 def _validate_generated_record(
     generated_record: GeneratedQARecord,
     source_record: QADatasetRecord,
+    expected_rag_mode: str,
 ) -> None:
     if generated_record.id != source_record.id:
         raise ValueError(f"Generated id does not match source record: {source_record.id}")
@@ -307,3 +340,5 @@ def _validate_generated_record(
         raise ValueError(f"Generated doc_ids do not match source record: {source_record.id}")
     if generated_record.answer != source_record.answer:
         raise ValueError(f"Generated gold answer does not match source record: {source_record.id}")
+    if generated_record.rag_mode != expected_rag_mode:
+        raise ValueError(f"Generated RAG mode does not match current run: {source_record.id}")

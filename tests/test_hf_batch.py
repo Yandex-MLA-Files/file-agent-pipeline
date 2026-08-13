@@ -29,7 +29,7 @@ def make_dataset():
     )
 
 
-def make_generated_record(record, answer_suffix="generated"):
+def make_generated_record(record, answer_suffix="generated", rag_mode="standard"):
     metadata_json = json.dumps(
         {
             "dataset_doc_id": record.doc_ids[0],
@@ -54,6 +54,7 @@ def make_generated_record(record, answer_suffix="generated"):
             ),
         ),
         answer=record.answer,
+        rag_mode=rag_mode,
     )
 
 
@@ -63,7 +64,7 @@ def install_fake_processor(monkeypatch, calls, fail_on_id=None):
         calls.append((record.id, kwargs))
         if record.id == fail_on_id:
             raise RuntimeError(f"Failed on {record.id}")
-        return make_generated_record(record)
+        return make_generated_record(record, rag_mode=kwargs.get("rag_mode") or "standard")
 
     monkeypatch.setattr(
         "file_agent.hf_batch.process_hf_qa_record",
@@ -102,14 +103,41 @@ def test_generate_hf_qa_records_processes_in_order_and_writes_checkpoints(
     checkpoint_paths = sorted((tmp_path / "checkpoints").glob("*.json"))
     assert [path.name for path in checkpoint_paths] == ["000000.json", "000001.json"]
     first_checkpoint = json.loads(checkpoint_paths[0].read_text(encoding="utf-8"))
-    assert first_checkpoint["schema_version"] == 2
+    assert first_checkpoint["schema_version"] == 3
     assert first_checkpoint["parameters"]["dataset_id"] == "owner/rag-qa"
     assert first_checkpoint["parameters"]["revision"] == "commit-sha"
     assert first_checkpoint["parameters"]["model_id"] == "fake/model"
-    assert first_checkpoint["parameters"]["rag_pipeline_version"] == "section-token-small-to-big-v1"
+    assert (
+        first_checkpoint["parameters"]["rag_pipeline_version"]
+        == "section-token-small-to-big-agent-evidence-v2"
+    )
+    assert first_checkpoint["parameters"]["rag_mode"] == "standard"
+    assert first_checkpoint["parameters"]["max_tool_rounds"] is None
     assert first_checkpoint["parameters"]["embedding_model"]
     assert first_checkpoint["parameters"]["top_k"] == 3
     assert first_checkpoint["result"] == result.records[0].to_dict()
+
+
+def test_generate_hf_qa_records_passes_explicit_tool_agent_parameters(monkeypatch, tmp_path):
+    calls = []
+    install_fake_processor(monkeypatch, calls)
+
+    result = generate_hf_qa_records(
+        dataset=make_dataset().select([0]),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+        rag_mode="tool_agent",
+        max_tool_rounds=6,
+    )
+
+    assert result.records[0].rag_mode == "tool_agent"
+    assert calls[0][1]["rag_mode"] == "tool_agent"
+    assert calls[0][1]["max_tool_rounds"] == 6
+    checkpoint = json.loads((tmp_path / "checkpoints" / "000000.json").read_text(encoding="utf-8"))
+    assert checkpoint["parameters"]["rag_mode"] == "tool_agent"
+    assert checkpoint["parameters"]["max_tool_rounds"] == 6
+    assert checkpoint["parameters"]["require_evidence_tool"] is True
 
 
 def test_cached_document_loader_reuses_parsing_and_returns_isolated_copies(
@@ -254,5 +282,27 @@ def test_generate_hf_qa_records_rejects_parameter_changes_on_resume(
             llm_client=DummyLLM(),
             output_dir=tmp_path,
             top_k=3,
+            resume=True,
+        )
+
+
+def test_generate_hf_qa_records_rejects_rag_mode_change_on_resume(monkeypatch, tmp_path):
+    install_fake_processor(monkeypatch, [])
+    generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+        rag_mode="standard",
+    )
+
+    with pytest.raises(ValueError, match="parameters do not match"):
+        generate_hf_qa_records(
+            dataset=make_dataset(),
+            dataset_id="owner/rag-qa",
+            llm_client=DummyLLM(),
+            output_dir=tmp_path,
+            rag_mode="tool_agent",
+            max_tool_rounds=4,
             resume=True,
         )

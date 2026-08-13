@@ -1,16 +1,29 @@
 import json
+import math
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from file_agent.document import Document
+from file_agent.document_assets import InMemoryDocumentAssetStore
 from file_agent.hf_dataset import QADatasetRecord, download_record_documents
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.base import LLMClient
 from file_agent.qa import select_context_passages
-from file_agent.rag import answer_indexed_documents, ingest_documents, load_documents
+from file_agent.rag import (
+    RAGMode,
+    answer_indexed_documents,
+    ingest_documents,
+    load_documents,
+    resolve_max_tool_rounds,
+    resolve_rag_mode,
+)
 from file_agent.retrieval import Retriever, SearchResult
+from file_agent.vlm.base import VLMClient
+
+LLM_CONTEXT_METADATA_KEY = "_llm_context"
 
 DocumentLoader = Callable[[list[str | Path]], list[Document]]
 
@@ -84,6 +97,15 @@ class GeneratedQARecord:
     answer_model: str
     contexts: tuple[RetrievedContext, ...]
     answer: str
+    rag_mode: str = "standard"
+    stop_reason: str = "answer_generated"
+    search_queries: tuple[str, ...] = ()
+    tool_calls_json: str = "[]"
+    llm_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    duration_seconds: float = 0.0
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "GeneratedQARecord":
@@ -106,6 +128,43 @@ class GeneratedQARecord:
         if [context.rank for context in contexts] != expected_ranks:
             raise ValueError("context ranks must be consecutive and start at 1")
 
+        rag_mode = resolve_rag_mode(str(value.get("rag_mode", "standard")))
+        stop_reason = value.get("stop_reason", "answer_generated")
+        if not isinstance(stop_reason, str) or not stop_reason.strip():
+            raise ValueError("stop_reason must be a non-empty string")
+
+        raw_search_queries = value.get("search_queries", [])
+        if not isinstance(raw_search_queries, Sequence) or isinstance(
+            raw_search_queries, (str, bytes)
+        ):
+            raise ValueError("search_queries must be a list")
+        search_queries = tuple(raw_search_queries)
+        if any(not isinstance(query, str) or not query.strip() for query in search_queries):
+            raise ValueError("search_queries must contain only non-empty strings")
+
+        tool_calls_json = value.get("tool_calls_json", "[]")
+        if not isinstance(tool_calls_json, str):
+            raise ValueError("tool_calls_json must be a string")
+        try:
+            tool_calls = json.loads(tool_calls_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("tool_calls_json must contain valid JSON") from exc
+        if not isinstance(tool_calls, list):
+            raise ValueError("tool_calls_json must contain a JSON list")
+
+        counters = {
+            name: _non_negative_int(value.get(name, 0), name)
+            for name in ("llm_calls", "prompt_tokens", "completion_tokens", "total_tokens")
+        }
+        duration_seconds = value.get("duration_seconds", 0.0)
+        if (
+            not isinstance(duration_seconds, (int, float))
+            or isinstance(duration_seconds, bool)
+            or not math.isfinite(duration_seconds)
+            or duration_seconds < 0
+        ):
+            raise ValueError("duration_seconds must be a non-negative number")
+
         return cls(
             id=source_record.id,
             question=source_record.question,
@@ -113,6 +172,12 @@ class GeneratedQARecord:
             answer_model=answer_model,
             contexts=tuple(contexts),
             answer=source_record.answer,
+            rag_mode=rag_mode,
+            stop_reason=stop_reason,
+            search_queries=search_queries,
+            tool_calls_json=tool_calls_json,
+            duration_seconds=float(duration_seconds),
+            **counters,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -123,6 +188,15 @@ class GeneratedQARecord:
             "answer_model": self.answer_model,
             "contexts": [context.to_dict() for context in self.contexts],
             "answer": self.answer,
+            "rag_mode": self.rag_mode,
+            "stop_reason": self.stop_reason,
+            "search_queries": list(self.search_queries),
+            "tool_calls_json": self.tool_calls_json,
+            "llm_calls": self.llm_calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "duration_seconds": self.duration_seconds,
         }
 
 
@@ -138,6 +212,9 @@ def process_hf_qa_record(
     overlap: int = 100,
     retriever: Retriever | None = None,
     document_loader: DocumentLoader | None = None,
+    rag_mode: str | None = None,
+    max_tool_rounds: int | None = None,
+    vlm_client: VLMClient | None = None,
 ) -> GeneratedQARecord:
     document_paths = download_record_documents(
         record=record,
@@ -155,6 +232,9 @@ def process_hf_qa_record(
         overlap=overlap,
         retriever=retriever,
         document_loader=document_loader,
+        rag_mode=rag_mode,
+        max_tool_rounds=max_tool_rounds,
+        vlm_client=vlm_client,
     )
 
 
@@ -167,10 +247,17 @@ def process_qa_record(
     overlap: int = 100,
     retriever: Retriever | None = None,
     document_loader: DocumentLoader | None = None,
+    rag_mode: str | None = None,
+    max_tool_rounds: int | None = None,
+    vlm_client: VLMClient | None = None,
 ) -> GeneratedQARecord:
     if len(document_paths) != len(record.doc_ids):
         raise ValueError("document_paths count must match record.doc_ids count")
 
+    active_mode: RAGMode = resolve_rag_mode(rag_mode)
+    active_max_tool_rounds = (
+        resolve_max_tool_rounds(max_tool_rounds) if active_mode == "tool_agent" else None
+    )
     active_document_loader = document_loader or load_documents
     documents = active_document_loader(document_paths)
     for document, doc_id in zip(documents, record.doc_ids, strict=True):
@@ -186,6 +273,13 @@ def process_qa_record(
             max_chars=max_chars,
             overlap=overlap,
         )
+        counters_before = _llm_counters(llm_client)
+        started_at = time.perf_counter()
+        asset_store = (
+            InMemoryDocumentAssetStore.from_files(document_paths)
+            if active_mode == "tool_agent" and vlm_client is not None
+            else None
+        )
         response = answer_indexed_documents(
             question=record.question,
             llm_client=llm_client,
@@ -194,7 +288,17 @@ def process_qa_record(
             chunks_count=len(chunks),
             top_k=top_k,
             documents=documents,
+            mode=active_mode,
+            max_tool_rounds=active_max_tool_rounds,
+            vlm_client=vlm_client,
+            asset_store=asset_store,
+            require_evidence_tool=active_mode == "tool_agent",
         )
+        duration_seconds = time.perf_counter() - started_at
+        counters_after = _llm_counters(llm_client)
+        usage = {
+            name: max(0, counters_after[name] - counters_before[name]) for name in counters_before
+        }
         contexts = serialize_search_results(response.sources)
 
         return GeneratedQARecord(
@@ -204,6 +308,17 @@ def process_qa_record(
             answer_model=response.answer,
             contexts=contexts,
             answer=record.answer,
+            rag_mode=active_mode,
+            stop_reason=response.stop_reason,
+            search_queries=tuple(response.search_queries),
+            tool_calls_json=json.dumps(
+                response.tool_calls,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ),
+            duration_seconds=duration_seconds,
+            **usage,
         )
     finally:
         active_retriever.clear()
@@ -216,7 +331,9 @@ def serialize_search_results(
 
     for rank, (result, passage) in enumerate(select_context_passages(results), start=1):
         metadata = dict(result.chunk.metadata)
-        metadata.pop("context", None)
+        llm_context = metadata.pop(LLM_CONTEXT_METADATA_KEY, None)
+        parent_context = metadata.pop("context", None)
+        passage = str(llm_context or parent_context or passage)
         contexts.append(
             RetrievedContext(
                 rank=rank,
@@ -235,3 +352,23 @@ def serialize_search_results(
         )
 
     return tuple(contexts)
+
+
+def _llm_counters(llm_client: LLMClient) -> dict[str, int]:
+    return {
+        "llm_calls": _counter_value(llm_client, "request_count"),
+        "prompt_tokens": _counter_value(llm_client, "prompt_tokens"),
+        "completion_tokens": _counter_value(llm_client, "completion_tokens"),
+        "total_tokens": _counter_value(llm_client, "total_tokens"),
+    }
+
+
+def _counter_value(component: object, name: str) -> int:
+    value = getattr(component, name, 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _non_negative_int(value: Any, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value

@@ -1,8 +1,10 @@
 import json
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from file_agent.chunking import Chunk
+from file_agent.document import Block, Document
 from file_agent.hf_dataset import QADatasetRecord
 from file_agent.hf_rag import (
     process_hf_qa_record,
@@ -171,9 +173,45 @@ def test_generated_record_converts_to_output_dictionary(tmp_path):
         "answer_model",
         "contexts",
         "answer",
+        "rag_mode",
+        "stop_reason",
+        "search_queries",
+        "tool_calls_json",
+        "llm_calls",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "duration_seconds",
     ]
     assert output["doc_ids"] == ["q0001/first.txt", "q0001/second.txt"]
     assert output["contexts"][0] == result.contexts[0].to_dict()
+    assert output["rag_mode"] == "standard"
+    assert output["search_queries"] == [make_record().question]
+
+
+def test_serialize_search_results_exports_exact_agent_preview():
+    full_context = "prefix " + "x" * 4000 + " ending"
+    preview = full_context[:3500].rstrip() + "..."
+    result = SearchResult(
+        chunk=Chunk(
+            id="chunk-1",
+            text="retrieval fragment",
+            metadata={
+                "context": full_context,
+                "_llm_context": preview,
+                "dataset_doc_id": "doc-1.pdf",
+            },
+        ),
+        score=0.9,
+    )
+
+    context = serialize_search_results([result])[0]
+
+    assert context.text == preview
+    assert context.retrieval_text == "retrieval fragment"
+    metadata = json.loads(context.metadata_json)
+    assert "context" not in metadata
+    assert "_llm_context" not in metadata
 
 
 def test_process_hf_qa_record_downloads_documents_before_processing(monkeypatch, tmp_path):
@@ -265,6 +303,80 @@ def test_process_qa_record_preserves_no_context_result(tmp_path):
     assert result.contexts == ()
     assert llm_client.prompts == []
     assert retriever.clear_calls == 1
+
+
+def test_process_qa_record_exports_direct_tool_evidence(tmp_path):
+    record = QADatasetRecord(
+        id="q0001",
+        question="What is on page one?",
+        answer="Gold answer",
+        doc_ids=("q0001/report.pdf",),
+    )
+    document_path = tmp_path / "report.pdf"
+    document_path.write_bytes(b"not-read-by-the-test-loader")
+
+    class ToolLLM:
+        model = "fake/tool-model"
+        temperature = 0.0
+        max_tokens = 128
+
+        def __init__(self):
+            self.request_count = 0
+            self.prompt_tokens = 0
+            self.completion_tokens = 0
+            self.total_tokens = 0
+
+        def generate(self, prompt: str) -> str:
+            raise AssertionError("tool-agent mode must not call generate")
+
+        def chat_with_tools(self, messages, tools):
+            self.request_count += 1
+            if self.request_count == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "read_document_location",
+                            "args": {"source_file": "report.pdf", "page_number": 1},
+                            "id": "read-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            return AIMessage(content="Page one contains the project summary.")
+
+    def load_test_document(paths):
+        assert paths == [document_path]
+        return [
+            Document(
+                file_name="report.pdf",
+                file_type="pdf",
+                blocks=[
+                    Block(
+                        id="page-1",
+                        text="Project summary",
+                        type="text",
+                        page_number=1,
+                    )
+                ],
+            )
+        ]
+
+    result = process_qa_record(
+        record=record,
+        document_paths=[document_path],
+        llm_client=ToolLLM(),
+        retriever=FakeRetriever(),
+        document_loader=load_test_document,
+        rag_mode="tool_agent",
+        max_tool_rounds=2,
+    )
+
+    assert result.rag_mode == "tool_agent"
+    assert result.llm_calls == 2
+    assert result.contexts[0].document_id == "q0001/report.pdf"
+    assert "Project summary" in result.contexts[0].text
+    assert json.loads(result.tool_calls_json)[0]["name"] == "read_document_location"
 
 
 def test_process_qa_record_clears_retriever_when_generation_fails(tmp_path):

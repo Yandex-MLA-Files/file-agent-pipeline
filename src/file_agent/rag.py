@@ -1,6 +1,5 @@
 import json
 import os
-import uuid
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal, cast
@@ -25,6 +24,7 @@ from file_agent.rag_graph import (
     QAContext,
     ingestion_graph,
     qa_graph,
+    stateless_tool_agent_graph,
     tool_agent_graph,
 )
 from file_agent.retrieval import Retriever, SearchResult
@@ -101,6 +101,7 @@ def answer_indexed_documents(
     max_history_turns: int | None = None,
     vlm_client: VLMClient | None = None,
     asset_store: DocumentAssetStore | None = None,
+    require_evidence_tool: bool = False,
 ) -> RAGResponse:
     with tracer.start_as_current_span("file_agent.answer_indexed_documents") as span:
         span.set_attribute("file_agent.question", question)
@@ -121,11 +122,13 @@ def answer_indexed_documents(
                 documents=documents or [],
                 documents_count=documents_count,
                 chunks_count=chunks_count,
+                top_k=top_k,
                 max_tool_rounds=max_tool_rounds,
                 thread_id=thread_id,
                 max_history_turns=max_history_turns,
                 vlm_client=vlm_client,
                 asset_store=asset_store,
+                require_evidence_tool=require_evidence_tool,
             )
         else:
             state = qa_graph.invoke(
@@ -171,6 +174,7 @@ def answer_with_results(
     max_history_turns: int | None = None,
     vlm_client: VLMClient | None = None,
     asset_store: DocumentAssetStore | None = None,
+    require_evidence_tool: bool = False,
 ) -> RAGResponse:
     with tracer.start_as_current_span("file_agent.answer_with_results") as span:
         span.set_attribute("file_agent.question", question)
@@ -199,11 +203,13 @@ def answer_with_results(
                 documents=documents or [],
                 documents_count=documents_count,
                 chunks_count=chunks_count,
+                top_k=5,
                 max_tool_rounds=max_tool_rounds,
                 thread_id=thread_id,
                 max_history_turns=max_history_turns,
                 vlm_client=vlm_client,
                 asset_store=asset_store,
+                require_evidence_tool=require_evidence_tool,
             )
         else:
             state = qa_graph.invoke(
@@ -246,6 +252,7 @@ def answer_files(
     max_history_turns: int | None = None,
     vlm_client: VLMClient | None = None,
     asset_store: DocumentAssetStore | None = None,
+    require_evidence_tool: bool = False,
 ) -> RAGResponse:
     paths = list(file_paths)
     active_retriever = retriever or LanceDBRetriever()
@@ -272,6 +279,7 @@ def answer_files(
         max_history_turns=max_history_turns,
         vlm_client=vlm_client,
         asset_store=active_asset_store,
+        require_evidence_tool=require_evidence_tool,
     )
 
 
@@ -289,6 +297,7 @@ def answer_documents(
     max_history_turns: int | None = None,
     vlm_client: VLMClient | None = None,
     asset_store: DocumentAssetStore | None = None,
+    require_evidence_tool: bool = False,
 ) -> RAGResponse:
     active_retriever = retriever or LanceDBRetriever()
     chunks = ingest_documents(
@@ -311,6 +320,7 @@ def answer_documents(
         max_history_turns=max_history_turns,
         vlm_client=vlm_client,
         asset_store=asset_store,
+        require_evidence_tool=require_evidence_tool,
     )
 
 
@@ -360,34 +370,39 @@ def _answer_with_tool_agent(
     documents: list[Document],
     documents_count: int,
     chunks_count: int,
+    top_k: int,
     max_tool_rounds: int | None,
     thread_id: str | None,
     max_history_turns: int | None,
     vlm_client: VLMClient | None,
     asset_store: DocumentAssetStore | None,
+    require_evidence_tool: bool,
 ) -> RAGResponse:
     if not isinstance(llm_client, ToolCallingLLMClient):
         raise TypeError("The configured LLM client does not support native tool calling")
 
-    active_thread_id = thread_id.strip() if thread_id is not None else uuid.uuid4().hex
-    if not active_thread_id:
+    if thread_id is not None and not thread_id.strip():
         raise ValueError("thread_id must not be empty")
 
-    state = tool_agent_graph.invoke(
+    active_graph = tool_agent_graph if thread_id is not None else stateless_tool_agent_graph
+    config = {"configurable": {"thread_id": thread_id.strip()}} if thread_id is not None else None
+    state = active_graph.invoke(
         {
             "question": question,
             "documents_count": documents_count,
             "chunks_count": chunks_count,
         },
-        config={"configurable": {"thread_id": active_thread_id}},
+        config=config,
         context=ToolAgentContext(
             llm_client=llm_client,
             retriever=retriever,
             documents=documents,
+            default_top_k=top_k,
             max_tool_rounds=resolve_max_tool_rounds(max_tool_rounds),
             max_history_turns=resolve_history_turns(max_history_turns),
             vlm_client=vlm_client,
             asset_store=asset_store,
+            require_evidence_tool=require_evidence_tool,
         ),
     )
     return state["response"]

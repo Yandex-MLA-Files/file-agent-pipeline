@@ -30,6 +30,7 @@ MAX_VISUAL_DESCRIPTION_LENGTH = 500
 MAX_VISUAL_PIXELS = 1_500_000
 VISUAL_CROP_PADDING = 12.0
 DEFAULT_HISTORY_TURNS = 6
+LLM_CONTEXT_METADATA_KEY = "_llm_context"
 
 VISUAL_ANALYSIS_PROMPT = """Analyze this visual from an uploaded document and answer
 the user's question using only information visible in the image. Identify the visual
@@ -89,24 +90,27 @@ class ToolAgentContext:
     llm_client: ToolCallingLLMClient
     retriever: Retriever
     documents: list[Document]
+    default_top_k: int = 5
     max_tool_rounds: int = 4
     max_history_turns: int = DEFAULT_HISTORY_TURNS
     vlm_client: VLMClient | None = None
     asset_store: DocumentAssetStore | None = None
+    require_evidence_tool: bool = False
 
 
 @tool
 def search_documents(
     query: str,
     runtime: ToolRuntime[Any, dict],
-    top_k: int = 5,
+    top_k: int | None = None,
     source_file: str | None = None,
 ) -> Command:
     """Search uploaded documents for passages relevant to a query.
 
     Args:
         query: A concise semantic search query.
-        top_k: Number of retrieval results to return, from 1 to 10.
+        top_k: Number of retrieval results to return, from 1 to 10. Uses the
+            active RAG top-k setting when omitted.
         source_file: Optional exact file name returned by list_documents.
     """
     normalized_query = query.strip()
@@ -121,7 +125,8 @@ def search_documents(
             raise ValueError("source_file must not be empty")
         resolved_source = _find_document(runtime.context.documents, source_file).file_name
 
-    bounded_top_k = max(1, min(top_k, MAX_TOOL_TOP_K))
+    requested_top_k = runtime.context.default_top_k if top_k is None else top_k
+    bounded_top_k = max(1, min(requested_top_k, MAX_TOOL_TOP_K))
     if resolved_source is None:
         results = runtime.context.retriever.search(
             query=normalized_query,
@@ -134,14 +139,20 @@ def search_documents(
             source_file=resolved_source,
         )
     payload = _serialize_search_results(normalized_query, results, resolved_source)
-    return _tool_command(payload, runtime, sources=results, search_query=normalized_query)
+    evidence_sources = _search_evidence_sources(results)
+    return _tool_command(
+        payload,
+        runtime,
+        sources=evidence_sources,
+        search_query=normalized_query,
+    )
 
 
 @tool
 def read_source_context(
     chunk_id: str,
     runtime: ToolRuntime[Any, dict],
-) -> str:
+) -> Command:
     """Read the stored surrounding passage for a previously found search result.
 
     Args:
@@ -162,15 +173,23 @@ def read_source_context(
 
     metadata = dict(result.chunk.metadata)
     passage = str(metadata.pop("context", None) or result.chunk.text)
-    return json.dumps(
-        {
-            "chunk_id": result.chunk.id,
-            "text": passage,
-            "metadata": metadata,
-        },
-        ensure_ascii=False,
-        default=str,
+    metadata.pop(LLM_CONTEXT_METADATA_KEY, None)
+    payload = {
+        "chunk_id": result.chunk.id,
+        "text": passage,
+        "metadata": metadata,
+    }
+    updated_metadata = dict(result.chunk.metadata)
+    updated_metadata[LLM_CONTEXT_METADATA_KEY] = passage
+    updated_source = SearchResult(
+        chunk=Chunk(
+            id=result.chunk.id,
+            text=result.chunk.text,
+            metadata=updated_metadata,
+        ),
+        score=result.score,
     )
+    return _tool_command(payload, runtime, sources=[updated_source])
 
 
 @tool
@@ -544,6 +563,24 @@ def _serialize_search_results(
     }
 
 
+def _search_evidence_sources(results: list[SearchResult]) -> list[SearchResult]:
+    evidence_sources = []
+    for result, passage in select_context_passages(results):
+        metadata = dict(result.chunk.metadata)
+        metadata[LLM_CONTEXT_METADATA_KEY] = _truncate_passage(passage)
+        evidence_sources.append(
+            SearchResult(
+                chunk=Chunk(
+                    id=result.chunk.id,
+                    text=result.chunk.text,
+                    metadata=metadata,
+                ),
+                score=result.score,
+            )
+        )
+    return evidence_sources
+
+
 def _find_document(documents: list[Document], source_file: str) -> Document:
     requested_name = source_file.strip().casefold()
     matches = [item for item in documents if item.file_name.casefold() == requested_name]
@@ -737,6 +774,8 @@ def _source_metadata(document: Document, blocks: list[Block]) -> dict[str, Any]:
     pages = sorted({page for block in blocks if (page := _block_page_number(block)) is not None})
     slides = _integer_metadata_values(blocks, "slide_number")
     sheets = _unique_metadata_values(blocks, "sheet_name")
+    dataset_doc_ids = _unique_metadata_values(blocks, "dataset_doc_id")
+    dataset_record_ids = _unique_metadata_values(blocks, "dataset_record_id")
     if pages:
         metadata["page_number"] = pages[0]
         metadata["page_numbers"] = pages
@@ -746,6 +785,10 @@ def _source_metadata(document: Document, blocks: list[Block]) -> dict[str, Any]:
     if sheets:
         metadata["sheet_name"] = sheets[0]
         metadata["sheet_names"] = sheets
+    if len(dataset_doc_ids) == 1:
+        metadata["dataset_doc_id"] = dataset_doc_ids[0]
+    if len(dataset_record_ids) == 1:
+        metadata["dataset_record_id"] = dataset_record_ids[0]
     return metadata
 
 

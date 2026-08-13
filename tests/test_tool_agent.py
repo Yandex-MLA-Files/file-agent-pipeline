@@ -102,6 +102,7 @@ def invoke_tool_agent(
     documents=None,
     vlm_client=None,
     asset_store=None,
+    require_evidence_tool=False,
 ):
     return build_tool_agent_graph().invoke(
         {
@@ -116,6 +117,7 @@ def invoke_tool_agent(
             max_tool_rounds=max_tool_rounds,
             vlm_client=vlm_client,
             asset_store=asset_store,
+            require_evidence_tool=require_evidence_tool,
         ),
     )
 
@@ -174,7 +176,8 @@ def test_tool_agent_searches_documents_and_returns_sources():
 
     response = state["response"]
     assert response.answer == "The project deadline is Friday [plan.md, page 2]."
-    assert response.sources == [make_search_result()]
+    assert response.sources[0].chunk.id == make_search_result().chunk.id
+    assert response.sources[0].chunk.metadata["_llm_context"] == ("The project deadline is Friday.")
     assert response.search_queries == ["project deadline"]
     assert response.stop_reason == "tool_agent_completed"
     assert response.tool_calls == [
@@ -187,6 +190,45 @@ def test_tool_agent_searches_documents_and_returns_sources():
     assert tool_messages_seen_by_model(llm_client)
     assert state["messages"] == []
     assert llm_client.responses == []
+
+
+def test_tool_agent_can_require_a_document_evidence_tool():
+    llm_client = FakeToolCallingLLM([AIMessage(content="An unsupported direct answer.")])
+
+    with pytest.raises(ValueError, match="without successfully using"):
+        invoke_tool_agent(
+            llm_client,
+            FakeRetriever(),
+            require_evidence_tool=True,
+        )
+
+
+def test_required_evidence_allows_a_successful_search_with_no_matches():
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "missing fact"},
+                        "id": "search-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The documents do not contain enough information."),
+        ]
+    )
+
+    state = invoke_tool_agent(
+        llm_client,
+        FakeRetriever(),
+        require_evidence_tool=True,
+    )
+
+    assert state["response"].sources == []
+    assert state["response"].search_queries == ["missing fact"]
 
 
 def test_tool_agent_can_list_documents_without_retrieval():
@@ -311,7 +353,7 @@ def test_tool_agent_can_filter_search_by_source_file():
     state = invoke_tool_agent(llm_client, retriever)
 
     assert retriever.search_calls == [("project deadline", 3, "plan.md")]
-    assert state["response"].sources == [make_search_result()]
+    assert state["response"].sources[0].chunk.id == make_search_result().chunk.id
     tool_message = tool_messages_seen_by_model(llm_client)[0]
     payload = json.loads(str(tool_message.content))
     assert payload["source_file"] == "plan.md"
@@ -352,6 +394,17 @@ def test_tool_agent_can_read_full_context_after_search():
                     }
                 ],
             ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "complete ending"},
+                        "id": "call-3",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
             AIMessage(content="The context has a complete ending."),
         ]
     )
@@ -361,9 +414,12 @@ def test_tool_agent_can_read_full_context_after_search():
     tool_messages = tool_messages_seen_by_model(llm_client)
     search_payload = json.loads(str(tool_messages[0].content))
     context_payload = json.loads(str(tool_messages[1].content))
+    repeated_search_payload = json.loads(str(tool_messages[2].content))
     assert search_payload["results"][0]["text"].endswith("...")
     assert context_payload["text"] == long_context
-    assert state["response"].sources == [result]
+    assert repeated_search_payload["results"][0]["text"].endswith("...")
+    assert state["response"].sources[0].chunk.id == result.chunk.id
+    assert state["response"].sources[0].chunk.metadata["_llm_context"] == long_context
 
 
 def make_structured_document() -> Document:
@@ -474,6 +530,23 @@ def test_tool_agent_can_navigate_outline_and_read_section():
     assert "Child section body." in section["text"]
     assert "must not be returned" not in section["text"]
     assert state["response"].sources[0].chunk.metadata["page_numbers"] == [1, 2]
+
+
+def test_direct_read_source_preserves_dataset_document_id():
+    document = make_structured_document()
+    for block in document.blocks:
+        block.metadata["dataset_doc_id"] = "q0001/handbook.pdf"
+        block.metadata["dataset_record_id"] = "q0001"
+
+    state, _ = _invoke_single_read_tool(
+        "read_document_location",
+        {"source_file": "handbook.pdf", "page_number": 3},
+        [document],
+    )
+
+    metadata = state["response"].sources[0].chunk.metadata
+    assert metadata["dataset_doc_id"] == "q0001/handbook.pdf"
+    assert metadata["dataset_record_id"] == "q0001"
 
 
 def _invoke_single_read_tool(tool_name, arguments, documents):
@@ -885,9 +958,11 @@ def test_persistent_agent_uses_compact_history_and_retrieves_again_each_turn():
         ("first-quarter revenue", 5, None),
         ("second-quarter revenue", 5, None),
     ]
-    assert first_state["sources"] == [first_result]
-    assert second_state["sources"] == [second_result]
-    assert second_state["response"].sources == [second_result]
+    assert [source.chunk.id for source in first_state["sources"]] == [first_result.chunk.id]
+    assert [source.chunk.id for source in second_state["sources"]] == [second_result.chunk.id]
+    assert [source.chunk.id for source in second_state["response"].sources] == [
+        second_result.chunk.id
+    ]
     assert second_state["messages"] == []
 
     persisted = graph.get_state({"configurable": {"thread_id": "conversation-1"}}).values

@@ -13,6 +13,7 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 load_dotenv(PROJECT_ROOT / ".env")
 
+from file_agent.agent_tools import LLM_CONTEXT_METADATA_KEY
 from file_agent.document_assets import InMemoryDocumentAssetStore
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.factory import create_llm_client
@@ -104,7 +105,9 @@ def _show_response_details(response) -> None:
                 expanded=index == 1,
             ):
                 metadata = dict(result.chunk.metadata)
-                passage = metadata.pop("context", None)
+                passage = metadata.pop(LLM_CONTEXT_METADATA_KEY, None) or metadata.pop(
+                    "context", None
+                )
                 st.write("**Metadata:**")
                 st.json(metadata)
                 st.write("**Source text:**")

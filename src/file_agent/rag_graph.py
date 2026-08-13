@@ -19,6 +19,7 @@ from langgraph.types import Overwrite
 
 from file_agent.agent_tools import (
     DOCUMENT_TOOLS,
+    LLM_CONTEXT_METADATA_KEY,
     TOOL_AGENT_SYSTEM_PROMPT,
     TOOL_LIMIT_MESSAGE,
     ToolAgentContext,
@@ -68,12 +69,25 @@ def merge_search_results(
     new: list[SearchResult],
 ) -> list[SearchResult]:
     merged = list(current)
-    seen_chunk_ids = {result.chunk.id for result in current}
+    positions = {result.chunk.id: index for index, result in enumerate(current)}
     for result in new:
-        if result.chunk.id in seen_chunk_ids:
-            continue
-        seen_chunk_ids.add(result.chunk.id)
-        merged.append(result)
+        position = positions.get(result.chunk.id)
+        if position is None:
+            positions[result.chunk.id] = len(merged)
+            merged.append(result)
+        else:
+            # A later read_source_context call upgrades the search preview to
+            # the complete passage that was actually shown to the model. Never
+            # downgrade it if the same chunk is returned by another search.
+            current_result = merged[position]
+            current_context = current_result.chunk.metadata.get(LLM_CONTEXT_METADATA_KEY)
+            new_context = result.chunk.metadata.get(LLM_CONTEXT_METADATA_KEY)
+            if not (
+                isinstance(current_context, str)
+                and isinstance(new_context, str)
+                and len(current_context) > len(new_context)
+            ):
+                merged[position] = result
     return merged
 
 
@@ -307,6 +321,15 @@ def build_tool_agent_response_node(
         raise ValueError("Tool agent did not return a final answer")
 
     answer = str(last_message.content).strip()
+    tool_calls = _collect_tool_calls(state["messages"])
+    if (
+        runtime.context.require_evidence_tool
+        and not state.get("sources")
+        and not state.get("search_queries")
+    ):
+        raise ValueError(
+            "Tool agent returned a final answer without successfully using a document evidence tool"
+        )
     search_queries = list(state.get("search_queries", []))
     history = _trim_conversation_history(
         [
@@ -325,7 +348,7 @@ def build_tool_agent_response_node(
             search_queries=search_queries,
             retry_count=max(0, len(search_queries) - 1),
             stop_reason="tool_agent_completed",
-            tool_calls=_collect_tool_calls(state["messages"]),
+            tool_calls=tool_calls,
         ),
         "conversation_history": history,
         # Tool calls and observations remain available for the full current run,
@@ -406,4 +429,5 @@ def _collect_tool_calls(messages: list[BaseMessage]) -> list[dict]:
 ingestion_graph = build_ingestion_graph()
 qa_graph = build_qa_graph()
 tool_agent_checkpointer = InMemorySaver()
+stateless_tool_agent_graph = build_tool_agent_graph()
 tool_agent_graph = build_tool_agent_graph(checkpointer=tool_agent_checkpointer)

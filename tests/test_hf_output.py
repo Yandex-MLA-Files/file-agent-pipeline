@@ -65,6 +65,15 @@ def test_build_generated_qa_dataset_uses_explicit_schema_and_source_order():
         "answer_model",
         "contexts",
         "answer",
+        "rag_mode",
+        "stop_reason",
+        "search_queries",
+        "tool_calls_json",
+        "llm_calls",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "duration_seconds",
     ]
     assert dataset.features == GENERATED_QA_FEATURES
     assert dataset.split == "train"

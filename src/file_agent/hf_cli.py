@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,9 +19,11 @@ from file_agent.hf_batch import (
 from file_agent.hf_dataset import QADatasetRecord, load_qa_dataset
 from file_agent.hf_output import GeneratedDatasetArtifacts, save_generated_qa_dataset
 from file_agent.llm.base import LLMClient
-from file_agent.llm.factory import create_llm_client
+from file_agent.llm.factory import DEFAULT_MAX_TOKENS, create_llm_client
+from file_agent.rag import resolve_max_tool_rounds, resolve_rag_mode
+from file_agent.vlm.factory import create_vlm_client
 
-MANIFEST_SCHEMA_VERSION = 2
+MANIFEST_SCHEMA_VERSION = 3
 MANIFEST_FILE_NAME = "run_manifest.json"
 FINAL_ARTIFACT_NAMES = ("answers.parquet", "hf_dataset", MANIFEST_FILE_NAME)
 LOGGER = logging.getLogger(__name__)
@@ -40,6 +43,10 @@ class HFGenerationConfig:
     overlap: int = 100
     limit: int | None = None
     resume: bool = False
+    rag_mode: str | None = None
+    max_tool_rounds: int | None = None
+    temperature: float = 0.0
+    max_tokens: int = DEFAULT_MAX_TOKENS
 
     def __post_init__(self) -> None:
         _require_non_empty(self.dataset_id, "dataset_id")
@@ -58,6 +65,14 @@ class HFGenerationConfig:
             raise ValueError("overlap must be smaller than max_chars")
         if self.limit is not None and self.limit <= 0:
             raise ValueError("limit must be greater than 0")
+        if self.rag_mode is not None:
+            resolve_rag_mode(self.rag_mode)
+        if self.max_tool_rounds is not None:
+            resolve_max_tool_rounds(self.max_tool_rounds)
+        if not math.isfinite(self.temperature) or not 0 <= self.temperature <= 2:
+            raise ValueError("temperature must be between 0 and 2")
+        if self.max_tokens <= 0:
+            raise ValueError("max_tokens must be greater than 0")
 
 
 @dataclass(frozen=True)
@@ -75,8 +90,19 @@ def run_hf_dataset_generation(
     _validate_output_directory(config.output_dir)
 
     active_llm_client = (
-        llm_client if llm_client is not None else create_llm_client(env_file=config.env_file)
+        llm_client
+        if llm_client is not None
+        else create_llm_client(
+            env_file=config.env_file,
+            temperature=config.temperature,
+            max_tokens=config.max_tokens,
+        )
     )
+    active_rag_mode = resolve_rag_mode(config.rag_mode)
+    active_max_tool_rounds = (
+        resolve_max_tool_rounds(config.max_tool_rounds) if active_rag_mode == "tool_agent" else None
+    )
+    active_vlm_client = create_vlm_client() if active_rag_mode == "tool_agent" else None
     source_dataset = load_qa_dataset(
         dataset_id=config.dataset_id,
         config_name=config.config_name,
@@ -105,6 +131,9 @@ def run_hf_dataset_generation(
         max_chars=config.max_chars,
         overlap=config.overlap,
         resume=config.resume,
+        rag_mode=active_rag_mode,
+        max_tool_rounds=active_max_tool_rounds,
+        vlm_client=active_vlm_client,
     )
     artifacts = save_generated_qa_dataset(
         source_dataset=selected_dataset,
@@ -118,6 +147,8 @@ def run_hf_dataset_generation(
         llm_client=active_llm_client,
         batch_result=batch_result,
         artifacts=artifacts,
+        rag_mode=active_rag_mode,
+        max_tool_rounds=active_max_tool_rounds,
     )
     manifest_path = _write_manifest(config.output_dir, manifest)
 
@@ -145,6 +176,28 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overlap", type=_non_negative_int, default=100, help="Chunk overlap")
     parser.add_argument("--limit", type=_positive_int, help="Process only the first N rows")
     parser.add_argument("--resume", action="store_true", help="Reuse matching row checkpoints")
+    parser.add_argument(
+        "--rag-mode",
+        choices=("standard", "tool_agent"),
+        help="RAG orchestration mode (default: RAG_MODE or standard)",
+    )
+    parser.add_argument(
+        "--max-tool-rounds",
+        type=_positive_int,
+        help="Maximum tool-agent rounds (default: RAG_MAX_TOOL_ROUNDS or 4)",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Generation temperature (default: 0 for reproducible evaluation)",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=_positive_int,
+        default=DEFAULT_MAX_TOKENS,
+        help=f"Maximum completion tokens per LLM request (default: {DEFAULT_MAX_TOKENS})",
+    )
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -176,6 +229,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             overlap=args.overlap,
             limit=args.limit,
             resume=args.resume,
+            rag_mode=args.rag_mode,
+            max_tool_rounds=args.max_tool_rounds,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -217,6 +274,8 @@ def _build_manifest(
     llm_client: LLMClient,
     batch_result: BatchGenerationResult,
     artifacts: GeneratedDatasetArtifacts,
+    rag_mode: str,
+    max_tool_rounds: int | None,
 ) -> dict[str, Any]:
     generation_parameters = build_generation_parameters(
         dataset_id=config.dataset_id,
@@ -226,6 +285,8 @@ def _build_manifest(
         top_k=config.top_k,
         max_chars=config.max_chars,
         overlap=config.overlap,
+        rag_mode=rag_mode,
+        max_tool_rounds=max_tool_rounds,
     )
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,

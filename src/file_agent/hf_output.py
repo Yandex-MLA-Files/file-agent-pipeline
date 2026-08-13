@@ -27,6 +27,15 @@ GENERATED_QA_FEATURES = Features(
             }
         ),
         "answer": Value("string"),
+        "rag_mode": Value("string"),
+        "stop_reason": Value("string"),
+        "search_queries": List(Value("string")),
+        "tool_calls_json": Value("string"),
+        "llm_calls": Value("int32"),
+        "prompt_tokens": Value("int64"),
+        "completion_tokens": Value("int64"),
+        "total_tokens": Value("int64"),
+        "duration_seconds": Value("float64"),
     }
 )
 

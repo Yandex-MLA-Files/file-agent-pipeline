@@ -197,7 +197,7 @@ def test_answer_indexed_documents_can_use_tool_agent_mode():
                 tool_calls=[
                     {
                         "name": "search_documents",
-                        "args": {"query": "tool context", "top_k": 5},
+                        "args": {"query": "tool context"},
                         "id": "call-1",
                         "type": "tool_call",
                     }
@@ -213,11 +213,13 @@ def test_answer_indexed_documents_can_use_tool_agent_mode():
         retriever=retriever,
         documents_count=1,
         chunks_count=1,
+        top_k=3,
         mode="tool_agent",
     )
 
     assert response.answer == "Tool agent answer"
     assert response.search_queries == ["tool context"]
+    assert retriever.search_calls == [("tool context", 3)]
     assert llm_client.responses == []
 
 

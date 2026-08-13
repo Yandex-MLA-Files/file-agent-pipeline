@@ -42,6 +42,13 @@ filesystem paths. Its read-only tools can:
 - discover figures in a PDF and analyze a selected figure crop or full page with
   the configured VLM.
 
+The Hugging Face batch generator accepts `--rag-mode standard` or
+`--rag-mode tool_agent`. Batch tool-agent runs are stateless between dataset rows,
+require a document evidence tool before accepting an answer, and export the exact
+evidence shown to the model together with tool-call, token, and duration diagnostics.
+See [docs/hf_dataset_generation.md](docs/hf_dataset_generation.md) for the paired-run
+workflow.
+
 Long sections and locations return `next_offset`; tables use a bounded row
 `offset` and `limit`. Direct reads are preserved as answer sources just like
 retrieval results. All tools receive the active retriever and parsed documents
