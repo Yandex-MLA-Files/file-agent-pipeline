@@ -273,7 +273,12 @@ def tool_agent_model_node(
         DOCUMENT_TOOLS if completed_tool_rounds < runtime.context.max_tool_rounds else []
     )
     if not available_tools:
-        messages.insert(0, SystemMessage(content=TOOL_LIMIT_MESSAGE))
+        if messages and isinstance(messages[0], SystemMessage):
+            messages[0] = SystemMessage(
+                content=f"{messages[0].content.rstrip()}\n\n{TOOL_LIMIT_MESSAGE.strip()}"
+            )
+        else:
+            messages.insert(0, SystemMessage(content=TOOL_LIMIT_MESSAGE))
 
     response = runtime.context.llm_client.chat_with_tools(
         messages=messages,

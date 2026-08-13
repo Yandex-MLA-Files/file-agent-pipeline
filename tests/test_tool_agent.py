@@ -2,7 +2,7 @@ import json
 
 import fitz
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from PIL import Image
 
@@ -240,7 +240,11 @@ def test_tool_agent_forces_final_answer_after_tool_round_limit():
     assert state["response"].answer.endswith("deadline is Friday.")
     assert llm_client.calls[0]["tool_names"] == [tool.name for tool in DOCUMENT_TOOLS]
     assert llm_client.calls[1]["tool_names"] == []
-    assert "tool-call limit" in str(llm_client.calls[1]["messages"][0].content)
+    final_messages = llm_client.calls[1]["messages"]
+    assert isinstance(final_messages[0], SystemMessage)
+    assert "uploaded documents" in str(final_messages[0].content)
+    assert "tool-call limit" in str(final_messages[0].content)
+    assert sum(isinstance(message, SystemMessage) for message in final_messages) == 1
     assert retriever.search_calls == [("project deadline", 5, None)]
 
 
