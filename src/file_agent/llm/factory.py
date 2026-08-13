@@ -67,6 +67,7 @@ def _create_local_client() -> OpenAILLMClient:
     return OpenAILLMClient(
         client=client,
         model=_getenv("LOCAL_LLM_MODEL", DEFAULT_LOCAL_MODEL),
+        enable_thinking=_get_optional_bool("LOCAL_LLM_ENABLE_THINKING"),
     )
 
 
@@ -100,3 +101,16 @@ def _getenv(name: str, default: str | None = None) -> str | None:
         return None
 
     return value.strip()
+
+
+def _get_optional_bool(name: str) -> bool | None:
+    value = _getenv(name)
+    if not value:
+        return None
+
+    normalized = value.lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")

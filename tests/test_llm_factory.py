@@ -61,11 +61,13 @@ def test_factory_creates_local_client_without_configured_api_key(monkeypatch):
     monkeypatch.delenv("LOCAL_LLM_BASE_URL", raising=False)
     monkeypatch.delenv("LOCAL_LLM_MODEL", raising=False)
     monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_ENABLE_THINKING", raising=False)
 
     client = create_llm_client(load_env=False)
 
     assert isinstance(client, OpenAILLMClient)
     assert client.model == DEFAULT_LOCAL_MODEL
+    assert client.enable_thinking is None
     assert client.client.kwargs == {
         "api_key": LOCAL_API_KEY_PLACEHOLDER,
         "base_url": DEFAULT_LOCAL_BASE_URL,
@@ -82,6 +84,23 @@ def test_factory_uses_configured_local_api_key(monkeypatch):
     client = create_llm_client(load_env=False)
 
     assert client.client.kwargs["api_key"] == "local-api-key"
+
+
+def test_factory_configures_local_thinking_mode(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "local")
+    monkeypatch.setenv("LOCAL_LLM_ENABLE_THINKING", "false")
+
+    client = create_llm_client(load_env=False)
+
+    assert client.enable_thinking is False
+
+
+def test_factory_rejects_invalid_local_thinking_mode(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "local")
+    monkeypatch.setenv("LOCAL_LLM_ENABLE_THINKING", "sometimes")
+
+    with pytest.raises(ValueError, match="LOCAL_LLM_ENABLE_THINKING must be a boolean"):
+        create_llm_client(load_env=False)
 
 
 def test_factory_rejects_empty_local_base_url(monkeypatch):

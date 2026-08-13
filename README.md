@@ -86,6 +86,7 @@ The LLM and VLM can point at the same multimodal vLLM deployment. For example:
 LLM_BACKEND=local
 LOCAL_LLM_BASE_URL=http://localhost:8000/v1
 LOCAL_LLM_MODEL=Qwen/Qwen3.5-27B
+LOCAL_LLM_ENABLE_THINKING=false
 
 VLM_BACKEND=openai
 VLM_BASE_URL=http://localhost:8000/v1

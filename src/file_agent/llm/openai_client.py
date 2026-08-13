@@ -19,11 +19,13 @@ class OpenAILLMClient:
         model: str,
         temperature: float = 0.2,
         max_tokens: int = 2000,
+        enable_thinking: bool | None = None,
     ) -> None:
         self.client = client
         self.model = model.strip()
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.enable_thinking = enable_thinking
 
         if not self.model:
             raise ValueError("model is required")
@@ -36,19 +38,27 @@ class OpenAILLMClient:
             span.set_attribute("langfuse.observation.model.name", self.model)
             span.set_attribute(
                 "langfuse.observation.model.parameters",
-                json.dumps({"temperature": self.temperature, "max_tokens": self.max_tokens}),
+                json.dumps(
+                    {
+                        "temperature": self.temperature,
+                        "max_tokens": self.max_tokens,
+                        "enable_thinking": self.enable_thinking,
+                    }
+                ),
             )
             span.set_attribute(
                 "langfuse.observation.input",
                 json.dumps({"messages": [{"role": "user", "content": prompt}]}),
             )
 
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
+            request = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+            }
+            self._add_thinking_setting(request)
+            response = self.client.chat.completions.create(**request)
 
             if not response.choices:
                 raise ValueError("LLM returned an empty response")
@@ -99,6 +109,7 @@ class OpenAILLMClient:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        self._add_thinking_setting(request)
         if tools:
             request["tools"] = [convert_to_openai_tool(tool) for tool in tools]
             request["tool_choice"] = "auto"
@@ -111,7 +122,13 @@ class OpenAILLMClient:
             span.set_attribute("langfuse.observation.model.name", self.model)
             span.set_attribute(
                 "langfuse.observation.model.parameters",
-                json.dumps({"temperature": self.temperature, "max_tokens": self.max_tokens}),
+                json.dumps(
+                    {
+                        "temperature": self.temperature,
+                        "max_tokens": self.max_tokens,
+                        "enable_thinking": self.enable_thinking,
+                    }
+                ),
             )
             span.set_attribute(
                 "langfuse.observation.input",
@@ -182,3 +199,8 @@ class OpenAILLMClient:
                 len(tool_calls),
             )
             return AIMessage(content=content, tool_calls=tool_calls)
+
+    def _add_thinking_setting(self, request: dict) -> None:
+        if self.enable_thinking is None:
+            return
+        request["extra_body"] = {"chat_template_kwargs": {"enable_thinking": self.enable_thinking}}

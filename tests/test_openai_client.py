@@ -63,6 +63,21 @@ def test_generate_uses_openai_chat_completions():
     ]
 
 
+def test_generate_passes_qwen_thinking_setting():
+    openai_client = FakeOpenAI(_chat_completion("Generated answer"))
+    client = OpenAILLMClient(
+        client=openai_client,
+        model="test-model",
+        enable_thinking=False,
+    )
+
+    client.generate("Question")
+
+    assert openai_client.completions.calls[0]["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+
+
 def test_client_requires_model():
     with pytest.raises(ValueError, match="model"):
         OpenAILLMClient(
@@ -103,6 +118,7 @@ def test_chat_with_tools_converts_messages_tools_and_tool_calls():
         model="test-model",
         temperature=0.1,
         max_tokens=128,
+        enable_thinking=False,
     )
 
     message = client.chat_with_tools(
@@ -134,6 +150,7 @@ def test_chat_with_tools_converts_messages_tools_and_tool_calls():
         "source_file",
     }
     assert request["tool_choice"] == "auto"
+    assert request["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 def test_chat_with_tools_can_force_a_final_response_without_tools():
