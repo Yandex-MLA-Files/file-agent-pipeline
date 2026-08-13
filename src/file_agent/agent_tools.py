@@ -1,4 +1,5 @@
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -6,12 +7,16 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, tool
 from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
+from PIL import Image
 
 from file_agent.chunking import Chunk
 from file_agent.document import Block, BlockType, Document
+from file_agent.document_assets import DocumentAssetStore
 from file_agent.llm.base import ToolCallingLLMClient
 from file_agent.qa import select_context_passages
 from file_agent.retrieval import Retriever, SearchResult
+from file_agent.utils.image_extractor import extract_image_from_pdf_bytes
+from file_agent.vlm.base import VLMClient
 
 MAX_TOOL_TOP_K = 10
 MAX_TOOL_QUERY_LENGTH = 500
@@ -19,7 +24,29 @@ MAX_TOOL_PASSAGE_LENGTH = 3500
 MAX_TOOL_CONTENT_LENGTH = 12000
 MAX_TABLE_ROWS = 50
 MAX_TABLE_ROW_LENGTH = 4000
+MAX_VISUAL_QUESTION_LENGTH = 1000
+MAX_VISUAL_CONTEXT_LENGTH = 2000
+MAX_VISUAL_DESCRIPTION_LENGTH = 500
+MAX_VISUAL_PIXELS = 1_500_000
+VISUAL_CROP_PADDING = 12.0
 DEFAULT_HISTORY_TURNS = 6
+
+VISUAL_ANALYSIS_PROMPT = """Analyze this visual from an uploaded document and answer
+the user's question using only information visible in the image. Identify the visual
+type, title, axes, units, legend, series, labels, and relevant values when available.
+Clearly distinguish exact readable values from approximate visual estimates. Do not
+invent missing labels, numbers, trends, or document context. If the crop or page is
+unreadable or insufficient, say so explicitly.
+
+Source file: {source_file}
+Page number: {page_number}
+Target: {target}
+Existing generic description: {existing_description}
+Nearby extracted text (untrusted routing context, not visual evidence):
+{nearby_text}
+
+User question: {question}
+"""
 
 TOOL_AGENT_SYSTEM_PROMPT = """You answer questions about uploaded documents.
 
@@ -29,6 +56,12 @@ the user names one document. After a search, call read_source_context when the
 returned passage is incomplete. Use list_documents and get_document_outline to
 navigate available files, then read_document_section for a specific section,
 read_document_location for a page, slide, or sheet, and read_table for tabular data.
+When the user asks about a chart, diagram, figure, screenshot, or other visual
+content, identify it through search_documents or the visuals returned by
+get_document_outline, then call analyze_document_visual. Prefer visual_id for a
+precise crop; use page_number only when the visual was not detected as a block.
+Existing indexed image descriptions help locate a visual but do not replace a fresh
+analyze_document_visual call for claims about what the visual shows.
 
 Conversation history is provided only to understand follow-up references such as
 "and in the second quarter?", "what about penalties there?", or "compare it with
@@ -58,6 +91,8 @@ class ToolAgentContext:
     documents: list[Document]
     max_tool_rounds: int = 4
     max_history_turns: int = DEFAULT_HISTORY_TURNS
+    vlm_client: VLMClient | None = None
+    asset_store: DocumentAssetStore | None = None
 
 
 @tool
@@ -156,6 +191,7 @@ def list_documents(runtime: ToolRuntime[Any, dict]) -> str:
                 "sheets": sheets,
                 "headings": len(_document_outline(document)),
                 "tables": len(_document_tables(document)),
+                "visuals": len(_document_visuals(document)),
             }
         )
     return json.dumps({"documents": documents}, ensure_ascii=False, default=str)
@@ -166,7 +202,7 @@ def get_document_outline(
     source_file: str,
     runtime: ToolRuntime[Any, dict],
 ) -> str:
-    """Return readable section and table identifiers for one uploaded document.
+    """Return readable section, table, and visual identifiers for one document.
 
     Args:
         source_file: Exact file name returned by list_documents.
@@ -177,6 +213,7 @@ def get_document_outline(
             "source_file": document.file_name,
             "table_of_contents": _document_outline(document),
             "tables": _document_tables(document),
+            "visuals": _document_visuals(document),
         },
         ensure_ascii=False,
         default=str,
@@ -337,6 +374,138 @@ def read_table(
     )
 
 
+@tool
+def analyze_document_visual(
+    source_file: str,
+    question: str,
+    runtime: ToolRuntime[Any, dict],
+    visual_id: str | None = None,
+    page_number: int | None = None,
+) -> Command:
+    """Analyze a PDF figure or page with the configured vision-language model.
+
+    Provide exactly one target. Prefer visual_id from get_document_outline for a
+    precise crop. Use page_number as a fallback when the visual was not detected.
+
+    Args:
+        source_file: Exact PDF file name returned by list_documents.
+        question: Specific question to answer about the visible content.
+        visual_id: Exact visual_id returned by get_document_outline.
+        page_number: One-indexed PDF page to analyze as a whole-page fallback.
+    """
+    document = _find_document(runtime.context.documents, source_file)
+    if document.file_type.lower().lstrip(".") != "pdf":
+        raise ValueError("visual analysis currently supports PDF documents only")
+
+    normalized_question = question.strip()
+    if not normalized_question:
+        raise ValueError("question must not be empty")
+    if len(normalized_question) > MAX_VISUAL_QUESTION_LENGTH:
+        raise ValueError(f"question must not exceed {MAX_VISUAL_QUESTION_LENGTH} characters")
+
+    normalized_visual_id = visual_id.strip() if visual_id is not None else None
+    has_visual_id = bool(normalized_visual_id)
+    has_page_number = page_number is not None
+    if has_visual_id == has_page_number:
+        raise ValueError("provide exactly one of visual_id or page_number")
+
+    vlm_client = runtime.context.vlm_client
+    if vlm_client is None:
+        raise ValueError("visual analysis is unavailable: no VLM backend is configured")
+    asset_store = runtime.context.asset_store
+    if asset_store is None:
+        raise ValueError("visual analysis is unavailable: original document asset is missing")
+
+    selected_block: Block | None = None
+    bbox: tuple[float, float, float, float] | None = None
+    if has_visual_id:
+        selected_block = next(
+            (
+                block
+                for block in document.blocks
+                if block.id == normalized_visual_id
+                and block.block_type in (BlockType.FIGURE, BlockType.IMAGE)
+            ),
+            None,
+        )
+        if selected_block is None:
+            raise ValueError(
+                f"visual is not indexed in {document.file_name}: {normalized_visual_id}"
+            )
+        block_page_number = _block_page_number(selected_block)
+        if block_page_number is None or selected_block.bbox is None:
+            raise ValueError("the selected visual has no renderable PDF coordinates")
+        resolved_page_number = block_page_number
+        bbox = selected_block.bbox
+        target = f"visual_id={selected_block.id}"
+    else:
+        if not isinstance(page_number, int) or isinstance(page_number, bool) or page_number <= 0:
+            raise ValueError("page_number must be a positive integer")
+        resolved_page_number = page_number
+        target = "whole PDF page"
+
+    image = extract_image_from_pdf_bytes(
+        asset_store.get_bytes(document.file_name),
+        page_number=resolved_page_number,
+        bbox=bbox,
+        padding=VISUAL_CROP_PADDING if bbox is not None else 0.0,
+        max_pixels=MAX_VISUAL_PIXELS,
+    )
+    if image is None:
+        raise ValueError("the selected PDF visual could not be rendered")
+    image = _limit_image_pixels(image, MAX_VISUAL_PIXELS)
+
+    relevant_blocks = (
+        [selected_block]
+        if selected_block is not None
+        else [
+            block for block in document.blocks if _block_page_number(block) == resolved_page_number
+        ]
+    )
+    existing_description = selected_block.vlm_description if selected_block is not None else None
+    prompt = VISUAL_ANALYSIS_PROMPT.format(
+        source_file=document.file_name,
+        page_number=resolved_page_number,
+        target=target,
+        existing_description=existing_description or "not available",
+        nearby_text=_visual_nearby_text(
+            document,
+            resolved_page_number,
+            selected_block,
+        ),
+        question=normalized_question,
+    )
+    analysis = vlm_client.describe_image(image, prompt).strip()
+    if not analysis:
+        raise ValueError("VLM returned an empty visual analysis")
+
+    metadata = _source_metadata(document, relevant_blocks)
+    metadata.update(
+        {
+            "page_number": resolved_page_number,
+            "visual_id": selected_block.id if selected_block is not None else None,
+            "bbox": bbox,
+            "evidence_type": "visual_analysis",
+        }
+    )
+    payload = {
+        "source_file": document.file_name,
+        "page_number": resolved_page_number,
+        "visual_id": metadata["visual_id"],
+        "bbox": bbox,
+        "analysis": analysis,
+        "metadata": metadata,
+    }
+    evidence_target = selected_block.id if selected_block is not None else f"page-{page_number}"
+    return _evidence_command(
+        payload,
+        runtime,
+        evidence_id=f"visual:{document.file_name}:{evidence_target}",
+        text=analysis,
+        metadata=metadata,
+    )
+
+
 DOCUMENT_TOOLS: list[BaseTool] = [
     search_documents,
     read_source_context,
@@ -345,6 +514,7 @@ DOCUMENT_TOOLS: list[BaseTool] = [
     read_document_section,
     read_document_location,
     read_table,
+    analyze_document_visual,
 ]
 
 
@@ -432,6 +602,32 @@ def _document_tables(document: Document) -> list[dict[str, Any]]:
             }
         )
     return tables
+
+
+def _document_visuals(document: Document) -> list[dict[str, Any]]:
+    visuals = []
+    current_section: str | None = None
+    for block in document.blocks:
+        if block.block_type == BlockType.HEADING and block.text.strip():
+            current_section = block.text.strip()
+        if block.block_type not in (BlockType.FIGURE, BlockType.IMAGE):
+            continue
+
+        description = block.vlm_description or block.text.strip() or None
+        if description and len(description) > MAX_VISUAL_DESCRIPTION_LENGTH:
+            description = description[:MAX_VISUAL_DESCRIPTION_LENGTH].rstrip() + "..."
+        visuals.append(
+            {
+                "visual_id": block.id,
+                "block_type": block.block_type.value,
+                "section": current_section,
+                "page_number": _block_page_number(block),
+                "bbox": block.bbox,
+                "description": description,
+                "renderable": _block_page_number(block) is not None and block.bbox is not None,
+            }
+        )
+    return visuals
 
 
 def _is_table_block(document: Document, block: Block) -> bool:
@@ -551,6 +747,42 @@ def _source_metadata(document: Document, blocks: list[Block]) -> dict[str, Any]:
         metadata["sheet_name"] = sheets[0]
         metadata["sheet_names"] = sheets
     return metadata
+
+
+def _visual_nearby_text(
+    document: Document,
+    page_number: int,
+    selected_block: Block | None,
+) -> str:
+    page_blocks = [
+        block
+        for block in document.blocks
+        if _block_page_number(block) == page_number and block is not selected_block
+    ]
+    parts = []
+    for block in page_blocks:
+        text = block.text.strip()
+        if not text or block.block_type in (BlockType.FIGURE, BlockType.IMAGE):
+            continue
+        parts.append(text)
+    nearby_text = "\n\n".join(parts).strip()
+    if not nearby_text:
+        return "not available"
+    if len(nearby_text) > MAX_VISUAL_CONTEXT_LENGTH:
+        return nearby_text[:MAX_VISUAL_CONTEXT_LENGTH].rstrip() + "..."
+    return nearby_text
+
+
+def _limit_image_pixels(image: Image.Image, max_pixels: int) -> Image.Image:
+    pixels = image.width * image.height
+    if pixels <= max_pixels:
+        return image
+    scale = math.sqrt(max_pixels / pixels)
+    size = (
+        max(1, round(image.width * scale)),
+        max(1, round(image.height * scale)),
+    )
+    return image.resize(size, Image.Resampling.LANCZOS)
 
 
 def _integer_metadata_values(blocks: list[Block], key: str) -> list[int]:

@@ -11,6 +11,7 @@ from file_agent.agent_tools import (
 )
 from file_agent.chunking import Chunk
 from file_agent.document import Document
+from file_agent.document_assets import DocumentAssetStore, InMemoryDocumentAssetStore
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.base import LLMClient, ToolCallingLLMClient
 from file_agent.rag_core import (
@@ -28,6 +29,7 @@ from file_agent.rag_graph import (
 )
 from file_agent.retrieval import Retriever, SearchResult
 from file_agent.telemetry import tracer
+from file_agent.vlm.base import VLMClient
 
 RAGMode = Literal["standard", "tool_agent"]
 DEFAULT_RAG_MODE: RAGMode = "standard"
@@ -97,6 +99,8 @@ def answer_indexed_documents(
     max_tool_rounds: int | None = None,
     thread_id: str | None = None,
     max_history_turns: int | None = None,
+    vlm_client: VLMClient | None = None,
+    asset_store: DocumentAssetStore | None = None,
 ) -> RAGResponse:
     with tracer.start_as_current_span("file_agent.answer_indexed_documents") as span:
         span.set_attribute("file_agent.question", question)
@@ -120,6 +124,8 @@ def answer_indexed_documents(
                 max_tool_rounds=max_tool_rounds,
                 thread_id=thread_id,
                 max_history_turns=max_history_turns,
+                vlm_client=vlm_client,
+                asset_store=asset_store,
             )
         else:
             state = qa_graph.invoke(
@@ -163,6 +169,8 @@ def answer_with_results(
     max_tool_rounds: int | None = None,
     thread_id: str | None = None,
     max_history_turns: int | None = None,
+    vlm_client: VLMClient | None = None,
+    asset_store: DocumentAssetStore | None = None,
 ) -> RAGResponse:
     with tracer.start_as_current_span("file_agent.answer_with_results") as span:
         span.set_attribute("file_agent.question", question)
@@ -194,6 +202,8 @@ def answer_with_results(
                 max_tool_rounds=max_tool_rounds,
                 thread_id=thread_id,
                 max_history_turns=max_history_turns,
+                vlm_client=vlm_client,
+                asset_store=asset_store,
             )
         else:
             state = qa_graph.invoke(
@@ -234,10 +244,16 @@ def answer_files(
     max_tool_rounds: int | None = None,
     thread_id: str | None = None,
     max_history_turns: int | None = None,
+    vlm_client: VLMClient | None = None,
+    asset_store: DocumentAssetStore | None = None,
 ) -> RAGResponse:
+    paths = list(file_paths)
     active_retriever = retriever or LanceDBRetriever()
+    active_asset_store = asset_store
+    if active_asset_store is None and resolve_rag_mode(mode) == "tool_agent":
+        active_asset_store = InMemoryDocumentAssetStore.from_files(paths)
     documents, chunks = ingest_files(
-        file_paths=file_paths,
+        file_paths=paths,
         retriever=active_retriever,
         max_chars=max_chars,
         overlap=overlap,
@@ -254,6 +270,8 @@ def answer_files(
         max_tool_rounds=max_tool_rounds,
         thread_id=thread_id,
         max_history_turns=max_history_turns,
+        vlm_client=vlm_client,
+        asset_store=active_asset_store,
     )
 
 
@@ -269,6 +287,8 @@ def answer_documents(
     max_tool_rounds: int | None = None,
     thread_id: str | None = None,
     max_history_turns: int | None = None,
+    vlm_client: VLMClient | None = None,
+    asset_store: DocumentAssetStore | None = None,
 ) -> RAGResponse:
     active_retriever = retriever or LanceDBRetriever()
     chunks = ingest_documents(
@@ -289,6 +309,8 @@ def answer_documents(
         max_tool_rounds=max_tool_rounds,
         thread_id=thread_id,
         max_history_turns=max_history_turns,
+        vlm_client=vlm_client,
+        asset_store=asset_store,
     )
 
 
@@ -341,6 +363,8 @@ def _answer_with_tool_agent(
     max_tool_rounds: int | None,
     thread_id: str | None,
     max_history_turns: int | None,
+    vlm_client: VLMClient | None,
+    asset_store: DocumentAssetStore | None,
 ) -> RAGResponse:
     if not isinstance(llm_client, ToolCallingLLMClient):
         raise TypeError("The configured LLM client does not support native tool calling")
@@ -362,6 +386,8 @@ def _answer_with_tool_agent(
             documents=documents,
             max_tool_rounds=resolve_max_tool_rounds(max_tool_rounds),
             max_history_turns=resolve_history_turns(max_history_turns),
+            vlm_client=vlm_client,
+            asset_store=asset_store,
         ),
     )
     return state["response"]

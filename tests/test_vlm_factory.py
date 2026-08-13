@@ -33,6 +33,24 @@ def test_factory_builds_openai_client(monkeypatch):
     assert isinstance(client, OpenAICompatibleVLMClient)
 
 
+def test_factory_configures_openai_visual_analysis(monkeypatch):
+    monkeypatch.setenv("VLM_BACKEND", "openai")
+    monkeypatch.setenv("VLM_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("VLM_MODEL", "Qwen/Qwen3.5-27B")
+    monkeypatch.setenv("VLM_MAX_TOKENS", "1200")
+    monkeypatch.setenv("VLM_TEMPERATURE", "0.3")
+    monkeypatch.setenv("VLM_TIMEOUT_SECONDS", "180")
+    monkeypatch.setenv("VLM_ENABLE_THINKING", "false")
+
+    client = create_vlm_client()
+
+    assert isinstance(client, OpenAICompatibleVLMClient)
+    assert client.model == "Qwen/Qwen3.5-27B"
+    assert client.max_tokens == 1200
+    assert client.temperature == 0.3
+    assert client.enable_thinking is False
+
+
 def test_factory_openai_requires_configuration(monkeypatch):
     monkeypatch.setenv("VLM_BACKEND", "openai")
     monkeypatch.delenv("VLM_BASE_URL", raising=False)
@@ -45,6 +63,20 @@ def test_factory_rejects_unknown_backend(monkeypatch):
     monkeypatch.setenv("VLM_BACKEND", "quantum")
 
     assert create_vlm_client() is None
+
+
+def test_factory_rejects_invalid_thinking_setting(monkeypatch):
+    monkeypatch.setenv("VLM_BACKEND", "openai")
+    monkeypatch.setenv("VLM_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("VLM_MODEL", "Qwen/Qwen3.5-27B")
+    monkeypatch.setenv("VLM_ENABLE_THINKING", "sometimes")
+
+    try:
+        create_vlm_client()
+    except ValueError as exc:
+        assert "VLM_ENABLE_THINKING must be a boolean" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("invalid boolean setting must be rejected")
 
 
 class CountingVLM(VLMClient):

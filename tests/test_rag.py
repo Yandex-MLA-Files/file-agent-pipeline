@@ -1,7 +1,11 @@
+import fitz
 import pytest
 from langchain_core.messages import AIMessage
+from PIL import Image
 
 from file_agent.chunking import Chunk
+from file_agent.document import Block, BlockType, Document
+from file_agent.document_assets import InMemoryDocumentAssetStore
 from file_agent.rag import (
     answer_documents,
     answer_files,
@@ -12,6 +16,7 @@ from file_agent.rag import (
     resolve_rag_mode,
 )
 from file_agent.retrieval import SearchResult
+from file_agent.vlm.base import VLMClient
 
 
 class DummyLLM:
@@ -54,6 +59,15 @@ class FakeRetriever:
 
     def clear(self):
         self.chunks = []
+
+
+class StubVLM(VLMClient):
+    def __init__(self):
+        self.calls = 0
+
+    def describe_image(self, image: Image.Image, prompt: str) -> str:
+        self.calls += 1
+        return "The visual shows an increase."
 
 
 def test_answer_files_runs_full_rag_pipeline(tmp_path):
@@ -205,6 +219,68 @@ def test_answer_indexed_documents_can_use_tool_agent_mode():
     assert response.answer == "Tool agent answer"
     assert response.search_queries == ["tool context"]
     assert llm_client.responses == []
+
+
+def test_answer_indexed_documents_passes_visual_runtime_dependencies():
+    pdf = fitz.open()
+    page = pdf.new_page(width=200, height=200)
+    page.draw_rect(fitz.Rect(20, 20, 180, 180), fill=(0, 0, 1))
+    pdf_bytes = pdf.tobytes()
+    pdf.close()
+
+    document = Document(
+        file_name="chart.pdf",
+        file_type="pdf",
+        blocks=[
+            Block(
+                id="chart-1",
+                text="",
+                type="figure",
+                block_type=BlockType.FIGURE,
+                page_number=1,
+                bbox=(20, 20, 180, 180),
+            )
+        ],
+    )
+    asset_store = InMemoryDocumentAssetStore()
+    asset_store.put("chart.pdf", pdf_bytes)
+    vlm_client = StubVLM()
+    llm_client = ToolSequenceLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "analyze_document_visual",
+                        "args": {
+                            "source_file": "chart.pdf",
+                            "visual_id": "chart-1",
+                            "question": "What trend is shown?",
+                        },
+                        "id": "visual-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The chart shows an increase [chart.pdf, page 1]."),
+        ]
+    )
+
+    response = answer_indexed_documents(
+        question="What trend is shown?",
+        llm_client=llm_client,
+        retriever=FakeRetriever(),
+        documents_count=1,
+        chunks_count=1,
+        documents=[document],
+        mode="tool_agent",
+        vlm_client=vlm_client,
+        asset_store=asset_store,
+    )
+
+    assert response.sources[0].chunk.metadata["visual_id"] == "chart-1"
+    assert response.tool_calls[0]["name"] == "analyze_document_visual"
+    assert vlm_client.calls == 1
 
 
 def test_rag_mode_and_tool_round_limit_can_come_from_environment(monkeypatch):

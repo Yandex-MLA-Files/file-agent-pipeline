@@ -13,6 +13,7 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 load_dotenv(PROJECT_ROOT / ".env")
 
+from file_agent.document_assets import InMemoryDocumentAssetStore
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.factory import create_llm_client
 from file_agent.rag import (
@@ -22,6 +23,7 @@ from file_agent.rag import (
     resolve_rag_mode,
 )
 from file_agent.telemetry import configure_telemetry, resume_span, span_identity, tracer
+from file_agent.vlm.factory import create_vlm_client
 
 configure_telemetry()
 
@@ -34,6 +36,8 @@ RETRIEVAL_STATE_KEYS = (
     "indexed_chunks",
     "indexed_text",
     "lancedb_retriever",
+    "document_asset_store",
+    "vlm_client",
     "ingest_span",
 )
 CHAT_THREAD_KEY = "chat_thread_id"
@@ -69,6 +73,9 @@ def _clear_retrieval_state() -> bool:
     retriever = st.session_state.get("lancedb_retriever")
     if retriever is not None:
         retriever.clear()
+    asset_store = st.session_state.get("document_asset_store")
+    if asset_store is not None:
+        asset_store.clear()
 
     for key in RETRIEVAL_STATE_KEYS:
         st.session_state.pop(key, None)
@@ -124,26 +131,38 @@ if not uploaded_files:
 
 files_fingerprint = _uploaded_files_fingerprint(uploaded_files)
 
-if st.session_state.get("indexed_files_fingerprint") != files_fingerprint:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        file_paths: list[Path] = []
-        for uploaded_file in uploaded_files:
-            file_path = Path(temp_dir) / Path(uploaded_file.name).name
-            file_path.write_bytes(uploaded_file.getbuffer())
-            file_paths.append(file_path)
+if (
+    st.session_state.get("indexed_files_fingerprint") != files_fingerprint
+    or "document_asset_store" not in st.session_state
+    or "vlm_client" not in st.session_state
+):
+    try:
+        asset_store = InMemoryDocumentAssetStore()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_paths: list[Path] = []
+            for uploaded_file in uploaded_files:
+                file_name = Path(uploaded_file.name).name
+                contents = uploaded_file.getvalue()
+                asset_store.put(file_name, contents)
+                file_path = Path(temp_dir) / file_name
+                file_path.write_bytes(contents)
+                file_paths.append(file_path)
 
-        try:
             with tracer.start_as_current_span("file_agent.ingest_files") as ingest_span:
                 retriever = LanceDBRetriever()
                 documents, chunks = ingest_files(file_paths, retriever)
                 ingest_span_identity = span_identity(ingest_span)
-        except Exception as exc:
-            st.error(f"Could not parse or index uploaded files: {exc}")
-            st.stop()
+        vlm_client = create_vlm_client() if rag_mode == "tool_agent" else None
+    except Exception as exc:
+        st.error(f"Could not parse or index uploaded files: {exc}")
+        st.stop()
 
     previous_retriever = st.session_state.get("lancedb_retriever")
     if previous_retriever is not None:
         previous_retriever.clear()
+    previous_asset_store = st.session_state.get("document_asset_store")
+    if previous_asset_store is not None:
+        previous_asset_store.clear()
 
     st.session_state["indexed_files_fingerprint"] = files_fingerprint
     st.session_state["indexed_documents"] = documents
@@ -152,6 +171,8 @@ if st.session_state.get("indexed_files_fingerprint") != files_fingerprint:
         block.text for document in documents for block in document.blocks
     )
     st.session_state["lancedb_retriever"] = retriever
+    st.session_state["document_asset_store"] = asset_store
+    st.session_state["vlm_client"] = vlm_client
     st.session_state["ingest_span"] = ingest_span_identity
     _start_new_chat()
 
@@ -159,6 +180,8 @@ documents = st.session_state["indexed_documents"]
 chunks = st.session_state["indexed_chunks"]
 extracted_text = st.session_state["indexed_text"]
 retriever = st.session_state["lancedb_retriever"]
+asset_store = st.session_state["document_asset_store"]
+vlm_client = st.session_state["vlm_client"]
 
 summary_column, reset_column = st.columns([4, 1])
 with summary_column:
@@ -243,6 +266,8 @@ if query:
                         documents=documents,
                         mode=rag_mode,
                         thread_id=st.session_state[CHAT_THREAD_KEY],
+                        vlm_client=vlm_client,
+                        asset_store=asset_store,
                     )
                 else:
                     results = retriever.search(

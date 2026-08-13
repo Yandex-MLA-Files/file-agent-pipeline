@@ -1,8 +1,10 @@
 import json
 
+import fitz
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from PIL import Image
 
 from file_agent.agent_tools import (
     DOCUMENT_TOOLS,
@@ -11,8 +13,10 @@ from file_agent.agent_tools import (
 )
 from file_agent.chunking import Chunk
 from file_agent.document import Block, BlockType, Document
+from file_agent.document_assets import InMemoryDocumentAssetStore
 from file_agent.rag_graph import build_tool_agent_graph
 from file_agent.retrieval import SearchResult
+from file_agent.vlm.base import VLMClient
 
 
 class FakeToolCallingLLM:
@@ -91,7 +95,14 @@ def make_search_result() -> SearchResult:
     )
 
 
-def invoke_tool_agent(llm_client, retriever, max_tool_rounds=4, documents=None):
+def invoke_tool_agent(
+    llm_client,
+    retriever,
+    max_tool_rounds=4,
+    documents=None,
+    vlm_client=None,
+    asset_store=None,
+):
     return build_tool_agent_graph().invoke(
         {
             "question": "When is the deadline?",
@@ -103,6 +114,8 @@ def invoke_tool_agent(llm_client, retriever, max_tool_rounds=4, documents=None):
             retriever=retriever,
             documents=documents or [make_document()],
             max_tool_rounds=max_tool_rounds,
+            vlm_client=vlm_client,
+            asset_store=asset_store,
         ),
     )
 
@@ -124,6 +137,18 @@ def test_search_tool_exposes_filter_schema():
     schema = search_documents.tool_call_schema.model_json_schema()
 
     assert set(schema["properties"]) == {"query", "top_k", "source_file"}
+
+
+def test_visual_tool_does_not_expose_paths_or_bounding_boxes():
+    visual_tool = next(tool for tool in DOCUMENT_TOOLS if tool.name == "analyze_document_visual")
+    schema = visual_tool.tool_call_schema.model_json_schema()
+
+    assert set(schema["properties"]) == {
+        "source_file",
+        "question",
+        "visual_id",
+        "page_number",
+    }
 
 
 def test_tool_agent_searches_documents_and_returns_sources():
@@ -573,6 +598,193 @@ def test_tool_agent_can_read_table_rows_with_pagination():
     assert payload["rows"] == ["A\t1", "B\t2"]
     assert payload["next_offset"] == 3
     assert state["response"].sources[0].chunk.metadata["table_id"] == "sheet-1"
+
+
+class RecordingVLM(VLMClient):
+    def __init__(self, answer="Revenue rises from Q1 to Q2."):
+        self.answer = answer
+        self.calls = []
+
+    def describe_image(self, image: Image.Image, prompt: str) -> str:
+        self.calls.append({"size": image.size, "prompt": prompt})
+        return self.answer
+
+
+def make_visual_pdf() -> tuple[bytes, Document]:
+    pdf = fitz.open()
+    page = pdf.new_page(width=400, height=300)
+    page.insert_text((30, 30), "Quarterly revenue")
+    page.draw_rect(fitz.Rect(80, 80, 300, 230), fill=(0, 0, 1))
+    contents = pdf.tobytes()
+    pdf.close()
+
+    document = Document(
+        file_name="report.pdf",
+        file_type="pdf",
+        blocks=[
+            Block(
+                id="heading-revenue",
+                text="Revenue",
+                type="heading",
+                metadata={"hierarchy_level": 1},
+                block_type=BlockType.HEADING,
+                page_number=1,
+            ),
+            Block(
+                id="text-revenue",
+                text="Quarterly revenue chart for 2026.",
+                type="text",
+                block_type=BlockType.TEXT,
+                page_number=1,
+            ),
+            Block(
+                id="visual-revenue",
+                text="",
+                type="figure",
+                block_type=BlockType.FIGURE,
+                page_number=1,
+                bbox=(80.0, 80.0, 300.0, 230.0),
+                vlm_description="A bar chart with quarterly revenue.",
+            ),
+        ],
+    )
+    document.build_table_of_contents()
+    return contents, document
+
+
+def test_tool_agent_discovers_and_analyzes_pdf_visual():
+    pdf_bytes, document = make_visual_pdf()
+    asset_store = InMemoryDocumentAssetStore()
+    asset_store.put(document.file_name, pdf_bytes)
+    vlm_client = RecordingVLM()
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_document_outline",
+                        "args": {"source_file": "report.pdf"},
+                        "id": "outline-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "analyze_document_visual",
+                        "args": {
+                            "source_file": "report.pdf",
+                            "visual_id": "visual-revenue",
+                            "question": "How did revenue change?",
+                        },
+                        "id": "visual-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Revenue rises from Q1 to Q2 [report.pdf, page 1]."),
+        ]
+    )
+
+    state = invoke_tool_agent(
+        llm_client,
+        FakeRetriever(),
+        documents=[document],
+        vlm_client=vlm_client,
+        asset_store=asset_store,
+    )
+
+    tool_messages = tool_messages_seen_by_model(llm_client)
+    outline = json.loads(str(tool_messages[0].content))
+    analysis = json.loads(str(tool_messages[1].content))
+    assert outline["visuals"][0]["visual_id"] == "visual-revenue"
+    assert outline["visuals"][0]["description"] == "A bar chart with quarterly revenue."
+    assert analysis["analysis"] == "Revenue rises from Q1 to Q2."
+    assert analysis["page_number"] == 1
+    assert analysis["visual_id"] == "visual-revenue"
+    assert vlm_client.calls[0]["size"] == (488, 348)
+    assert "How did revenue change?" in vlm_client.calls[0]["prompt"]
+    assert "Quarterly revenue chart for 2026." in vlm_client.calls[0]["prompt"]
+    assert state["response"].sources[0].chunk.id == "visual:report.pdf:visual-revenue"
+    assert state["response"].sources[0].chunk.metadata["evidence_type"] == "visual_analysis"
+
+
+def test_visual_tool_can_analyze_full_pdf_page_as_fallback():
+    pdf_bytes, document = make_visual_pdf()
+    asset_store = InMemoryDocumentAssetStore()
+    asset_store.put(document.file_name, pdf_bytes)
+    vlm_client = RecordingVLM("The page contains a blue chart.")
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "analyze_document_visual",
+                        "args": {
+                            "source_file": "report.pdf",
+                            "page_number": 1,
+                            "question": "What is visible on this page?",
+                        },
+                        "id": "page-visual-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The page contains a blue chart [report.pdf, page 1]."),
+        ]
+    )
+
+    state = invoke_tool_agent(
+        llm_client,
+        FakeRetriever(),
+        documents=[document],
+        vlm_client=vlm_client,
+        asset_store=asset_store,
+    )
+
+    payload = json.loads(str(tool_messages_seen_by_model(llm_client)[0].content))
+    assert payload["visual_id"] is None
+    assert payload["page_number"] == 1
+    assert vlm_client.calls[0]["size"] == (800, 600)
+    assert state["response"].sources[0].chunk.id == "visual:report.pdf:page-1"
+
+
+def test_visual_tool_returns_configuration_error_to_agent():
+    _, document = make_visual_pdf()
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "analyze_document_visual",
+                        "args": {
+                            "source_file": "report.pdf",
+                            "page_number": 1,
+                            "question": "Analyze the chart",
+                        },
+                        "id": "visual-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Visual analysis is unavailable."),
+        ]
+    )
+
+    state = invoke_tool_agent(
+        llm_client,
+        FakeRetriever(),
+        documents=[document],
+    )
+
+    tool_message = tool_messages_seen_by_model(llm_client)[0]
+    assert "no VLM backend is configured" in str(tool_message.content)
+    assert state["response"].sources == []
 
 
 def invoke_persistent_turn(

@@ -39,6 +39,8 @@ filesystem paths. Its read-only tools can:
 - read a section, including its nested subsections;
 - read a PDF/DOCX page, PPTX slide, or XLSX sheet;
 - read table rows in bounded pages.
+- discover figures in a PDF and analyze a selected figure crop or full page with
+  the configured VLM.
 
 Long sections and locations return `next_offset`; tables use a bounded row
 `offset` and `limit`. Direct reads are preserved as answer sources just like
@@ -62,6 +64,34 @@ re-indexing those documents. Uploading a different file set automatically starts
 a new chat and performs ingestion for the new set. The current checkpointer is
 process-local; it can later be replaced by a SQLite or PostgreSQL checkpointer
 without changing the graph nodes.
+
+For on-demand visual questions, the tool agent uses
+`analyze_document_visual`. The tool accepts only an indexed `source_file` and
+either a `visual_id` returned by `get_document_outline` or a PDF `page_number`;
+it cannot access arbitrary paths, URLs, or bounding boxes. Original uploaded
+file bytes stay in a process-local asset store in the Streamlit session and are
+passed through LangGraph runtime context, never through graph state or chat
+history. The selected PDF region is sent to the VLM, and only the bounded text
+analysis and source coordinates are returned as a tool observation.
+
+The existing ingestion-time figure descriptions remain useful for retrieval and
+visual discovery. The on-demand tool performs a fresh, question-specific visual
+analysis before the agent makes claims about a chart or diagram. Visual tool
+analysis currently supports PDF files; other document tools and standard text
+RAG behavior are unchanged.
+
+The LLM and VLM can point at the same multimodal vLLM deployment. For example:
+
+```text
+LLM_BACKEND=local
+LOCAL_LLM_BASE_URL=http://localhost:8000/v1
+LOCAL_LLM_MODEL=Qwen/Qwen3.5-27B
+
+VLM_BACKEND=openai
+VLM_BASE_URL=http://localhost:8000/v1
+VLM_MODEL=Qwen/Qwen3.5-27B
+VLM_ENABLE_THINKING=false
+```
 
 `tool_agent` requires an OpenAI-compatible model and endpoint with native tool
 calling support. The standard mode continues to work with text-generation-only

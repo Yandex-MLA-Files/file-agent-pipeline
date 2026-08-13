@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 
 from .base import VLMClient
@@ -9,6 +10,9 @@ from .smolvlm import SmolVLMClient
 logger = logging.getLogger(__name__)
 
 DEFAULT_VLM_BACKEND = "off"
+DEFAULT_VLM_MAX_TOKENS = 1000
+DEFAULT_VLM_TEMPERATURE = 0.2
+DEFAULT_VLM_TIMEOUT_SECONDS = 120.0
 
 
 def create_vlm_client() -> VLMClient | None:
@@ -43,7 +47,55 @@ def create_vlm_client() -> VLMClient | None:
             base_url=base_url,
             model=model,
             api_key=os.getenv("VLM_API_KEY", "dummy"),
+            max_tokens=_get_positive_int("VLM_MAX_TOKENS", DEFAULT_VLM_MAX_TOKENS),
+            temperature=_get_float("VLM_TEMPERATURE", DEFAULT_VLM_TEMPERATURE),
+            timeout_seconds=_get_positive_float(
+                "VLM_TIMEOUT_SECONDS",
+                DEFAULT_VLM_TIMEOUT_SECONDS,
+            ),
+            enable_thinking=_get_optional_bool("VLM_ENABLE_THINKING"),
         )
 
     logger.warning("Unknown VLM_BACKEND=%r; VLM disabled.", backend)
     return None
+
+
+def _get_positive_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name, str(default))
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be greater than zero")
+    return value
+
+
+def _get_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name, str(default))
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number")
+    return value
+
+
+def _get_positive_float(name: str, default: float) -> float:
+    value = _get_float(name, default)
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than zero")
+    return value
+
+
+def _get_optional_bool(name: str) -> bool | None:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return None
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")

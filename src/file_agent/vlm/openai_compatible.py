@@ -15,10 +15,33 @@ logger = logging.getLogger(__name__)
 class OpenAICompatibleVLMClient(VLMClient):
     """VLM client for any OpenAI-compatible vision endpoint (Ollama, vLLM, ...)."""
 
-    def __init__(self, base_url: str, model: str, api_key: str = "dummy", max_tokens: int = 500):
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
-        self.model = model
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: str = "dummy",
+        max_tokens: int = 1000,
+        temperature: float = 0.2,
+        timeout_seconds: float = 120,
+        enable_thinking: bool | None = None,
+    ) -> None:
+        self.client = OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout_seconds,
+            max_retries=0,
+        )
+        self.model = model.strip()
         self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.enable_thinking = enable_thinking
+
+        if not self.model:
+            raise ValueError("model is required")
+        if self.max_tokens < 1:
+            raise ValueError("max_tokens must be greater than zero")
+        if self.temperature < 0:
+            raise ValueError("temperature must be non-negative")
 
     def describe_image(self, image: Image.Image, prompt: str) -> str:
         with tracer.start_as_current_span("file_agent.vlm_describe_image") as span:
@@ -26,9 +49,9 @@ class OpenAICompatibleVLMClient(VLMClient):
 
             try:
                 img_base64 = self._encode_image(image)
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
+                request = {
+                    "model": self.model,
+                    "messages": [
                         {
                             "role": "user",
                             "content": [
@@ -40,9 +63,22 @@ class OpenAICompatibleVLMClient(VLMClient):
                             ],
                         }
                     ],
-                    max_tokens=self.max_tokens,
-                )
+                    "max_tokens": self.max_tokens,
+                    "temperature": self.temperature,
+                }
+                if self.enable_thinking is not None:
+                    request["extra_body"] = {
+                        "chat_template_kwargs": {
+                            "enable_thinking": self.enable_thinking,
+                        }
+                    }
+
+                response = self.client.chat.completions.create(**request)
+                if not response.choices:
+                    raise ValueError("VLM returned an empty response")
                 description = (response.choices[0].message.content or "").strip()
+                if not description:
+                    raise ValueError("VLM returned an empty response")
 
                 span.set_attribute("file_agent.response_length", len(description))
                 usage = getattr(response, "usage", None)
