@@ -28,11 +28,12 @@ class FakeToolCallingLLM:
     def generate(self, prompt: str) -> str:
         raise AssertionError("generate must not be used by the tool agent")
 
-    def chat_with_tools(self, messages, tools):
+    def chat_with_tools(self, messages, tools, tool_choice="auto"):
         self.calls.append(
             {
                 "messages": list(messages),
                 "tool_names": [tool.name for tool in tools],
+                "tool_choice": tool_choice,
             }
         )
         if not self.responses:
@@ -232,6 +233,36 @@ def test_tool_agent_can_require_a_document_evidence_tool():
             FakeRetriever(),
             require_evidence_tool=True,
         )
+
+    assert llm_client.calls[0]["tool_choice"] == "required"
+
+
+def test_required_document_evidence_returns_to_auto_after_a_tool_result():
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "project deadline"},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The project deadline is Friday."),
+        ]
+    )
+
+    state = invoke_tool_agent(
+        llm_client,
+        FakeRetriever([make_search_result()]),
+        require_evidence_tool=True,
+    )
+
+    assert state["response"].answer == "The project deadline is Friday."
+    assert [call["tool_choice"] for call in llm_client.calls] == ["required", "auto"]
 
 
 def test_required_evidence_allows_a_successful_search_with_no_matches():

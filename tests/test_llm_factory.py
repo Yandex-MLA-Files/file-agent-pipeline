@@ -86,6 +86,35 @@ def test_factory_uses_configured_local_api_key(monkeypatch):
     assert client.client.kwargs["api_key"] == "local-api-key"
 
 
+def test_factory_configures_local_timeout_and_retries(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "local")
+    monkeypatch.setenv("LOCAL_LLM_TIMEOUT_SECONDS", "180")
+    monkeypatch.setenv("LOCAL_LLM_MAX_RETRIES", "1")
+
+    client = create_llm_client(load_env=False)
+
+    assert client.client.kwargs["timeout"] == 180.0
+    assert client.client.kwargs["max_retries"] == 1
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-a-number", "nan", "inf"])
+def test_factory_rejects_invalid_local_timeout(monkeypatch, value):
+    monkeypatch.setenv("LLM_BACKEND", "local")
+    monkeypatch.setenv("LOCAL_LLM_TIMEOUT_SECONDS", value)
+
+    with pytest.raises(ValueError, match="LOCAL_LLM_TIMEOUT_SECONDS"):
+        create_llm_client(load_env=False)
+
+
+@pytest.mark.parametrize("value", ["-1", "1.5", "not-a-number"])
+def test_factory_rejects_invalid_local_max_retries(monkeypatch, value):
+    monkeypatch.setenv("LLM_BACKEND", "local")
+    monkeypatch.setenv("LOCAL_LLM_MAX_RETRIES", value)
+
+    with pytest.raises(ValueError, match="LOCAL_LLM_MAX_RETRIES"):
+        create_llm_client(load_env=False)
+
+
 def test_factory_applies_explicit_generation_parameters(monkeypatch):
     monkeypatch.setenv("LLM_BACKEND", "local")
 

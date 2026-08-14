@@ -8,7 +8,7 @@ from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from openai import OpenAI
 
-from file_agent.llm.base import EmptyLLMResponseError
+from file_agent.llm.base import EmptyLLMResponseError, ToolChoice
 from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,13 @@ class OpenAILLMClient:
         self,
         messages: Sequence[BaseMessage],
         tools: Sequence[BaseTool],
+        tool_choice: ToolChoice = "auto",
     ) -> AIMessage:
+        if tool_choice not in {"auto", "required"}:
+            raise ValueError("tool_choice must be 'auto' or 'required'")
+        if tool_choice == "required" and not tools:
+            raise ValueError("tool_choice='required' needs at least one tool")
+
         request = {
             "model": self.model,
             "messages": convert_to_openai_messages(messages),
@@ -125,7 +131,7 @@ class OpenAILLMClient:
         self._add_thinking_setting(request)
         if tools:
             request["tools"] = [convert_to_openai_tool(tool) for tool in tools]
-            request["tool_choice"] = "auto"
+            request["tool_choice"] = tool_choice
 
         with tracer.start_as_current_span("file_agent.llm_generate") as span:
             span.set_attribute("file_agent.model", self.model)

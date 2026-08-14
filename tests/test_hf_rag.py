@@ -329,7 +329,7 @@ def test_process_qa_record_exports_direct_tool_evidence(tmp_path):
         def generate(self, prompt: str) -> str:
             raise AssertionError("tool-agent mode must not call generate")
 
-        def chat_with_tools(self, messages, tools):
+        def chat_with_tools(self, messages, tools, tool_choice="auto"):
             self.request_count += 1
             if self.request_count == 1:
                 return AIMessage(

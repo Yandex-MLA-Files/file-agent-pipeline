@@ -35,7 +35,7 @@ class ToolSequenceLLM:
     def generate(self, prompt: str) -> str:
         raise AssertionError("generate must not be used in tool_agent mode")
 
-    def chat_with_tools(self, messages, tools):
+    def chat_with_tools(self, messages, tools, tool_choice="auto"):
         if not self.responses:
             raise AssertionError("Unexpected tool-calling LLM invocation")
         return self.responses.pop(0)

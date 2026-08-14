@@ -29,7 +29,7 @@ from file_agent.agent_tools import (
 )
 from file_agent.chunking import Chunk
 from file_agent.document import Document
-from file_agent.llm.base import EmptyLLMResponseError, LLMClient
+from file_agent.llm.base import EmptyLLMResponseError, LLMClient, ToolChoice
 from file_agent.qa import answer_question_with_context
 from file_agent.rag_core import (
     RAGResponse,
@@ -300,10 +300,19 @@ def tool_agent_model_node(
         else:
             messages.insert(0, SystemMessage(content=TOOL_LIMIT_MESSAGE))
 
+    has_document_observation = bool(state.get("sources") or state.get("search_queries"))
+    tool_choice: ToolChoice = (
+        "required"
+        if runtime.context.require_evidence_tool
+        and not has_document_observation
+        and available_tools
+        else "auto"
+    )
     try:
         response = runtime.context.llm_client.chat_with_tools(
             messages=messages,
             tools=available_tools,
+            tool_choice=tool_choice,
         )
     except EmptyLLMResponseError:
         response = _recover_empty_tool_agent_response(
@@ -325,6 +334,7 @@ def _recover_empty_tool_agent_response(
 ) -> AIMessage:
     has_document_observation = bool(state.get("sources") or state.get("search_queries"))
     retry_tools = [] if has_document_observation else available_tools
+    retry_tool_choice: ToolChoice = "auto" if has_document_observation else "required"
     action = (
         "Return the final answer now using the document evidence already provided. "
         "If the evidence is insufficient, explicitly say so. Do not call another tool."
@@ -351,6 +361,7 @@ def _recover_empty_tool_agent_response(
             response = runtime.context.llm_client.chat_with_tools(
                 messages=retry_messages,
                 tools=retry_tools,
+                tool_choice=retry_tool_choice,
             )
             if not retry_tools and response.tool_calls:
                 raise ValueError("LLM requested a tool while recovering a final response")

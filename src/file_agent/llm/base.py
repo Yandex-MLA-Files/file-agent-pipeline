@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
@@ -7,6 +7,9 @@ from langchain_core.tools import BaseTool
 
 class EmptyLLMResponseError(ValueError):
     """Raised when an LLM request succeeds but returns no usable assistant message."""
+
+
+ToolChoice = Literal["auto", "required"]
 
 
 class LLMClient(Protocol):
@@ -20,6 +23,7 @@ class ToolCallingLLMClient(LLMClient, Protocol):
         self,
         messages: Sequence[BaseMessage],
         tools: Sequence[BaseTool],
+        tool_choice: ToolChoice = "auto",
     ) -> AIMessage:
         """Return an assistant message that may contain native tool calls."""
         raise NotImplementedError

@@ -188,6 +188,40 @@ def test_chat_with_tools_can_force_a_final_response_without_tools():
     assert "tool_choice" not in request
 
 
+def test_chat_with_tools_can_require_a_tool_call():
+    tool_call = SimpleNamespace(
+        id="call-1",
+        function=SimpleNamespace(
+            name="search_documents",
+            arguments='{"query":"project deadline"}',
+        ),
+    )
+    openai_client = FakeOpenAI(_chat_completion(None, tool_calls=[tool_call]))
+    client = OpenAILLMClient(client=openai_client, model="test-model")
+
+    client.chat_with_tools(
+        messages=[HumanMessage(content="Question")],
+        tools=[search_documents],
+        tool_choice="required",
+    )
+
+    assert openai_client.completions.calls[0]["tool_choice"] == "required"
+
+
+def test_chat_with_tools_rejects_required_choice_without_tools():
+    client = OpenAILLMClient(
+        client=FakeOpenAI(_chat_completion("Final answer")),
+        model="test-model",
+    )
+
+    with pytest.raises(ValueError, match="needs at least one tool"):
+        client.chat_with_tools(
+            messages=[HumanMessage(content="Question")],
+            tools=[],
+            tool_choice="required",
+        )
+
+
 @pytest.mark.parametrize("arguments", ["not-json", "[]"])
 def test_chat_with_tools_rejects_invalid_tool_arguments(arguments):
     tool_call = SimpleNamespace(

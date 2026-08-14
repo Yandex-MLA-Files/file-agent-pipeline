@@ -1,3 +1,4 @@
+import math
 import os
 from pathlib import Path
 
@@ -69,6 +70,14 @@ def _create_local_client(temperature: float, max_tokens: int) -> OpenAILLMClient
     client = _create_openai_client(
         api_key=_getenv("LOCAL_LLM_API_KEY") or LOCAL_API_KEY_PLACEHOLDER,
         base_url=_getenv("LOCAL_LLM_BASE_URL", DEFAULT_LOCAL_BASE_URL),
+        timeout_seconds=_get_positive_float(
+            "LOCAL_LLM_TIMEOUT_SECONDS",
+            DEFAULT_TIMEOUT_SECONDS,
+        ),
+        max_retries=_get_non_negative_int(
+            "LOCAL_LLM_MAX_RETRIES",
+            DEFAULT_MAX_RETRIES,
+        ),
     )
     return OpenAILLMClient(
         client=client,
@@ -83,6 +92,8 @@ def _create_openai_client(
     api_key: str,
     base_url: str | None,
     project: str | None = None,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> OpenAI:
     if not base_url:
         raise ValueError("base_url is required")
@@ -91,8 +102,8 @@ def _create_openai_client(
         api_key=api_key,
         base_url=base_url,
         project=project,
-        timeout=DEFAULT_TIMEOUT_SECONDS,
-        max_retries=DEFAULT_MAX_RETRIES,
+        timeout=timeout_seconds,
+        max_retries=max_retries,
     )
 
 
@@ -122,3 +133,29 @@ def _get_optional_bool(name: str) -> bool | None:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean")
+
+
+def _get_positive_float(name: str, default: float) -> float:
+    raw = _getenv(name)
+    if not raw:
+        return float(default)
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive number") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive number")
+    return value
+
+
+def _get_non_negative_int(name: str, default: int) -> int:
+    raw = _getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a non-negative integer") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
