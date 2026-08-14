@@ -5,6 +5,10 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 
 
+class EmptyLLMResponseError(ValueError):
+    """Raised when an LLM request succeeds but returns no usable assistant message."""
+
+
 class LLMClient(Protocol):
     def generate(self, prompt: str) -> str:
         raise NotImplementedError

@@ -14,6 +14,7 @@ from file_agent.agent_tools import (
 from file_agent.chunking import Chunk
 from file_agent.document import Block, BlockType, Document
 from file_agent.document_assets import InMemoryDocumentAssetStore
+from file_agent.llm.base import EmptyLLMResponseError
 from file_agent.rag_graph import build_tool_agent_graph
 from file_agent.retrieval import SearchResult
 from file_agent.vlm.base import VLMClient
@@ -36,7 +37,10 @@ class FakeToolCallingLLM:
         )
         if not self.responses:
             raise AssertionError("Unexpected tool-calling LLM invocation")
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 class FakeRetriever:
@@ -190,6 +194,33 @@ def test_tool_agent_searches_documents_and_returns_sources():
     assert tool_messages_seen_by_model(llm_client)
     assert state["messages"] == []
     assert llm_client.responses == []
+
+
+def test_tool_agent_recovers_an_empty_response_after_document_evidence():
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "project deadline"},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            EmptyLLMResponseError("LLM returned an empty response"),
+            AIMessage(content="The project deadline is Friday [plan.md, page 2]."),
+        ]
+    )
+
+    state = invoke_tool_agent(llm_client, FakeRetriever([make_search_result()]))
+
+    assert state["response"].answer == "The project deadline is Friday [plan.md, page 2]."
+    assert len(llm_client.calls) == 3
+    assert llm_client.calls[-1]["tool_names"] == []
+    assert "Return the final answer now" in llm_client.calls[-1]["messages"][-1].content
 
 
 def test_tool_agent_can_require_a_document_evidence_tool():

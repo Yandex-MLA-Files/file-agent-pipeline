@@ -8,6 +8,7 @@ from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from openai import OpenAI
 
+from file_agent.llm.base import EmptyLLMResponseError
 from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
@@ -70,13 +71,15 @@ class OpenAILLMClient:
             }
             self._add_thinking_setting(request)
             response = self.client.chat.completions.create(**request)
+            usage = getattr(response, "usage", None)
+            self._record_usage(usage)
 
             if not response.choices:
-                raise ValueError("LLM returned an empty response")
+                raise EmptyLLMResponseError("LLM returned an empty response")
 
             text = response.choices[0].message.content
             if not text or not text.strip():
-                raise ValueError("LLM returned an empty response")
+                raise EmptyLLMResponseError("LLM returned an empty response")
 
             text = text.strip()
             span.set_attribute("file_agent.response_length", len(text))
@@ -86,8 +89,6 @@ class OpenAILLMClient:
                 json.dumps({"role": "assistant", "content": text}),
             )
 
-            usage = getattr(response, "usage", None)
-            self._record_usage(usage)
             if usage is not None:
                 span.set_attribute("file_agent.prompt_tokens", usage.prompt_tokens)
                 span.set_attribute("file_agent.completion_tokens", usage.completion_tokens)
@@ -148,8 +149,10 @@ class OpenAILLMClient:
             )
 
             response = self.client.chat.completions.create(**request)
+            usage = getattr(response, "usage", None)
+            self._record_usage(usage)
             if not response.choices:
-                raise ValueError("LLM returned an empty response")
+                raise EmptyLLMResponseError("LLM returned an empty response")
 
             message = response.choices[0].message
             content = (message.content or "").strip()
@@ -175,7 +178,7 @@ class OpenAILLMClient:
                 )
 
             if not content and not tool_calls:
-                raise ValueError("LLM returned an empty response")
+                raise EmptyLLMResponseError("LLM returned an empty response")
 
             span.set_attribute("file_agent.response_length", len(content))
             span.set_attribute("file_agent.response", content)
@@ -189,8 +192,6 @@ class OpenAILLMClient:
                 ),
             )
 
-            usage = getattr(response, "usage", None)
-            self._record_usage(usage)
             if usage is not None:
                 span.set_attribute("file_agent.prompt_tokens", usage.prompt_tokens)
                 span.set_attribute("file_agent.completion_tokens", usage.completion_tokens)

@@ -121,6 +121,8 @@ def test_generate_raises_clear_error_for_empty_response(response):
     with pytest.raises(ValueError, match="empty response"):
         client.generate("Question")
 
+    assert client.request_count == 1
+
 
 def test_chat_with_tools_converts_messages_tools_and_tool_calls():
     tool_call = SimpleNamespace(

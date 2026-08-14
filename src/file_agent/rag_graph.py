@@ -1,3 +1,5 @@
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, TypedDict
@@ -9,6 +11,7 @@ from langchain_core.messages import (
     RemoveMessage,
     SystemMessage,
 )
+from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -26,7 +29,7 @@ from file_agent.agent_tools import (
 )
 from file_agent.chunking import Chunk
 from file_agent.document import Document
-from file_agent.llm.base import LLMClient
+from file_agent.llm.base import EmptyLLMResponseError, LLMClient
 from file_agent.qa import answer_question_with_context
 from file_agent.rag_core import (
     RAGResponse,
@@ -35,6 +38,9 @@ from file_agent.rag_core import (
 )
 from file_agent.retrieval import Retriever, SearchResult
 from file_agent.telemetry import tracer
+
+LOGGER = logging.getLogger(__name__)
+MAX_EMPTY_RESPONSE_RECOVERY_ATTEMPTS = 2
 
 
 class IngestionState(TypedDict, total=False):
@@ -294,13 +300,66 @@ def tool_agent_model_node(
         else:
             messages.insert(0, SystemMessage(content=TOOL_LIMIT_MESSAGE))
 
-    response = runtime.context.llm_client.chat_with_tools(
-        messages=messages,
-        tools=available_tools,
-    )
+    try:
+        response = runtime.context.llm_client.chat_with_tools(
+            messages=messages,
+            tools=available_tools,
+        )
+    except EmptyLLMResponseError:
+        response = _recover_empty_tool_agent_response(
+            state=state,
+            runtime=runtime,
+            messages=messages,
+            available_tools=available_tools,
+        )
     if not available_tools and response.tool_calls:
         raise ValueError("LLM requested a tool after the tool-call limit was reached")
     return {"messages": [response]}
+
+
+def _recover_empty_tool_agent_response(
+    state: ToolAgentState,
+    runtime: Runtime[ToolAgentContext],
+    messages: list[BaseMessage],
+    available_tools: Sequence[BaseTool],
+) -> AIMessage:
+    has_document_observation = bool(state.get("sources") or state.get("search_queries"))
+    retry_tools = [] if has_document_observation else available_tools
+    action = (
+        "Return the final answer now using the document evidence already provided. "
+        "If the evidence is insufficient, explicitly say so. Do not call another tool."
+        if has_document_observation
+        else "Call an available document tool before answering."
+    )
+
+    for attempt in range(1, MAX_EMPTY_RESPONSE_RECOVERY_ATTEMPTS + 1):
+        LOGGER.warning(
+            "Tool-agent LLM returned an empty response; recovery attempt %s/%s",
+            attempt,
+            MAX_EMPTY_RESPONSE_RECOVERY_ATTEMPTS,
+        )
+        retry_messages = [
+            *messages,
+            HumanMessage(
+                content=(
+                    "Your previous response was empty and could not be used. "
+                    f"{action} Return a non-empty response. Recovery attempt {attempt}."
+                )
+            ),
+        ]
+        try:
+            response = runtime.context.llm_client.chat_with_tools(
+                messages=retry_messages,
+                tools=retry_tools,
+            )
+            if not retry_tools and response.tool_calls:
+                raise ValueError("LLM requested a tool while recovering a final response")
+            return response
+        except EmptyLLMResponseError:
+            if attempt == MAX_EMPTY_RESPONSE_RECOVERY_ATTEMPTS:
+                raise
+
+    raise AssertionError("unreachable")
 
 
 def route_tool_agent(
