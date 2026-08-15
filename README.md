@@ -35,10 +35,14 @@ one source file, and navigate uploaded documents without accessing arbitrary
 filesystem paths. Its read-only tools can:
 
 - list documents and inspect their sections and tables;
+- read a complete document sequentially in bounded pages for exhaustive analysis
+  or unstructured files;
 - read the surrounding context of a previously found chunk;
 - read a section, including its nested subsections;
 - read a PDF/DOCX page, PPTX slide, or XLSX sheet;
-- read table rows in bounded pages.
+- read table rows in bounded pages;
+- calculate decimal sums, differences, ratios, averages, shares, and percentage
+  changes over values found in the documents;
 - discover figures in a PDF and analyze a selected figure crop or full page with
   the configured VLM.
 

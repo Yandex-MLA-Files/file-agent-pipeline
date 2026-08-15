@@ -2,7 +2,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Any, Literal
 
 from langchain_core.messages import ToolMessage
@@ -27,6 +27,7 @@ MAX_TOOL_CONTENT_LENGTH = 12000
 MAX_TABLE_ROWS = 50
 MAX_TABLE_ROW_LENGTH = 4000
 MAX_TABLE_ANALYSIS_RESULTS = 20
+MAX_CALCULATION_VALUES = 100
 MAX_VISUAL_QUESTION_LENGTH = 1000
 MAX_VISUAL_CONTEXT_LENGTH = 2000
 MAX_VISUAL_DESCRIPTION_LENGTH = 500
@@ -58,8 +59,14 @@ Use the available document tools before making factual claims about the files.
 Start with search_documents for topical questions. Use its source_file filter when
 the user names one document. After a search, call read_source_context when the
 returned passage is incomplete. Use list_documents and get_document_outline to
-navigate available files, then read_document_section for a specific section,
+navigate available files. Use read_document for a complete overview or an exhaustive
+question about a short or unstructured file, following next_offset when necessary.
+For structured files, prefer read_document_section for a specific section,
 read_document_location for a page, slide, or sheet, and read_table for tabular data.
+Use calculate for arithmetic over values obtained from document tools, especially
+differences, ratios, averages, shares, and percentage changes. Preserve the input
+order required by the operation. calculate is not document evidence and never
+replaces reading the source values from the documents.
 When the user asks about a chart, diagram, figure, screenshot, or other visual
 content, identify it through search_documents or the visuals returned by
 get_document_outline, then call analyze_document_visual. Prefer visual_id for a
@@ -245,6 +252,53 @@ def get_document_outline(
         },
         ensure_ascii=False,
         default=str,
+    )
+
+
+@tool
+def read_document(
+    source_file: str,
+    runtime: ToolRuntime[Any, dict],
+    offset: int = 0,
+) -> Command:
+    """Read an uploaded document sequentially in bounded text pages.
+
+    Use this for complete summaries, exhaustive extraction, or short/unstructured
+    documents without a useful outline. For a topical question, prefer
+    search_documents; for a large structured document, prefer section or location
+    reads. Continue with the returned next_offset only when more content is needed.
+
+    Args:
+        source_file: Exact file name returned by list_documents.
+        offset: Character offset returned as next_offset, or 0 for the first part.
+    """
+    document = _find_document(runtime.context.documents, source_file)
+    content, block_spans = _render_blocks_with_spans(document.blocks)
+    page = _paginate_text(content, offset)
+    page_end = page["next_offset"] or len(content)
+    page_blocks = [
+        block
+        for block, block_start, block_end in block_spans
+        if block_end > offset and block_start < page_end
+    ]
+    metadata = _source_metadata(document, page_blocks)
+    metadata.update(
+        {
+            "content_offset": offset,
+            "evidence_type": "document_read",
+        }
+    )
+    payload = {
+        "source_file": document.file_name,
+        **page,
+        "metadata": metadata,
+    }
+    return _evidence_command(
+        payload,
+        runtime,
+        evidence_id=f"document:{document.file_name}:{offset}",
+        text=page["text"],
+        metadata=metadata,
     )
 
 
@@ -489,6 +543,43 @@ def analyze_table(
 
 
 @tool
+def calculate(
+    operation: Literal[
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "average",
+        "percentage_of",
+        "percent_change",
+    ],
+    values: list[Decimal],
+) -> str:
+    """Perform deterministic decimal arithmetic over document-derived values.
+
+    This tool does not read documents and is not evidence. Read the source values
+    with a document tool first. ``subtract`` and ``divide`` calculate first versus
+    second; ``percentage_of`` calculates first / second * 100; ``percent_change``
+    calculates the change from the first (old) value to the second (new) value.
+
+    Args:
+        operation: Arithmetic operation to perform.
+        values: Decimal input values in operation order. Binary operations require
+            exactly two values; add, multiply, and average accept one or more.
+    """
+    result, unit = _calculate_values(operation, values)
+    return json.dumps(
+        {
+            "operation": operation,
+            "values": [_format_decimal(value) for value in values],
+            "result": _format_decimal(result),
+            "unit": unit,
+        },
+        ensure_ascii=False,
+    )
+
+
+@tool
 def analyze_document_visual(
     source_file: str,
     question: str,
@@ -625,10 +716,12 @@ DOCUMENT_TOOLS: list[BaseTool] = [
     read_source_context,
     list_documents,
     get_document_outline,
+    read_document,
     read_document_section,
     read_document_location,
     analyze_table,
     read_table,
+    calculate,
     analyze_document_visual,
 ]
 
@@ -832,6 +925,55 @@ def _bounded_table_analysis_results(top_n: int) -> int:
     return max(1, min(top_n, MAX_TABLE_ANALYSIS_RESULTS))
 
 
+def _calculate_values(
+    operation: str,
+    values: list[Decimal],
+) -> tuple[Decimal, str | None]:
+    if not values:
+        raise ValueError("values must contain at least one number")
+    if len(values) > MAX_CALCULATION_VALUES:
+        raise ValueError(f"values must not contain more than {MAX_CALCULATION_VALUES} numbers")
+    if any(not value.is_finite() for value in values):
+        raise ValueError("values must contain only finite numbers")
+
+    binary_operations = {"subtract", "divide", "percentage_of", "percent_change"}
+    if operation in binary_operations and len(values) != 2:
+        raise ValueError(f"{operation} requires exactly two values")
+
+    try:
+        if operation == "add":
+            result = sum(values, Decimal(0))
+        elif operation == "subtract":
+            result = values[0] - values[1]
+        elif operation == "multiply":
+            result = Decimal(1)
+            for value in values:
+                result *= value
+        elif operation == "divide":
+            if values[1] == 0:
+                raise ValueError("cannot divide by zero")
+            result = values[0] / values[1]
+        elif operation == "average":
+            result = sum(values, Decimal(0)) / Decimal(len(values))
+        elif operation == "percentage_of":
+            if values[1] == 0:
+                raise ValueError("the whole value must not be zero")
+            result = values[0] / values[1] * Decimal(100)
+        elif operation == "percent_change":
+            if values[0] == 0:
+                raise ValueError("the old value must not be zero")
+            result = (values[1] - values[0]) / values[0] * Decimal(100)
+        else:
+            raise ValueError(f"unsupported calculation operation: {operation}")
+    except DecimalException as exc:
+        raise ValueError("calculation could not be represented as a finite decimal") from exc
+
+    if not result.is_finite():
+        raise ValueError("calculation result must be finite")
+    unit = "percent" if operation in {"percentage_of", "percent_change"} else None
+    return result, unit
+
+
 def _calculate_table_result(
     rows: list[dict[str, str]],
     operation: str,
@@ -931,6 +1073,8 @@ def _decimal_value(raw: str) -> Decimal:
 
 
 def _format_decimal(value: Decimal) -> str:
+    if value == 0:
+        return "0"
     rendered = format(value, "f")
     if "." in rendered:
         rendered = rendered.rstrip("0").rstrip(".")
@@ -965,15 +1109,30 @@ def _heading_level(value: Any) -> int:
 
 
 def _render_blocks(blocks: list[Block]) -> str:
-    parts = []
+    text, _ = _render_blocks_with_spans(blocks)
+    return text
+
+
+def _render_blocks_with_spans(
+    blocks: list[Block],
+) -> tuple[str, list[tuple[Block, int, int]]]:
+    parts: list[str] = []
+    spans: list[tuple[Block, int, int]] = []
+    cursor = 0
     for block in blocks:
         rendered = block.to_markdown().strip()
-        if rendered:
-            parts.append(rendered)
+        if not rendered:
+            continue
+        if parts:
+            cursor += 2
+        start = cursor
+        parts.append(rendered)
+        cursor += len(rendered)
+        spans.append((block, start, cursor))
     text = "\n\n".join(parts)
     if not text:
         raise ValueError("the selected document part contains no readable text")
-    return text
+    return text, spans
 
 
 def _validate_location(

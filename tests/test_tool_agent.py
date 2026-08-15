@@ -8,7 +8,9 @@ from PIL import Image
 
 from file_agent.agent_tools import (
     DOCUMENT_TOOLS,
+    MAX_TOOL_CONTENT_LENGTH,
     ToolAgentContext,
+    calculate,
     search_documents,
 )
 from file_agent.chunking import Chunk
@@ -158,6 +160,19 @@ def test_visual_tool_does_not_expose_paths_or_bounding_boxes():
     }
 
 
+def test_new_tool_schemas_are_small_and_explicit():
+    read_tool = next(tool for tool in DOCUMENT_TOOLS if tool.name == "read_document")
+
+    assert set(read_tool.tool_call_schema.model_json_schema()["properties"]) == {
+        "source_file",
+        "offset",
+    }
+    assert set(calculate.tool_call_schema.model_json_schema()["properties"]) == {
+        "operation",
+        "values",
+    }
+
+
 def test_tool_agent_searches_documents_and_returns_sources():
     llm_client = FakeToolCallingLLM(
         [
@@ -291,6 +306,34 @@ def test_required_evidence_allows_a_successful_search_with_no_matches():
 
     assert state["response"].sources == []
     assert state["response"].search_queries == ["missing fact"]
+
+
+def test_calculate_does_not_count_as_document_evidence():
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "calculate",
+                        "args": {"operation": "add", "values": [2, 2]},
+                        "id": "calculate-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="4"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="without successfully using"):
+        invoke_tool_agent(
+            llm_client,
+            FakeRetriever(),
+            require_evidence_tool=True,
+        )
+
+    assert [call["tool_choice"] for call in llm_client.calls] == ["required", "required"]
 
 
 def test_tool_agent_can_list_documents_without_retrieval():
@@ -636,6 +679,50 @@ def _invoke_single_read_tool(tool_name, arguments, documents):
     return state, llm_client
 
 
+def test_tool_agent_can_read_an_unstructured_document_with_pagination():
+    text = "Start of document. " + "x" * MAX_TOOL_CONTENT_LENGTH + " End of document."
+    document = Document(
+        file_name="notes.txt",
+        file_type="txt",
+        blocks=[
+            Block(
+                id="block-1",
+                text=text,
+                type="plain_text",
+                metadata={"dataset_doc_id": "q1/notes.txt"},
+            )
+        ],
+    )
+
+    state, llm_client = _invoke_single_read_tool(
+        "read_document",
+        {"source_file": "notes.txt"},
+        [document],
+    )
+
+    payload = json.loads(str(tool_messages_seen_by_model(llm_client)[0].content))
+    assert payload["text"].startswith("Start of document.")
+    assert len(payload["text"]) <= MAX_TOOL_CONTENT_LENGTH
+    assert payload["next_offset"] is not None
+    assert payload["total_characters"] == len(text)
+    source = state["response"].sources[0]
+    assert source.chunk.id == "document:notes.txt:0"
+    assert source.chunk.metadata["evidence_type"] == "document_read"
+    assert source.chunk.metadata["dataset_doc_id"] == "q1/notes.txt"
+
+    _, next_llm_client = _invoke_single_read_tool(
+        "read_document",
+        {
+            "source_file": "notes.txt",
+            "offset": payload["next_offset"],
+        },
+        [document],
+    )
+    next_payload = json.loads(str(tool_messages_seen_by_model(next_llm_client)[0].content))
+    assert next_payload["text"].endswith("End of document.")
+    assert next_payload["next_offset"] is None
+
+
 @pytest.mark.parametrize(
     ("documents", "arguments", "expected_text", "metadata_key", "metadata_value"),
     [
@@ -830,6 +917,97 @@ def test_tool_agent_can_analyze_all_table_rows(arguments, expected_result):
     assert payload["rows_skipped"] == 0
     assert payload["result"] == expected_result
     assert state["response"].sources[0].chunk.metadata["table_operation"] == arguments["operation"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "values", "expected_result", "expected_unit"),
+    [
+        ("add", ["100.1", "20.2"], "120.3", None),
+        ("subtract", ["150", "120"], "30", None),
+        ("multiply", ["12.5", "4"], "50", None),
+        ("divide", ["150", "120"], "1.25", None),
+        ("average", ["10", "20", "30"], "20", None),
+        ("percentage_of", ["30", "120"], "25", "percent"),
+        ("percent_change", ["120", "150"], "25", "percent"),
+    ],
+)
+def test_calculate_performs_decimal_arithmetic(
+    operation,
+    values,
+    expected_result,
+    expected_unit,
+):
+    payload = json.loads(calculate.invoke({"operation": operation, "values": values}))
+
+    assert payload == {
+        "operation": operation,
+        "values": values,
+        "result": expected_result,
+        "unit": expected_unit,
+    }
+
+
+@pytest.mark.parametrize(
+    ("operation", "values", "error"),
+    [
+        ("divide", ["1", "0"], "divide by zero"),
+        ("percent_change", ["0", "10"], "old value"),
+        ("subtract", ["1"], "exactly two"),
+        ("add", [], "at least one"),
+    ],
+)
+def test_calculate_rejects_invalid_input(operation, values, error):
+    with pytest.raises(ValueError, match=error):
+        calculate.invoke({"operation": operation, "values": values})
+
+
+def test_tool_agent_can_calculate_from_document_evidence():
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "quarterly revenue"},
+                        "id": "search-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "calculate",
+                        "args": {
+                            "operation": "percent_change",
+                            "values": [120, 150],
+                        },
+                        "id": "calculate-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Revenue increased by 25%."),
+        ]
+    )
+
+    state = invoke_tool_agent(
+        llm_client,
+        FakeRetriever([make_search_result()]),
+        require_evidence_tool=True,
+    )
+
+    payload = json.loads(str(tool_messages_seen_by_model(llm_client)[1].content))
+    assert payload["result"] == "25"
+    assert payload["unit"] == "percent"
+    assert state["response"].answer == "Revenue increased by 25%."
+    assert [call["name"] for call in state["response"].tool_calls] == [
+        "search_documents",
+        "calculate",
+    ]
+    assert state["response"].sources[0].chunk.id == make_search_result().chunk.id
 
 
 class RecordingVLM(VLMClient):
