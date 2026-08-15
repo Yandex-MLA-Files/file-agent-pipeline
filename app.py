@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import sys
 import tempfile
 import uuid
@@ -13,7 +14,15 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 load_dotenv(PROJECT_ROOT / ".env")
 
-from file_agent.agent_tools import LLM_CONTEXT_METADATA_KEY
+from file_agent.chat_ui import (
+    DEFAULT_CHAT_TITLE,
+    ChatMessage,
+    ChatSession,
+    CompactSource,
+    chat_title_from_question,
+    compact_sources,
+    create_chat_session,
+)
 from file_agent.document_assets import InMemoryDocumentAssetStore
 from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.factory import create_llm_client
@@ -27,22 +36,23 @@ from file_agent.telemetry import configure_telemetry, resume_span, span_identity
 from file_agent.vlm.factory import create_vlm_client
 
 configure_telemetry()
+logger = logging.getLogger(__name__)
 
 SUPPORTED_TYPES = ["md", "txt", "pdf", "docx", "html", "htm", "xlsx", "pptx"]
-TEXT_PREVIEW_LIMIT = 3000
-CHUNK_PREVIEW_LIMIT = 1000
+DEFAULT_TOP_K = 5
 RETRIEVAL_STATE_KEYS = (
     "indexed_files_fingerprint",
     "indexed_documents",
     "indexed_chunks",
-    "indexed_text",
     "lancedb_retriever",
     "document_asset_store",
     "vlm_client",
     "ingest_span",
 )
-CHAT_THREAD_KEY = "chat_thread_id"
-CHAT_MESSAGES_KEY = "chat_messages"
+CHAT_SESSIONS_KEY = "chat_sessions"
+ACTIVE_CHAT_KEY = "active_chat_id"
+LEGACY_CHAT_THREAD_KEY = "chat_thread_id"
+LEGACY_CHAT_MESSAGES_KEY = "chat_messages"
 
 
 def _uploaded_files_fingerprint(uploaded_files) -> str:
@@ -57,16 +67,43 @@ def _uploaded_files_fingerprint(uploaded_files) -> str:
     return digest.hexdigest()
 
 
-def _start_new_chat() -> None:
-    st.session_state[CHAT_THREAD_KEY] = uuid.uuid4().hex
-    st.session_state[CHAT_MESSAGES_KEY] = []
+def _create_new_chat() -> str:
+    thread_id = uuid.uuid4().hex
+    sessions = st.session_state.setdefault(CHAT_SESSIONS_KEY, {})
+    sessions[thread_id] = create_chat_session(thread_id)
+    st.session_state[ACTIVE_CHAT_KEY] = thread_id
+    return thread_id
+
+
+def _reset_chat_state() -> None:
+    st.session_state[CHAT_SESSIONS_KEY] = {}
+    st.session_state.pop(ACTIVE_CHAT_KEY, None)
+    st.session_state.pop(LEGACY_CHAT_THREAD_KEY, None)
+    st.session_state.pop(LEGACY_CHAT_MESSAGES_KEY, None)
+    _create_new_chat()
 
 
 def _ensure_chat_state() -> None:
-    if CHAT_THREAD_KEY not in st.session_state:
-        _start_new_chat()
-    elif CHAT_MESSAGES_KEY not in st.session_state:
-        st.session_state[CHAT_MESSAGES_KEY] = []
+    sessions = st.session_state.get(CHAT_SESSIONS_KEY)
+    if not isinstance(sessions, dict):
+        legacy_thread_id = st.session_state.pop(LEGACY_CHAT_THREAD_KEY, None)
+        legacy_messages = st.session_state.pop(LEGACY_CHAT_MESSAGES_KEY, [])
+        thread_id = legacy_thread_id or uuid.uuid4().hex
+        session = create_chat_session(thread_id)
+        if isinstance(legacy_messages, list):
+            session["messages"] = legacy_messages
+        sessions = {thread_id: session}
+        st.session_state[CHAT_SESSIONS_KEY] = sessions
+        st.session_state[ACTIVE_CHAT_KEY] = thread_id
+
+    active_chat_id = st.session_state.get(ACTIVE_CHAT_KEY)
+    if active_chat_id not in sessions:
+        _create_new_chat()
+
+
+def _active_chat() -> ChatSession:
+    _ensure_chat_state()
+    return st.session_state[CHAT_SESSIONS_KEY][st.session_state[ACTIVE_CHAT_KEY]]
 
 
 def _clear_retrieval_state() -> bool:
@@ -83,53 +120,82 @@ def _clear_retrieval_state() -> bool:
     return had_indexed_documents
 
 
-def _show_response_details(response) -> None:
-    if response.search_queries or response.tool_calls:
-        with st.expander("RAG execution details"):
-            st.write(f"Stop reason: `{response.stop_reason}`")
-            if response.search_queries:
-                st.write("Search queries:")
-                for search_query in response.search_queries:
-                    st.write(f"- {search_query}")
-            if response.tool_calls:
-                st.write("Tool calls:")
-                for tool_call in response.tool_calls:
-                    st.write(f"- `{tool_call['name']}`")
-                    st.json(tool_call["arguments"])
+def _render_sources(sources: list[CompactSource]) -> None:
+    if not sources:
+        return
 
-    if response.sources:
-        st.write("**Sources**")
-        for index, result in enumerate(response.sources, start=1):
-            with st.expander(
-                f"Source {index} - score {result.score:g}",
-                expanded=index == 1,
+    with st.expander(f"Источники · {len(sources)}"):
+        for index, source in enumerate(sources, start=1):
+            location = f" · {source['location']}" if source.get("location") else ""
+            st.markdown(f"**{index}. {source['file_name']}**{location}")
+            if source.get("excerpt"):
+                st.caption(source["excerpt"])
+
+
+def _render_message(message: ChatMessage) -> None:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        if message["role"] == "assistant":
+            _render_sources(message.get("sources", []))
+
+
+def _render_chat_navigation(documents) -> None:
+    sessions: dict[str, ChatSession] = st.session_state[CHAT_SESSIONS_KEY]
+    active_chat_id = st.session_state[ACTIVE_CHAT_KEY]
+
+    with st.sidebar:
+        st.divider()
+        if st.button("＋ Новый чат", type="primary", use_container_width=True):
+            _create_new_chat()
+            st.rerun()
+
+        st.caption("ЧАТЫ")
+        for thread_id, session in reversed(list(sessions.items())):
+            if st.button(
+                session["title"],
+                key=f"open_chat_{thread_id}",
+                type="primary" if thread_id == active_chat_id else "secondary",
+                use_container_width=True,
             ):
-                metadata = dict(result.chunk.metadata)
-                passage = metadata.pop(LLM_CONTEXT_METADATA_KEY, None) or metadata.pop(
-                    "context", None
-                )
-                st.write("**Metadata:**")
-                st.json(metadata)
-                st.write("**Source text:**")
-                st.text((passage or result.chunk.text)[: CHUNK_PREVIEW_LIMIT * 2])
+                st.session_state[ACTIVE_CHAT_KEY] = thread_id
+                st.rerun()
+
+        st.divider()
+        st.caption(f"ДОКУМЕНТЫ · {len(documents)}")
+        for document in documents:
+            st.markdown(f"📄 `{document.file_name}`")
 
 
-st.set_page_config(page_title="File Agent Pipeline")
-_ensure_chat_state()
-st.title("File Agent Pipeline")
-rag_mode = resolve_rag_mode()
-st.caption(f"RAG mode: `{rag_mode}`")
-
-uploaded_files = st.file_uploader(
-    "Upload files",
-    type=SUPPORTED_TYPES,
-    accept_multiple_files=True,
+st.set_page_config(
+    page_title="File Agent",
+    page_icon="📄",
+    layout="centered",
+    initial_sidebar_state="expanded",
 )
+_ensure_chat_state()
+
+with st.sidebar:
+    st.title("File Agent")
+    st.caption("Ответы по вашим документам")
+    uploaded_files = st.file_uploader(
+        "Документы",
+        type=SUPPORTED_TYPES,
+        accept_multiple_files=True,
+        help="PDF, DOCX, PPTX, XLSX, Markdown, TXT или HTML",
+    )
 
 if not uploaded_files:
     if _clear_retrieval_state():
-        _start_new_chat()
-    st.info("Upload one or more documents to start a chat.")
+        _reset_chat_state()
+
+    st.title("Диалог с документами")
+    st.write(
+        "Загрузите один или несколько файлов — агент найдёт нужные фрагменты, "
+        "прочитает таблицы и поможет разобраться в содержимом."
+    )
+    with st.container(border=True):
+        st.markdown("**Как начать**")
+        st.markdown("1. Загрузите документы в боковой панели.\n2. Задайте вопрос в чате.")
     st.stop()
 
 files_fingerprint = _uploaded_files_fingerprint(uploaded_files)
@@ -140,24 +206,27 @@ if (
     or "vlm_client" not in st.session_state
 ):
     try:
-        asset_store = InMemoryDocumentAssetStore()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            file_paths: list[Path] = []
-            for uploaded_file in uploaded_files:
-                file_name = Path(uploaded_file.name).name
-                contents = uploaded_file.getvalue()
-                asset_store.put(file_name, contents)
-                file_path = Path(temp_dir) / file_name
-                file_path.write_bytes(contents)
-                file_paths.append(file_path)
+        with st.spinner("Подготавливаем документы…"):
+            asset_store = InMemoryDocumentAssetStore()
+            with tempfile.TemporaryDirectory() as temp_dir:
+                file_paths: list[Path] = []
+                for uploaded_file in uploaded_files:
+                    file_name = Path(uploaded_file.name).name
+                    contents = uploaded_file.getvalue()
+                    asset_store.put(file_name, contents)
+                    file_path = Path(temp_dir) / file_name
+                    file_path.write_bytes(contents)
+                    file_paths.append(file_path)
 
-            with tracer.start_as_current_span("file_agent.ingest_files") as ingest_span:
-                retriever = LanceDBRetriever()
-                documents, chunks = ingest_files(file_paths, retriever)
-                ingest_span_identity = span_identity(ingest_span)
-        vlm_client = create_vlm_client() if rag_mode == "tool_agent" else None
-    except Exception as exc:
-        st.error(f"Could not parse or index uploaded files: {exc}")
+                with tracer.start_as_current_span("file_agent.ingest_files") as ingest_span:
+                    retriever = LanceDBRetriever()
+                    documents, chunks = ingest_files(file_paths, retriever)
+                    ingest_span_identity = span_identity(ingest_span)
+            rag_mode = resolve_rag_mode()
+            vlm_client = create_vlm_client() if rag_mode == "tool_agent" else None
+    except Exception:
+        logger.exception("Could not parse or index uploaded files")
+        st.error("Не удалось обработать документы. Проверьте формат файлов и попробуйте ещё раз.")
         st.stop()
 
     previous_retriever = st.session_state.get("lancedb_retriever")
@@ -170,93 +239,57 @@ if (
     st.session_state["indexed_files_fingerprint"] = files_fingerprint
     st.session_state["indexed_documents"] = documents
     st.session_state["indexed_chunks"] = chunks
-    st.session_state["indexed_text"] = "\n\n".join(
-        block.text for document in documents for block in document.blocks
-    )
     st.session_state["lancedb_retriever"] = retriever
     st.session_state["document_asset_store"] = asset_store
     st.session_state["vlm_client"] = vlm_client
     st.session_state["ingest_span"] = ingest_span_identity
-    _start_new_chat()
+    _reset_chat_state()
 
 documents = st.session_state["indexed_documents"]
 chunks = st.session_state["indexed_chunks"]
-extracted_text = st.session_state["indexed_text"]
 retriever = st.session_state["lancedb_retriever"]
 asset_store = st.session_state["document_asset_store"]
 vlm_client = st.session_state["vlm_client"]
+rag_mode = resolve_rag_mode()
 
-summary_column, reset_column = st.columns([4, 1])
-with summary_column:
-    st.write(
-        f"**Documents:** {len(documents)} · "
-        f"**Blocks:** {sum(len(document.blocks) for document in documents)} · "
-        f"**Chunks:** {len(chunks)}"
-    )
-    st.caption("Files: " + ", ".join(document.file_name for document in documents))
-with reset_column:
-    if st.button("New chat", use_container_width=True):
-        _start_new_chat()
-        st.rerun()
+_render_chat_navigation(documents)
+active_chat = _active_chat()
 
-with st.expander("Document details"):
-    for document in documents:
-        metadata = document.metadata
-        analysis = metadata.get("page_analysis") or {}
-        ocr_pages = analysis.get("ocr_page_numbers") or []
-        st.write(f"**{document.file_name}**")
-        st.write(
-            f"- method: `{metadata.get('parsing_method', 'unknown')}`"
-            + (f" (OCR engine: `{metadata['ocr_engine']}`)" if metadata.get("ocr_engine") else "")
-        )
-        st.write(f"- pages: {metadata.get('total_pages', 0)}, OCR'd pages: {len(ocr_pages)}")
-        if ocr_pages:
-            st.write(f"- OCR page numbers: {ocr_pages}")
-        toc = metadata.get("table_of_contents") or []
-        st.write(f"- headings detected: {len(toc)}")
-        if metadata.get("vlm_described_figures"):
-            st.write(f"- figures described by VLM: {metadata['vlm_described_figures']}")
+st.title(active_chat["title"])
+file_names = ", ".join(document.file_name for document in documents)
+st.caption(f"Документов: {len(documents)} · {file_names}")
 
-    st.text_area(
-        "Extracted text preview",
-        value=extracted_text[:TEXT_PREVIEW_LIMIT],
-        height=300,
-    )
+if not active_chat["messages"]:
+    with st.container(border=True):
+        st.markdown("**Документы готовы**")
+        st.write("Задайте вопрос, попросите сравнить данные или объяснить таблицу или график.")
 
-top_k = st.number_input(
-    "Top K chunks",
-    min_value=1,
-    max_value=20,
-    value=5,
-    step=1,
-)
+for message in active_chat["messages"]:
+    _render_message(message)
 
-for message in st.session_state[CHAT_MESSAGES_KEY]:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-query = st.chat_input("Ask a question about the uploaded documents")
+query = st.chat_input("Задайте вопрос по документам")
 if query:
     normalized_query = query.strip()
     if not normalized_query:
         st.stop()
 
-    st.session_state[CHAT_MESSAGES_KEY].append({"role": "user", "content": normalized_query})
-    with st.chat_message("user"):
-        st.markdown(normalized_query)
+    if active_chat["title"] == DEFAULT_CHAT_TITLE:
+        active_chat["title"] = chat_title_from_question(normalized_query)
+
+    user_message: ChatMessage = {"role": "user", "content": normalized_query}
+    active_chat["messages"].append(user_message)
+    _render_message(user_message)
 
     with st.chat_message("assistant"):
         try:
             with (
-                st.spinner("Searching the documents..."),
+                st.spinner("Ищу ответ в документах…"),
                 resume_span(st.session_state.get("ingest_span")),
                 tracer.start_as_current_span("file_agent.ask_question") as question_span,
             ):
                 question_span.set_attribute("file_agent.question", normalized_query)
-                question_span.set_attribute("file_agent.top_k", int(top_k))
-                question_span.set_attribute(
-                    "file_agent.thread_id", st.session_state[CHAT_THREAD_KEY]
-                )
+                question_span.set_attribute("file_agent.top_k", DEFAULT_TOP_K)
+                question_span.set_attribute("file_agent.thread_id", active_chat["thread_id"])
                 llm_client = create_llm_client(load_env=False)
                 if rag_mode == "tool_agent":
                     response = answer_indexed_documents(
@@ -265,18 +298,15 @@ if query:
                         retriever=retriever,
                         documents_count=len(documents),
                         chunks_count=len(chunks),
-                        top_k=int(top_k),
+                        top_k=DEFAULT_TOP_K,
                         documents=documents,
                         mode=rag_mode,
-                        thread_id=st.session_state[CHAT_THREAD_KEY],
+                        thread_id=active_chat["thread_id"],
                         vlm_client=vlm_client,
                         asset_store=asset_store,
                     )
                 else:
-                    results = retriever.search(
-                        query=normalized_query,
-                        top_k=int(top_k),
-                    )
+                    results = retriever.search(query=normalized_query, top_k=DEFAULT_TOP_K)
                     response = answer_with_results(
                         question=normalized_query,
                         results=results,
@@ -285,11 +315,19 @@ if query:
                         chunks_count=len(chunks),
                         mode=rag_mode,
                     )
-        except Exception as exc:
-            st.error(f"Could not generate answer: {exc}")
-        else:
-            st.markdown(response.answer)
-            _show_response_details(response)
-            st.session_state[CHAT_MESSAGES_KEY].append(
-                {"role": "assistant", "content": response.answer}
+        except Exception:
+            logger.exception("Could not generate an answer")
+            st.error(
+                "Не удалось получить ответ. Проверьте подключение к модели и повторите запрос."
             )
+        else:
+            sources = compact_sources(response.sources)
+            st.markdown(response.answer)
+            _render_sources(sources)
+            assistant_message: ChatMessage = {
+                "role": "assistant",
+                "content": response.answer,
+                "sources": sources,
+            }
+            active_chat["messages"].append(assistant_message)
+            st.rerun()

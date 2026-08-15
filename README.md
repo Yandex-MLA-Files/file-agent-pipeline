@@ -65,12 +65,14 @@ from the long-lived checkpoint after the final answer. Conversation history is
 context, not evidence: each new question must call a document tool before making
 new factual claims about the uploaded files.
 
-The Streamlit UI indexes an unchanged set of uploaded documents only once. **New
-chat** creates a fresh `thread_id` and clears the visible messages without
-re-indexing those documents. Uploading a different file set automatically starts
-a new chat and performs ingestion for the new set. The current checkpointer is
-process-local; it can later be replaced by a SQLite or PostgreSQL checkpointer
-without changing the graph nodes.
+The Streamlit UI indexes an unchanged set of uploaded documents only once. Its
+sidebar can create and switch between chats; every chat has a separate
+`thread_id` and keeps its visible messages without re-indexing the documents.
+Uploading a different file set clears the old chat list, starts a fresh chat,
+and performs ingestion for the new set. Answer sources are shown as compact
+file/page references instead of internal retrieval and tool diagnostics. The
+current checkpointer is process-local; it can later be replaced by a SQLite or
+PostgreSQL checkpointer without changing the graph nodes.
 
 For on-demand visual questions, the tool agent uses
 `analyze_document_visual`. The tool accepts only an indexed `source_file` and
