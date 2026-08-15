@@ -739,6 +739,99 @@ def test_tool_agent_can_read_table_rows_with_pagination():
     assert state["response"].sources[0].chunk.metadata["table_id"] == "sheet-1"
 
 
+@pytest.mark.parametrize(
+    ("arguments", "expected_result"),
+    [
+        (
+            {
+                "operation": "count_distinct",
+                "value_column": "category",
+            },
+            {"count": 2, "values": ["X", "Y"]},
+        ),
+        (
+            {
+                "operation": "sum",
+                "value_column": "stock",
+                "multiply_by": "price",
+            },
+            {"value": "180"},
+        ),
+        (
+            {
+                "operation": "min",
+                "value_column": "stock",
+                "top_n": 1,
+            },
+            {
+                "rows": [
+                    {
+                        "value": "1",
+                        "row": {
+                            "product": "C",
+                            "stock": "1",
+                            "price": "100",
+                            "category": "Y",
+                            "amount": "12",
+                            "region": "North",
+                        },
+                    }
+                ]
+            },
+        ),
+        (
+            {
+                "operation": "group_sum",
+                "value_column": "stock",
+                "multiply_by": "price",
+                "group_by": "category",
+                "top_n": 2,
+            },
+            {
+                "groups": [
+                    {"group": "Y", "value": "100"},
+                    {"group": "X", "value": "80"},
+                ]
+            },
+        ),
+    ],
+)
+def test_tool_agent_can_analyze_all_table_rows(arguments, expected_result):
+    document = Document(
+        file_name="inventory.xlsx",
+        file_type="xlsx",
+        blocks=[
+            Block(
+                id="sheet-1",
+                text=(
+                    "product\tstock\tprice\tcategory\tamount\tregion\n"
+                    "A\t2\t10\tX\t5\tNorth\n"
+                    "B\t3\t20\tX\t8\tSouth\n"
+                    "C\t1\t100\tY\t12\tNorth"
+                ),
+                type="xlsx_sheet",
+                metadata={"sheet_name": "Inventory"},
+                block_type=BlockType.TABLE,
+            )
+        ],
+    )
+    state, llm_client = _invoke_single_read_tool(
+        "analyze_table",
+        {
+            "source_file": "inventory.xlsx",
+            "table_id": "sheet-1",
+            **arguments,
+        },
+        [document],
+    )
+
+    payload = json.loads(str(tool_messages_seen_by_model(llm_client)[0].content))
+    assert payload["total_data_rows"] == 3
+    assert payload["rows_skipped"] == 0
+    assert payload["result"] == expected_result
+    assert state["response"].sources[0].chunk.metadata["table_operation"] == arguments["operation"]
+
+
 class RecordingVLM(VLMClient):
     def __init__(self, answer="Revenue rises from Q1 to Q2."):
         self.answer = answer

@@ -31,6 +31,17 @@ PARENT_CONTEXT_MAX_CHARS = 4000
 # share of the budget; a huge header would crowd out the actual data rows.
 HEADER_REPEAT_MAX_RATIO = 0.25
 
+# Token counts are queried several times while a block is packed, overlapped and
+# finally validated.  HuggingFace tokenization is much more expensive than a
+# dictionary lookup, especially for large Docling documents with thousands of
+# small blocks, so retain the measurements for the lifetime of one chunker.
+TOKEN_COUNT_CACHE_SIZE = 8192
+
+# Large structured documents otherwise produce no log output between parsing
+# and indexing.  A modest interval makes it clear that the CPU-bound chunker is
+# still making progress without flooding normal runs.
+CHUNK_PROGRESS_BLOCK_INTERVAL = 250
+
 # Sentence boundary: end punctuation (Latin or Cyrillic text) followed by space,
 # or an explicit line break. Used to avoid cutting a chunk mid-sentence.
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+|\n+")
@@ -84,6 +95,7 @@ class _Budget:
         self.minimum = minimum
         self.overlap = overlap
         self._tokenizer = tokenizer
+        self._size_cache: dict[str, int] = {}
 
     @property
     def unit(self) -> str:
@@ -92,17 +104,26 @@ class _Budget:
     def size(self, text: str) -> int:
         if self._tokenizer is None:
             return len(text)
+
+        cached = self._size_cache.get(text)
+        if cached is not None:
+            return cached
+
         try:
             # verbose=False silences the tokenizer's "sequence longer than the
             # model maximum" notice: measuring long text is exactly the point.
-            return len(self._tokenizer.encode(text, add_special_tokens=False, verbose=False))
+            size = len(self._tokenizer.encode(text, add_special_tokens=False, verbose=False))
         except TypeError:  # tokenizers that do not accept those keywords
             try:
-                return len(self._tokenizer.encode(text, add_special_tokens=False))
+                size = len(self._tokenizer.encode(text, add_special_tokens=False))
             except TypeError:
-                return len(self._tokenizer.encode(text))
+                size = len(self._tokenizer.encode(text))
         except Exception:  # pragma: no cover - never fail chunking on tokenizer issues
-            return len(text)
+            size = len(text)
+
+        if len(self._size_cache) < TOKEN_COUNT_CACHE_SIZE:
+            self._size_cache[text] = size
+        return size
 
 
 def _build_budget(
@@ -269,6 +290,13 @@ class _Chunker:
         self._buffer_size = 0
 
     def add_section(self, section: _Section) -> None:
+        heading = self._usable_heading(section.heading)
+        if heading != section.heading:
+            # The original heading block remains in ``blocks`` and is therefore
+            # still indexed. Only its unsafe use as a repeated breadcrumb is
+            # disabled.
+            section = _Section(heading=heading, blocks=section.blocks)
+
         text = section.text
         if not text:
             return
@@ -293,6 +321,26 @@ class _Chunker:
         return self._chunks
 
     # -- internals ----------------------------------------------------------
+
+    def _usable_heading(self, heading: str | None) -> str | None:
+        if not heading:
+            return None
+
+        heading_size = self._budget.size(heading)
+        remaining = self._budget.limit - heading_size - self._separator_size
+        if remaining >= self._budget.minimum:
+            return heading
+
+        logger.warning(
+            "Treating oversized heading as body text in %s: %d %s would leave "
+            "only %d of %d for content",
+            self._document.file_name,
+            heading_size,
+            self._budget.unit,
+            max(0, remaining),
+            self._budget.limit,
+        )
+        return None
 
     def _flush(self) -> None:
         if not self._buffer:
@@ -332,7 +380,19 @@ class _Chunker:
             buffer = self._overlap_seed(buffer)
             buffer_size = self._packed_size(buffer)
 
-        for block in blocks:
+        total_blocks = len(blocks)
+        show_progress = total_blocks >= CHUNK_PROGRESS_BLOCK_INTERVAL * 2
+        for block_index, block in enumerate(blocks, start=1):
+            processed = block_index - 1
+            if show_progress and processed and processed % CHUNK_PROGRESS_BLOCK_INTERVAL == 0:
+                logger.info(
+                    "Chunking %s: processed %d/%d blocks (%d chunks emitted)",
+                    self._document.file_name,
+                    processed,
+                    total_blocks,
+                    len(self._chunks),
+                )
+
             text = block.text
             if not text:
                 continue
@@ -352,6 +412,14 @@ class _Chunker:
             buffer_size += addition
 
         flush_buffer()
+        if show_progress:
+            logger.info(
+                "Chunking %s: processed %d/%d blocks (%d chunks emitted)",
+                self._document.file_name,
+                total_blocks,
+                total_blocks,
+                len(self._chunks),
+            )
 
     def _packed_size(self, blocks: list[Block]) -> int:
         if not blocks:
@@ -474,7 +542,7 @@ class _Chunker:
 
         # Fall back to fixed windows over characters.
         window = self._char_window(limit)
-        step = max(1, window - self._char_overlap())
+        step = self._window_step(window)
         return [text[start : start + window] for start in range(0, len(text), step)]
 
     def _char_window(self, limit: int) -> int:
@@ -643,8 +711,17 @@ class _Chunker:
                 window = max(1, int(window * 0.8))
                 piece = text[start : start + window]
             pieces.append(prefix + piece)
-            start += max(1, window - self._char_overlap())
+            start += self._window_step(window)
         return pieces
+
+    def _window_step(self, window: int) -> int:
+        overlap = self._char_overlap()
+        if self._budget.unit == "tokens":
+            # A token-derived character estimate can shrink substantially for
+            # dense Unicode, formulas or a breadcrumb prefix. Never let the
+            # configured overlap reduce forward progress to one character.
+            overlap = min(overlap, window // 2)
+        return max(1, window - overlap)
 
     def _estimate_window(self, text: str) -> int:
         if self._budget.unit == "chars":

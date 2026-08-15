@@ -11,6 +11,15 @@ class WordTokenizer:
         return text.split()
 
 
+class CharacterTokenizer:
+    """Adversarial tokenizer where every character consumes one token."""
+
+    model_max_length = 16
+
+    def encode(self, text, **kwargs):
+        return list(text)
+
+
 def _document(*texts, block_type=BlockType.TEXT):
     blocks = [
         Block(id=f"b{i}", text=text, type=block_type.value, block_type=block_type)
@@ -91,3 +100,33 @@ def test_character_mode_is_used_without_tokenizer():
 
     # Legacy character windows stay exact when no tokenizer is supplied.
     assert [chunk.text for chunk in chunks] == ["abcd", "defg", "ghij", "j"]
+
+
+def test_oversized_heading_is_kept_as_content_without_tiny_sliding_windows(caplog):
+    heading = "abcdefghijklmnopqrst"
+    document = Document(
+        file_name="large.docx",
+        file_type="docx",
+        blocks=[
+            Block(id="h1", text=heading, type="heading", block_type=BlockType.HEADING),
+            Block(id="b1", text="body-" * 40, type="text", block_type=BlockType.TEXT),
+        ],
+    )
+
+    with caplog.at_level("WARNING", logger="file_agent.chunking"):
+        chunks = chunk_document(
+            document,
+            max_chars=160,
+            overlap=16,
+            tokenizer=CharacterTokenizer(),
+        )
+
+    assert chunks
+    assert len(chunks) < 50
+    assert all(len(CharacterTokenizer().encode(chunk.text)) <= 16 for chunk in chunks)
+    assert {block_id for chunk in chunks for block_id in chunk.metadata["block_ids"]} == {
+        "h1",
+        "b1",
+    }
+    assert all("section" not in chunk.metadata for chunk in chunks)
+    assert "Treating oversized heading as body text" in caplog.text

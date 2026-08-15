@@ -1,7 +1,9 @@
 import json
 import math
+import re
 from dataclasses import dataclass
-from typing import Any
+from decimal import Decimal, InvalidOperation
+from typing import Any, Literal
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, tool
@@ -24,6 +26,7 @@ MAX_TOOL_PASSAGE_LENGTH = 3500
 MAX_TOOL_CONTENT_LENGTH = 12000
 MAX_TABLE_ROWS = 50
 MAX_TABLE_ROW_LENGTH = 4000
+MAX_TABLE_ANALYSIS_RESULTS = 20
 MAX_VISUAL_QUESTION_LENGTH = 1000
 MAX_VISUAL_CONTEXT_LENGTH = 2000
 MAX_VISUAL_DESCRIPTION_LENGTH = 500
@@ -81,7 +84,9 @@ evidence, say so clearly. Do not invent sources, document contents, or tool resu
 TOOL_LIMIT_MESSAGE = """The tool-call limit has been reached. Do not call another tool.
 Provide the best final answer supported by the tool results already present in the
 conversation. If they are insufficient, say that the documents do not contain enough
-information.
+information. A description of future work is not a final answer: do not say that you
+will continue reading, searching, checking, or calling tools. Answer the user's
+question directly in one self-contained response.
 """
 
 
@@ -232,6 +237,10 @@ def get_document_outline(
             "source_file": document.file_name,
             "table_of_contents": _document_outline(document),
             "tables": _document_tables(document),
+            "table_analysis_hint": (
+                "Use analyze_table instead of paginating read_table for whole-table "
+                "totals, distinct counts, extrema, or grouped sums."
+            ),
             "visuals": _document_visuals(document),
         },
         ensure_ascii=False,
@@ -394,6 +403,92 @@ def read_table(
 
 
 @tool
+def analyze_table(
+    source_file: str,
+    table_id: str,
+    operation: Literal["count_distinct", "sum", "min", "max", "group_sum"],
+    value_column: str,
+    runtime: ToolRuntime[Any, dict],
+    group_by: str | None = None,
+    multiply_by: str | None = None,
+    top_n: int = 5,
+) -> Command:
+    """Calculate an exact result over every row of a table or XLSX sheet.
+
+    Prefer this tool over read_table when the question asks for a total, unique
+    count, minimum/maximum row, or grouped total. ``multiply_by`` calculates a
+    row value as ``value_column * multiply_by`` (for example stock * price).
+
+    Args:
+        source_file: Exact file name returned by list_documents.
+        table_id: Exact table_id returned by get_document_outline.
+        operation: count_distinct, sum, min, max, or group_sum.
+        value_column: Column to count or calculate.
+        group_by: Required grouping column for group_sum.
+        multiply_by: Optional second numeric column multiplied into each value.
+        top_n: Number of ranked rows/groups to return, from 1 to 20.
+    """
+    document = _find_document(runtime.context.documents, source_file)
+    normalized_id = table_id.strip()
+    block = next(
+        (
+            item
+            for item in document.blocks
+            if item.id == normalized_id and _is_table_block(document, item)
+        ),
+        None,
+    )
+    if block is None:
+        raise ValueError(f"table is not indexed in {document.file_name}: {table_id}")
+
+    headers, rows = _parse_table_rows(document, block)
+    value_key = _resolve_table_column(headers, value_column)
+    group_key = _resolve_table_column(headers, group_by) if group_by is not None else None
+    multiplier_key = (
+        _resolve_table_column(headers, multiply_by) if multiply_by is not None else None
+    )
+    bounded_top_n = _bounded_table_analysis_results(top_n)
+
+    result, rows_used, rows_skipped = _calculate_table_result(
+        rows=rows,
+        operation=operation,
+        value_key=value_key,
+        group_key=group_key,
+        multiplier_key=multiplier_key,
+        top_n=bounded_top_n,
+    )
+    metadata = _source_metadata(document, [block])
+    metadata.update(
+        {
+            "table_id": normalized_id,
+            "table_format": _table_format(document, block),
+            "table_operation": operation,
+        }
+    )
+    payload = {
+        "source_file": document.file_name,
+        "table_id": normalized_id,
+        "operation": operation,
+        "value_column": value_key,
+        "multiply_by": multiplier_key,
+        "group_by": group_key,
+        "total_data_rows": len(rows),
+        "rows_used": rows_used,
+        "rows_skipped": rows_skipped,
+        "result": result,
+        "metadata": metadata,
+    }
+    evidence_text = json.dumps(payload, ensure_ascii=False, default=str)
+    return _evidence_command(
+        payload,
+        runtime,
+        evidence_id=f"table-analysis:{document.file_name}:{normalized_id}:{operation}",
+        text=evidence_text,
+        metadata=metadata,
+    )
+
+
+@tool
 def analyze_document_visual(
     source_file: str,
     question: str,
@@ -532,6 +627,7 @@ DOCUMENT_TOOLS: list[BaseTool] = [
     get_document_outline,
     read_document_section,
     read_document_location,
+    analyze_table,
     read_table,
     analyze_document_visual,
 ]
@@ -682,6 +778,163 @@ def _table_format(document: Document, block: Block) -> str:
     if "|" in block.text:
         return "markdown"
     return "text"
+
+
+def _parse_table_rows(
+    document: Document,
+    block: Block,
+) -> tuple[list[str], list[dict[str, str]]]:
+    lines = [line for line in block.text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        raise ValueError("the selected table must contain a header and at least one data row")
+
+    table_format = _table_format(document, block)
+    if table_format == "tsv":
+        parsed = [[cell.strip() for cell in line.split("\t")] for line in lines]
+    elif table_format == "markdown":
+        parsed = [[cell.strip() for cell in line.strip().strip("|").split("|")] for line in lines]
+        parsed = [row for row in parsed if not _is_markdown_separator_row(row)]
+    else:
+        raise ValueError("table analysis currently supports TSV/XLSX and Markdown tables")
+
+    headers = parsed[0]
+    if not headers or any(not header for header in headers):
+        raise ValueError("the selected table has an invalid or empty header")
+    if len({header.casefold() for header in headers}) != len(headers):
+        raise ValueError("the selected table contains duplicate column names")
+
+    rows = []
+    for values in parsed[1:]:
+        padded = [*values[: len(headers)], *([""] * max(0, len(headers) - len(values)))]
+        rows.append(dict(zip(headers, padded, strict=True)))
+    if not rows:
+        raise ValueError("the selected table contains no data rows")
+    return headers, rows
+
+
+def _is_markdown_separator_row(values: list[str]) -> bool:
+    return bool(values) and all(re.fullmatch(r":?-{3,}:?", value) for value in values)
+
+
+def _resolve_table_column(headers: list[str], requested: str | None) -> str:
+    if requested is None or not requested.strip():
+        raise ValueError("column name must not be empty")
+    normalized = requested.strip().casefold()
+    match = next((header for header in headers if header.casefold() == normalized), None)
+    if match is None:
+        raise ValueError(f"column is not available: {requested}; available columns: {headers}")
+    return match
+
+
+def _bounded_table_analysis_results(top_n: int) -> int:
+    if not isinstance(top_n, int) or isinstance(top_n, bool):
+        raise ValueError("top_n must be an integer")
+    return max(1, min(top_n, MAX_TABLE_ANALYSIS_RESULTS))
+
+
+def _calculate_table_result(
+    rows: list[dict[str, str]],
+    operation: str,
+    value_key: str,
+    group_key: str | None,
+    multiplier_key: str | None,
+    top_n: int,
+) -> tuple[dict[str, Any], int, int]:
+    if operation == "count_distinct":
+        if group_key is not None or multiplier_key is not None:
+            raise ValueError("count_distinct does not accept group_by or multiply_by")
+        distinct: dict[str, str] = {}
+        for row in rows:
+            value = row[value_key].strip()
+            if value:
+                distinct.setdefault(value.casefold(), value)
+        values = sorted(distinct.values(), key=str.casefold)
+        return {"count": len(values), "values": values}, len(rows), 0
+
+    if operation == "group_sum" and group_key is None:
+        raise ValueError("group_by is required for group_sum")
+    if operation != "group_sum" and group_key is not None:
+        raise ValueError("group_by is only supported for group_sum")
+
+    calculated: list[tuple[Decimal, dict[str, str]]] = []
+    skipped = 0
+    for row in rows:
+        try:
+            value = _decimal_value(row[value_key])
+            if multiplier_key is not None:
+                value *= _decimal_value(row[multiplier_key])
+        except ValueError:
+            skipped += 1
+            continue
+        calculated.append((value, row))
+    if not calculated:
+        raise ValueError("the selected numeric columns contain no usable values")
+
+    if operation == "sum":
+        total = sum((value for value, _ in calculated), Decimal(0))
+        return {"value": _format_decimal(total)}, len(calculated), skipped
+
+    if operation in ("min", "max"):
+        reverse = operation == "max"
+        ranked = sorted(calculated, key=lambda item: item[0], reverse=reverse)[:top_n]
+        return (
+            {"rows": [{"value": _format_decimal(value), "row": row} for value, row in ranked]},
+            len(calculated),
+            skipped,
+        )
+
+    if operation == "group_sum":
+        grouped: dict[str, tuple[str, Decimal]] = {}
+        for value, row in calculated:
+            group = row[group_key].strip()  # type: ignore[index]
+            if not group:
+                skipped += 1
+                continue
+            normalized_group = group.casefold()
+            label, total = grouped.get(normalized_group, (group, Decimal(0)))
+            grouped[normalized_group] = (label, total + value)
+        ranked_groups = sorted(grouped.values(), key=lambda item: item[1], reverse=True)[:top_n]
+        return (
+            {
+                "groups": [
+                    {"group": label, "value": _format_decimal(value)}
+                    for label, value in ranked_groups
+                ]
+            },
+            len(calculated),
+            skipped,
+        )
+
+    raise ValueError(f"unsupported table operation: {operation}")
+
+
+def _decimal_value(raw: str) -> Decimal:
+    normalized = raw.strip().replace("\u00a0", "").replace(" ", "")
+    normalized = normalized.removeprefix("$").removeprefix("€").removeprefix("£")
+    normalized = normalized.removesuffix("₽").removesuffix("%").strip()
+    if not normalized:
+        raise ValueError("numeric value is empty")
+    if "," in normalized and "." in normalized:
+        if normalized.rfind(",") > normalized.rfind("."):
+            normalized = normalized.replace(".", "").replace(",", ".")
+        else:
+            normalized = normalized.replace(",", "")
+    elif "," in normalized:
+        normalized = normalized.replace(",", ".")
+    try:
+        value = Decimal(normalized)
+    except InvalidOperation as exc:
+        raise ValueError(f"not a numeric value: {raw}") from exc
+    if not value.is_finite():
+        raise ValueError(f"not a finite numeric value: {raw}")
+    return value
+
+
+def _format_decimal(value: Decimal) -> str:
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
 
 
 def _section_blocks(document: Document, section_id: str, raw_level: Any) -> list[Block]:
