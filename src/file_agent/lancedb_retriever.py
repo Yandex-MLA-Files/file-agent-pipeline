@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from functools import lru_cache
 from typing import Protocol
 
@@ -29,6 +30,7 @@ class LanceDBRetriever:
     def __init__(
         self,
         embedding_model: EmbeddingModel | None = None,
+        embedding_model_name: str | None = None,
         uri: str = "memory://",
         table_name: str = DEFAULT_TABLE_NAME,
         fts_language: str = DEFAULT_FTS_LANGUAGE,
@@ -39,6 +41,7 @@ class LanceDBRetriever:
             raise ValueError("semantic_min_score must be between -1 and 1")
 
         self._embedding_model = embedding_model
+        self._embedding_model_name = resolve_semantic_model_name(embedding_model_name)
         self._connection = lancedb.connect(uri)
         self._table_name = table_name
         self._fts_language = fts_language
@@ -159,7 +162,7 @@ class LanceDBRetriever:
         self._table = None
 
     def _encode(self, texts: list[str]) -> np.ndarray:
-        model = self._embedding_model or _load_default_embedding_model()
+        model = self._embedding_model or _load_default_embedding_model(self._embedding_model_name)
         embeddings = model.encode(texts)
 
         if hasattr(embeddings, "detach"):
@@ -188,8 +191,14 @@ class LanceDBRetriever:
         )
 
 
-@lru_cache(maxsize=1)
-def _load_default_embedding_model() -> EmbeddingModel:
+def resolve_semantic_model_name(model_name: str | None = None) -> str:
+    configured = model_name if model_name is not None else os.getenv("EMBEDDING_MODEL")
+    normalized = configured.strip() if configured else ""
+    return normalized or DEFAULT_SEMANTIC_MODEL_NAME
+
+
+@lru_cache(maxsize=2)
+def _load_default_embedding_model(model_name: str) -> EmbeddingModel:
     from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(DEFAULT_SEMANTIC_MODEL_NAME)
+    return SentenceTransformer(model_name)

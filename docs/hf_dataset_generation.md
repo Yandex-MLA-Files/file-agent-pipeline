@@ -38,6 +38,8 @@ LOCAL_LLM_BASE_URL=http://127.0.0.1:8000/v1
 LOCAL_LLM_API_KEY=
 LOCAL_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct
 
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+
 VLM_BACKEND=off
 OCR_ENGINE=easyocr
 OCR_LANGS=ru,en
@@ -118,6 +120,7 @@ export LOCAL_LLM_BASE_URL=http://127.0.0.1:8000/v1
 export LOCAL_LLM_API_KEY=
 export LOCAL_LLM_MODEL=Qwen/Qwen3.5-27B
 export LOCAL_LLM_ENABLE_THINKING=false
+export EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 export VLM_BACKEND=off
 export OCR_ENGINE=easyocr
 export OCR_LANGS=ru,en
@@ -149,6 +152,7 @@ CUDA_VISIBLE_DEVICES="" uv run python generate_hf_dataset.py \
   --limit 20 \
   --top-k 5 \
   --temperature 0 \
+  --max-tokens 1200 \
   --resume \
   2>&1 | tee "$RUN_LOG"
 ```
@@ -166,10 +170,11 @@ CUDA_VISIBLE_DEVICES="" uv run python generate_hf_dataset.py \
   --cache-dir "$HF_HOME" \
   --output-dir "$RUN_DIR" \
   --rag-mode tool_agent \
-  --max-tool-rounds 4 \
+  --max-tool-rounds 8 \
   --limit 20 \
   --top-k 5 \
   --temperature 0 \
+  --max-tokens 1200 \
   --resume \
   2>&1 | tee "$RUN_LOG"
 ```
@@ -177,9 +182,17 @@ CUDA_VISIBLE_DEVICES="" uv run python generate_hf_dataset.py \
 Always use separate output directories for the two modes. The mode, tool-round
 limit, model settings, prompt hash, and retrieval settings are included in every
 checkpoint and in `run_manifest.json`; `--resume` rejects a changed configuration.
+For the final comparison, keep the dataset revision, embedding model, VLM/OCR
+settings, chunking, `top-k`, temperature, and completion limit identical between
+the two modes. The larger tool-round limit applies only to `tool_agent`.
+For Qwen3.5 evaluation runs, `1200` completion tokens is enough for the benchmark's
+short answers and tool-call JSON while reducing the impact of a rare repetitive
+completion. The tool agent also rewrites excessively long or repeated final answers.
 
 For a full run, use a new `RUN_NAME` and remove `--limit 20`. Add
 `--revision <dataset-commit>` when the run must use a fixed dataset snapshot.
+For a targeted pilot, replace `--limit` with one or more exact IDs, for example
+`--record-id q0052 --record-id q0115 --record-id q0122`.
 
 Detach from `tmux` with `Ctrl+B`, then `D`. Reattach with:
 

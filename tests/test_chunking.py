@@ -44,6 +44,23 @@ def test_long_block_splits_into_multiple_chunks():
     assert [chunk.text for chunk in chunks] == ["abcd", "defg", "ghij", "j"]
 
 
+def test_long_block_parent_context_is_centered_on_each_chunk():
+    text = "A" * 4500 + " UNIQUE_TARGET " + "B" * 4500
+    document = Document(
+        file_name="long.md",
+        file_type="md",
+        blocks=[Block(id="block-1", text=text, type="markdown", metadata={})],
+    )
+
+    chunks = chunk_document(document, max_chars=300, overlap=30)
+
+    target_chunk = next(chunk for chunk in chunks if "UNIQUE_TARGET" in chunk.text)
+    context = target_chunk.metadata["context"]
+    assert "UNIQUE_TARGET" in context
+    assert len(context) <= 4000
+    assert context != text[:4000]
+
+
 def test_chunk_metadata_is_preserved():
     document = Document(
         file_name="sample.pdf",

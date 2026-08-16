@@ -58,9 +58,54 @@ TOOL_AGENT_SYSTEM_PROMPT = """You answer questions about uploaded documents.
 Use the available document tools before making factual claims about the files.
 Start with search_documents for topical questions. Use its source_file filter when
 the user names one document. After a search, call read_source_context when the
-returned passage is incomplete. Use list_documents and get_document_outline to
+returned passage is incomplete. If the user's wording and the document terminology
+may use different languages, abbreviations, or informal synonyms, retry with the
+likely source-language terms. For programming syntax, search exact identifiers and
+directive names, not only a prose description. Use list_documents and
+get_document_outline to
 navigate available files. Use read_document for a complete overview or an exhaustive
 question about a short or unstructured file, following next_offset when necessary.
+When a question compares or combines multiple named documents, collect the evidence
+needed from every relevant document before answering. Use source-filtered tool calls,
+and request independent files in parallel when the calls do not depend on each other.
+For questions asking whether something is absent, do not treat one unsuccessful
+search as proof of absence: try alternate wording and inspect the likely section or
+document outline before concluding that the information is not present.
+For counts, lists, comparisons, and superlatives such as "which is smallest", first
+identify the complete set that must be checked and gather evidence for every relevant
+item. Do not choose an answer from one isolated search result when the question asks
+about several candidates. Prefer an explicit statement of the requested property to
+an inference from item order, naming, ingredients, proximity, or outside knowledge.
+If the document explicitly assigns the property to one candidate, do not introduce
+an unsupported tie or a different candidate.
+If evidence states that a list contains N items but shows fewer than N, do not guess
+the missing entries. Search for the missing number/name or read the following source
+location until all N items are supported.
+When a setup clause refers to a ratio or frequency without naming both compared
+groups, and the evidence contains several nearby percentages or ratios, do not pick
+one silently. Report every directly relevant relationship with its exact numerator
+and denominator labels, or gather more evidence to disambiguate it. Never relabel a
+general ratio as a ratio between two subtypes.
+For a question spanning a short slide deck, inspect its slide map with
+get_document_outline and then prefer one read_document call over separate reads of
+every slide. If locations.numbered_sections is present, use those author-provided
+divider slides as navigation hints, not as an exhaustive thematic count: an opening
+overview can be non-thematic even when numbered, while a substantial unnumbered
+topic still counts. Treat slides explicitly devoted to barriers, risks, challenges,
+or limitations as substantial topics. When counting thematic sections,
+distinguish substantive topics from
+cover, introductory overview, agenda, or thanks slides; exclude those opening and
+closing service slides from the count. Include substantial unnumbered topics. Follow
+the presentation's own organization: an explicitly named conclusion is a section
+unless the question says to exclude it. Never substitute an introduction for the
+conclusion just to preserve a count. A slide is not automatically a section: merge
+adjacent slides that develop the same high-level topic, using titles and contents.
+Concretely, exclude sections titled "Введение" or "Introduction" from a thematic
+count and include sections titled "Заключение" or "Conclusion". Before answering,
+verify that the final section list follows this rule. When reporting a section count,
+list the section names so the count is auditable. Critical rule for Russian decks:
+«Введение» не является тематическим разделом, а «Заключение» является; never state
+that concluding slides were excluded when the deck has a conclusion section.
 For structured files, prefer read_document_section for a specific section,
 read_document_location for a page, slide, or sheet, and read_table for tabular data.
 For exact totals, extrema, distinct counts, or grouped totals over a whole table,
@@ -85,11 +130,25 @@ document tool before making new factual claims about document contents. Resolve 
 reference from history, then retrieve or read fresh evidence for the current answer.
 Never continue a document fact from a previous answer without checking the documents.
 
+Before finalizing, decompose multi-part and multi-document questions into a short
+checklist and cover every requested clause. When the question contrasts a stated
+fact from one document with a fact from another, report both sides of the contrast,
+even when the first fact is phrased as setup for "and what about the other?".
+
 Base the final answer only on tool results. Preserve the language of the user's
 question. Cite available source metadata such as source_file, page_number,
 slide_number, or sheet_name. If a tool response contains next_offset and more
 content is needed, request the next part. If the tools do not provide enough
 evidence, say so clearly. Do not invent sources, document contents, or tool results.
+Answer directly and concisely; do not narrate planned searches or tool limitations.
+Unless the user explicitly requests a detailed treatment, keep the final answer
+under 80 words. Give the answer once: do not repeat conclusions, evidence, or
+whole paragraphs, and do not preface it with a description of your analysis.
+For yes/no questions, lead with an explicit yes or no and include only the evidence
+needed to support it.
+State one resolved conclusion. Do not expose discarded hypotheses, contradictory
+alternatives, or internal deliberation in the final answer; prefer explicit document
+statements over conclusions inferred only from ordering or proximity.
 """
 
 TOOL_LIMIT_MESSAGE = """The tool-call limit has been reached. Do not call another tool.
@@ -112,6 +171,7 @@ class ToolAgentContext:
     vlm_client: VLMClient | None = None
     asset_store: DocumentAssetStore | None = None
     require_evidence_tool: bool = False
+    required_evidence_files: tuple[str, ...] = ()
 
 
 @tool
@@ -237,7 +297,7 @@ def get_document_outline(
     source_file: str,
     runtime: ToolRuntime[Any, dict],
 ) -> str:
-    """Return readable section, table, and visual identifiers for one document.
+    """Return readable section, location, table, and visual identifiers.
 
     Args:
         source_file: Exact file name returned by list_documents.
@@ -247,6 +307,7 @@ def get_document_outline(
         {
             "source_file": document.file_name,
             "table_of_contents": _document_outline(document),
+            "locations": _document_locations(document),
             "tables": _document_tables(document),
             "table_analysis_hint": (
                 "Use analyze_table instead of paginating read_table for whole-table "
@@ -415,6 +476,9 @@ def read_table(
 ) -> Command:
     """Read rows from a table or XLSX sheet identified by get_document_outline.
 
+    The payload distinguishes ``data_rows`` (header excluded) from
+    ``total_rows`` (all readable lines used by pagination).
+
     Args:
         source_file: Exact file name returned by list_documents.
         table_id: Exact table_id returned by get_document_outline.
@@ -449,6 +513,7 @@ def read_table(
         "table_id": normalized_id,
         "format": metadata["table_format"],
         **row_page,
+        "data_rows": _table_data_row_count(document, block),
         "metadata": metadata,
     }
     return _evidence_command(
@@ -639,7 +704,7 @@ def calculate(
         "percentage_of",
         "percent_change",
     ],
-    values: list[Decimal],
+    values: list[float],
 ) -> str:
     """Perform deterministic decimal arithmetic over document-derived values.
 
@@ -650,14 +715,15 @@ def calculate(
 
     Args:
         operation: Arithmetic operation to perform.
-        values: Decimal input values in operation order. Binary operations require
+        values: Numeric input values in operation order. Binary operations require
             exactly two values; add, multiply, and average accept one or more.
     """
-    result, unit = _calculate_values(operation, values)
+    decimal_values = [Decimal(str(value)) for value in values]
+    result, unit = _calculate_values(operation, decimal_values)
     return json.dumps(
         {
             "operation": operation,
-            "values": [_format_decimal(value) for value in values],
+            "values": [_format_decimal(value) for value in decimal_values],
             "result": _format_decimal(result),
             "unit": unit,
         },
@@ -895,6 +961,157 @@ def _document_outline(document: Document) -> list[dict[str, Any]]:
     return outline
 
 
+def _document_locations(document: Document) -> dict[str, Any]:
+    slides: list[dict[str, Any]] = []
+    numbered_sections: list[dict[str, Any]] = []
+    seen_slides: set[int] = set()
+    for block in document.blocks:
+        slide_number = block.metadata.get("slide_number")
+        if (
+            not isinstance(slide_number, int)
+            or isinstance(slide_number, bool)
+            or slide_number in seen_slides
+        ):
+            continue
+        seen_slides.add(slide_number)
+        title = _location_title(block.text, f"Slide {slide_number}")
+        slides.append({"slide_number": slide_number, "title": title})
+        section_number = _location_section_number(block.text, f"Slide {slide_number}")
+        if section_number is not None:
+            numbered_sections.append(
+                {
+                    "section_number": section_number,
+                    "title": title,
+                    "slide_number": slide_number,
+                }
+            )
+
+    sheets = [
+        {"sheet_name": sheet_name}
+        for sheet_name in _unique_metadata_values(document.blocks, "sheet_name")
+    ]
+    locations = {"slides": slides, "sheets": sheets}
+    if numbered_sections:
+        locations["numbered_sections"] = numbered_sections
+    section_review = _presentation_section_review(document, slides, numbered_sections)
+    if section_review:
+        locations["thematic_section_review"] = section_review
+    return locations
+
+
+def _presentation_section_review(
+    document: Document,
+    slides: list[dict[str, Any]],
+    numbered_sections: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not numbered_sections:
+        return None
+
+    numbered_slides = {entry["slide_number"] for entry in numbered_sections}
+    substantial_terms = (
+        "barrier",
+        "risk",
+        "challenge",
+        "limitation",
+        "constraint",
+        "барьер",
+        "риск",
+        "проблем",
+        "ограничен",
+    )
+    unnumbered_candidates = [
+        slide
+        for slide in slides
+        if slide["slide_number"] not in numbered_slides
+        and isinstance(slide.get("title"), str)
+        and any(term in slide["title"].casefold() for term in substantial_terms)
+    ]
+    first_numbered = numbered_sections[0]
+    opening_candidates = [first_numbered] if first_numbered["slide_number"] <= 3 else []
+    if not opening_candidates and not unnumbered_candidates:
+        return None
+
+    review: dict[str, Any] = {
+        "opening_numbered_candidates": opening_candidates,
+        "substantial_unnumbered_candidates": unnumbered_candidates,
+        "guidance": (
+            "Do not copy the numbered-divider count mechanically. Inspect opening "
+            "candidates and exclude them when they are introductory; include each "
+            "substantial unnumbered topic, then list the final thematic sections."
+        ),
+    }
+    if opening_candidates and _opening_section_is_introductory(document, numbered_sections):
+        review["introductory_numbered_sections"] = opening_candidates
+        reconciled = [*numbered_sections[1:], *unnumbered_candidates]
+        review["recommended_thematic_sections"] = sorted(
+            (
+                {
+                    "title": entry["title"],
+                    "slide_number": entry["slide_number"],
+                }
+                for entry in reconciled
+            ),
+            key=lambda entry: entry["slide_number"],
+        )
+    return review
+
+
+def _opening_section_is_introductory(
+    document: Document,
+    numbered_sections: list[dict[str, Any]],
+) -> bool:
+    first_slide = numbered_sections[0]["slide_number"]
+    next_slide = (
+        numbered_sections[1]["slide_number"] if len(numbered_sections) > 1 else first_slide + 2
+    )
+    opening_text = "\n".join(
+        block.text
+        for block in document.blocks
+        if isinstance((slide := block.metadata.get("slide_number")), int)
+        and first_slide <= slide < next_slide
+    ).casefold()
+    introduction_terms = (
+        "introduction",
+        "introductory",
+        "overview",
+        "agenda",
+        "this presentation",
+        "presentation will",
+        "введение",
+        "вводн",
+        "обзор",
+        "повестк",
+        "эта презентация",
+        "презентация рассмотрит",
+    )
+    return any(term in opening_text for term in introduction_terms)
+
+
+def _location_title(text: str, scaffold: str) -> str | None:
+    for line in _location_content_lines(text, scaffold):
+        return line.removeprefix("Title:").strip()[:300] or None
+    return None
+
+
+def _location_section_number(text: str, scaffold: str) -> int | None:
+    lines = _location_content_lines(text, scaffold)
+    if len(lines) != 2:
+        return None
+    match = re.fullmatch(r"(\d{1,3})[.)]?", lines[1])
+    if match is None:
+        return None
+    value = int(match.group(1))
+    return value if value > 0 else None
+
+
+def _location_content_lines(text: str, scaffold: str) -> list[str]:
+    return [
+        line
+        for raw_line in text.splitlines()
+        if (line := raw_line.strip()) and line != scaffold and line not in {"Text:", "Table:"}
+    ]
+
+
 def _document_tables(document: Document) -> list[dict[str, Any]]:
     tables = []
     current_section: str | None = None
@@ -903,6 +1120,7 @@ def _document_tables(document: Document) -> list[dict[str, Any]]:
             current_section = block.text.strip()
         if not _is_table_block(document, block):
             continue
+        readable_rows = len([line for line in block.text.splitlines() if line.strip()])
         tables.append(
             {
                 "table_id": block.id,
@@ -910,7 +1128,8 @@ def _document_tables(document: Document) -> list[dict[str, Any]]:
                 "page_number": _block_page_number(block),
                 "slide_number": block.metadata.get("slide_number"),
                 "sheet_name": block.metadata.get("sheet_name"),
-                "rows": len([line for line in block.text.splitlines() if line.strip()]),
+                "rows": _table_data_row_count(document, block),
+                "readable_rows_including_header": readable_rows,
                 "format": _table_format(document, block),
             }
         )
@@ -1007,6 +1226,14 @@ def _parse_table_rows(
     if not rows:
         raise ValueError("the selected table contains no data rows")
     return headers, rows
+
+
+def _table_data_row_count(document: Document, block: Block) -> int:
+    try:
+        _, rows = _parse_table_rows(document, block)
+    except ValueError:
+        return len([line for line in block.text.splitlines() if line.strip()])
+    return len(rows)
 
 
 def _is_markdown_separator_row(values: list[str]) -> bool:

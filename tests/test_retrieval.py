@@ -162,3 +162,21 @@ def test_lancedb_retriever_keeps_embeddings_unnormalized_for_cosine_search():
 
     assert embeddings.tolist() == [[3.0, 4.0]]
     assert model.calls == [["document"]]
+
+
+def test_default_embedding_model_honors_environment(monkeypatch):
+    loaded_names = []
+    model = FakeEmbeddingModel({"document": [1.0, 0.0]})
+
+    def fake_load(model_name):
+        loaded_names.append(model_name)
+        return model
+
+    monkeypatch.setenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+    monkeypatch.setattr("file_agent.lancedb_retriever._load_default_embedding_model", fake_load)
+
+    retriever = LanceDBRetriever()
+    embeddings = retriever._encode(["document"])
+
+    assert embeddings.tolist() == [[1.0, 0.0]]
+    assert loaded_names == ["BAAI/bge-m3"]

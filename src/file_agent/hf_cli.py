@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from datasets import Dataset
+from dotenv import load_dotenv
 
 from file_agent.hf_batch import (
     BatchGenerationResult,
@@ -42,6 +43,7 @@ class HFGenerationConfig:
     max_chars: int = 1000
     overlap: int = 100
     limit: int | None = None
+    record_ids: tuple[str, ...] = ()
     resume: bool = False
     rag_mode: str | None = None
     max_tool_rounds: int | None = None
@@ -65,6 +67,12 @@ class HFGenerationConfig:
             raise ValueError("overlap must be smaller than max_chars")
         if self.limit is not None and self.limit <= 0:
             raise ValueError("limit must be greater than 0")
+        if self.limit is not None and self.record_ids:
+            raise ValueError("limit and record_ids cannot be used together")
+        if any(not record_id.strip() for record_id in self.record_ids):
+            raise ValueError("record_ids must contain only non-empty strings")
+        if len(set(self.record_ids)) != len(self.record_ids):
+            raise ValueError("record_ids must not contain duplicates")
         if self.rag_mode is not None:
             resolve_rag_mode(self.rag_mode)
         if self.max_tool_rounds is not None:
@@ -88,6 +96,10 @@ def run_hf_dataset_generation(
 ) -> HFGenerationRunResult:
     """Run dataset loading, RAG generation, final export, and manifest writing."""
     _validate_output_directory(config.output_dir)
+    # Some parser modules load the project-level .env during import. Explicitly
+    # override those values here so --env-file is authoritative for the entire
+    # batch run, including embeddings, OCR and VLM settings, not only the LLM.
+    load_dotenv(config.env_file, override=True)
 
     active_llm_client = (
         llm_client
@@ -111,7 +123,7 @@ def run_hf_dataset_generation(
         cache_dir=config.cache_dir,
     )
     available_rows = len(source_dataset)
-    selected_dataset = _select_rows(source_dataset, config.limit)
+    selected_dataset = _select_rows(source_dataset, config.limit, config.record_ids)
     if not len(selected_dataset):
         raise ValueError("The selected dataset contains no rows")
 
@@ -175,6 +187,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-chars", type=_positive_int, default=1000, help="Chunk size")
     parser.add_argument("--overlap", type=_non_negative_int, default=100, help="Chunk overlap")
     parser.add_argument("--limit", type=_positive_int, help="Process only the first N rows")
+    parser.add_argument(
+        "--record-id",
+        dest="record_ids",
+        action="append",
+        default=[],
+        help="Process one exact dataset row ID; repeat to select multiple rows",
+    )
     parser.add_argument("--resume", action="store_true", help="Reuse matching row checkpoints")
     parser.add_argument(
         "--rag-mode",
@@ -228,6 +247,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_chars=args.max_chars,
             overlap=args.overlap,
             limit=args.limit,
+            record_ids=tuple(args.record_ids),
             resume=args.resume,
             rag_mode=args.rag_mode,
             max_tool_rounds=args.max_tool_rounds,
@@ -248,7 +268,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _select_rows(dataset: Dataset, limit: int | None) -> Dataset:
+def _select_rows(
+    dataset: Dataset,
+    limit: int | None,
+    record_ids: Sequence[str] = (),
+) -> Dataset:
+    if record_ids:
+        positions = {record_id: index for index, record_id in enumerate(dataset["id"])}
+        missing = [record_id for record_id in record_ids if record_id not in positions]
+        if missing:
+            raise ValueError(f"Dataset does not contain record IDs: {', '.join(missing)}")
+        return dataset.select([positions[record_id] for record_id in record_ids])
     if limit is None or limit >= len(dataset):
         return dataset
     return dataset.select(range(limit))
@@ -299,6 +329,7 @@ def _build_manifest(
             "available_rows": available_rows,
             "selected_rows": len(dataset),
             "limit": config.limit,
+            "record_ids": list(config.record_ids),
             "records_sha256": _dataset_records_sha256(dataset),
         },
         "generation": {

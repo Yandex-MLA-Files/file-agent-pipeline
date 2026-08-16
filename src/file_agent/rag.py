@@ -102,6 +102,7 @@ def answer_indexed_documents(
     vlm_client: VLMClient | None = None,
     asset_store: DocumentAssetStore | None = None,
     require_evidence_tool: bool = False,
+    required_evidence_files: tuple[str, ...] = (),
 ) -> RAGResponse:
     with tracer.start_as_current_span("file_agent.answer_indexed_documents") as span:
         span.set_attribute("file_agent.question", question)
@@ -129,6 +130,7 @@ def answer_indexed_documents(
                 vlm_client=vlm_client,
                 asset_store=asset_store,
                 require_evidence_tool=require_evidence_tool,
+                required_evidence_files=required_evidence_files,
             )
         else:
             state = qa_graph.invoke(
@@ -377,6 +379,7 @@ def _answer_with_tool_agent(
     vlm_client: VLMClient | None,
     asset_store: DocumentAssetStore | None,
     require_evidence_tool: bool,
+    required_evidence_files: tuple[str, ...] = (),
 ) -> RAGResponse:
     if not isinstance(llm_client, ToolCallingLLMClient):
         raise TypeError("The configured LLM client does not support native tool calling")
@@ -403,6 +406,7 @@ def _answer_with_tool_agent(
             vlm_client=vlm_client,
             asset_store=asset_store,
             require_evidence_tool=require_evidence_tool,
+            required_evidence_files=required_evidence_files,
         ),
     )
     return state["response"]

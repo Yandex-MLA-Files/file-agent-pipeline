@@ -1,4 +1,5 @@
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,10 @@ from file_agent.telemetry import tracer
 
 LOGGER = logging.getLogger(__name__)
 MAX_EMPTY_RESPONSE_RECOVERY_ATTEMPTS = 2
+MAX_LOW_QUALITY_RESPONSE_RECOVERY_ATTEMPTS = 2
+MAX_DEFAULT_FINAL_ANSWER_CHARACTERS = 4000
+MAX_DEFAULT_FINAL_ANSWER_WORDS = 150
+MIN_REPEATED_PARAGRAPH_CHARACTERS = 80
 
 
 class IngestionState(TypedDict, total=False):
@@ -321,9 +326,138 @@ def tool_agent_model_node(
             messages=messages,
             available_tools=available_tools,
         )
+    if not response.tool_calls and _is_low_quality_final_answer(response.content):
+        response = _recover_low_quality_final_answer(
+            runtime=runtime,
+            messages=messages,
+            initial_response=response,
+        )
+    if not response.tool_calls and available_tools:
+        missing_files = _missing_required_evidence_files(state, runtime.context)
+        if missing_files:
+            response = _recover_missing_document_evidence(
+                runtime=runtime,
+                messages=messages,
+                initial_response=response,
+                missing_files=missing_files,
+            )
     if not available_tools and response.tool_calls:
         raise ValueError("LLM requested a tool after the tool-call limit was reached")
     return {"messages": [response]}
+
+
+def _missing_required_evidence_files(
+    state: ToolAgentState,
+    context: ToolAgentContext,
+) -> list[str]:
+    observed_files = {
+        source_file.casefold()
+        for result in state.get("sources", [])
+        if isinstance((source_file := result.chunk.metadata.get("source_file")), str)
+    }
+    return [
+        source_file
+        for source_file in context.required_evidence_files
+        if source_file.casefold() not in observed_files
+    ]
+
+
+def _recover_missing_document_evidence(
+    *,
+    runtime: Runtime[ToolAgentContext],
+    messages: list[BaseMessage],
+    initial_response: AIMessage,
+    missing_files: list[str],
+) -> AIMessage:
+    LOGGER.warning(
+        "Tool-agent draft omitted evidence from required document(s): %s",
+        ", ".join(missing_files),
+    )
+    response = runtime.context.llm_client.chat_with_tools(
+        messages=[
+            *messages,
+            initial_response,
+            HumanMessage(
+                content=(
+                    "Your draft was not accepted because this multi-document question "
+                    "still has no evidence from: "
+                    f"{', '.join(missing_files)}. Call a document evidence tool now "
+                    "with source_file set to one of those exact names. Do not return "
+                    "the final answer until every named file has been checked."
+                )
+            ),
+        ],
+        tools=DOCUMENT_TOOLS,
+        tool_choice="required",
+    )
+    if not response.tool_calls:
+        LOGGER.warning(
+            "LLM ignored the required tool choice while collecting multi-document evidence"
+        )
+    return response
+
+
+def _is_low_quality_final_answer(content: str | list) -> bool:
+    answer = str(content).strip()
+    if len(answer) > MAX_DEFAULT_FINAL_ANSWER_CHARACTERS:
+        return True
+    if len(re.findall(r"\b[\w-]+\b", answer, flags=re.UNICODE)) > MAX_DEFAULT_FINAL_ANSWER_WORDS:
+        return True
+
+    paragraphs = [
+        re.sub(r"\s+", " ", paragraph).strip().casefold()
+        for paragraph in re.split(r"\n\s*\n", answer)
+    ]
+    substantial = [
+        paragraph for paragraph in paragraphs if len(paragraph) >= MIN_REPEATED_PARAGRAPH_CHARACTERS
+    ]
+    return len(substantial) != len(set(substantial))
+
+
+def _recover_low_quality_final_answer(
+    *,
+    runtime: Runtime[ToolAgentContext],
+    messages: list[BaseMessage],
+    initial_response: AIMessage,
+) -> AIMessage:
+    candidates = [initial_response]
+    for attempt in range(1, MAX_LOW_QUALITY_RESPONSE_RECOVERY_ATTEMPTS + 1):
+        LOGGER.warning(
+            "Tool-agent LLM returned an excessively long or repetitive final answer; "
+            "recovery attempt %s/%s",
+            attempt,
+            MAX_LOW_QUALITY_RESPONSE_RECOVERY_ATTEMPTS,
+        )
+        retry_messages = [
+            *messages,
+            HumanMessage(
+                content=(
+                    "Your draft final answer was rejected because it was excessively "
+                    "long or repetitive. Return only a corrected final answer of at "
+                    "most 80 words using the document evidence already provided. "
+                    "State one resolved conclusion, omit analysis and discarded "
+                    "alternatives, and do not repeat any point. Do not call tools."
+                )
+            ),
+        ]
+        try:
+            response = runtime.context.llm_client.chat_with_tools(
+                messages=retry_messages,
+                tools=[],
+                tool_choice="auto",
+            )
+        except EmptyLLMResponseError:
+            continue
+        if response.tool_calls:
+            LOGGER.warning("LLM requested a tool while rewriting its final answer")
+            continue
+        candidates.append(response)
+        if not _is_low_quality_final_answer(response.content):
+            return response
+
+    # A bad draft should not abort a long batch. The shortest non-empty candidate
+    # is the least harmful fallback and normally comes from one of the rewrites.
+    return min(candidates, key=lambda candidate: len(str(candidate.content).strip()))
 
 
 def _recover_empty_tool_agent_response(

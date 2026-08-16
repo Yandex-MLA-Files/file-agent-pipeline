@@ -26,6 +26,17 @@ def create_presentation(file_path):
     table.cell(1, 0).text = "Accuracy"
     table.cell(1, 1).text = "0.85"
 
+    grouped_slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    grouped_slide.shapes.title.text = "Grouped content"
+    group = grouped_slide.shapes.add_group_shape()
+    grouped_text = group.shapes.add_textbox(
+        left=Inches(1),
+        top=Inches(1.5),
+        width=Inches(4),
+        height=Inches(1),
+    )
+    grouped_text.text = "Text nested inside a PowerPoint group."
+
     presentation.save(file_path)
 
 
@@ -37,7 +48,7 @@ def test_pptx_parser_creates_block_for_each_slide(tmp_path):
 
     assert document.file_name == "sample.pptx"
     assert document.file_type == "pptx"
-    assert len(document.blocks) == 2
+    assert len(document.blocks) == 3
     assert document.blocks[0].type == "pptx_slide"
     assert document.blocks[1].type == "pptx_slide"
 
@@ -55,6 +66,7 @@ def test_pptx_parser_extracts_slide_text_and_tables(tmp_path):
     assert "Title: Metrics" in document.blocks[1].text
     assert "Name\tValue" in document.blocks[1].text
     assert "Accuracy\t0.85" in document.blocks[1].text
+    assert "Text nested inside a PowerPoint group." in document.blocks[2].text
 
 
 def test_pptx_parser_preserves_slide_metadata(tmp_path):

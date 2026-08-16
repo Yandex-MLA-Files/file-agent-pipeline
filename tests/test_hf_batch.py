@@ -109,7 +109,7 @@ def test_generate_hf_qa_records_processes_in_order_and_writes_checkpoints(
     assert first_checkpoint["parameters"]["model_id"] == "fake/model"
     assert (
         first_checkpoint["parameters"]["rag_pipeline_version"]
-        == "section-token-small-to-big-agent-evidence-v3"
+        == "section-token-small-to-big-agent-evidence-v15"
     )
     assert first_checkpoint["parameters"]["rag_mode"] == "standard"
     assert first_checkpoint["parameters"]["max_tool_rounds"] is None
@@ -147,6 +147,8 @@ def test_cached_document_loader_reuses_parsing_and_returns_isolated_copies(
     monkeypatch.chdir(tmp_path)
     document_path = tmp_path / "shared.txt"
     document_path.write_text("Shared document", encoding="utf-8")
+    duplicate_path = tmp_path / "duplicate.txt"
+    duplicate_path.write_text("Shared document", encoding="utf-8")
     load_calls = []
 
     def fake_load_documents(file_paths):
@@ -174,11 +176,14 @@ def test_cached_document_loader_reuses_parsing_and_returns_isolated_copies(
     first_document = loader([relative_document_path])[0]
     first_document.blocks[0].metadata["dataset_record_id"] = "q0001"
     second_document = loader([document_path])[0]
+    duplicate_document = loader([duplicate_path])[0]
 
     assert load_calls == [[relative_document_path]]
     assert first_document is not second_document
     assert first_document.blocks[0] is not second_document.blocks[0]
     assert "dataset_record_id" not in second_document.blocks[0].metadata
+    assert duplicate_document.file_name == "duplicate.txt"
+    assert duplicate_document.blocks[0].metadata["source_file"] == "duplicate.txt"
 
 
 def test_generate_hf_qa_records_resumes_without_processing_again(monkeypatch, tmp_path):

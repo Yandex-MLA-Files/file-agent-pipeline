@@ -1,5 +1,4 @@
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -169,11 +168,9 @@ def get_embedding_tokenizer(model_name: str | None = None) -> Tokenizer | None:
     its window is silently dropped at index time. Loading is lazy and failures
     (offline environment, missing extra) degrade to character budgeting.
     """
-    name = model_name or os.getenv("EMBEDDING_MODEL")
-    if not name:
-        from file_agent.lancedb_retriever import DEFAULT_SEMANTIC_MODEL_NAME
+    from file_agent.lancedb_retriever import resolve_semantic_model_name
 
-        name = DEFAULT_SEMANTIC_MODEL_NAME
+    name = resolve_semantic_model_name(model_name)
     try:
         from transformers import AutoTokenizer
 
@@ -362,7 +359,7 @@ class _Chunker:
         limit = self._reserved_limit(heading)
         # Small-to-big retrieval: every piece of this oversized section links back
         # to the whole section text, which is what the LLM will actually read.
-        parent = self._bound_parent(_SEPARATOR.join(b.text for b in blocks if b.text))
+        parent = _SEPARATOR.join(b.text for b in blocks if b.text)
         buffer: list[Block] = []
         buffer_size = 0
 
@@ -458,7 +455,7 @@ class _Chunker:
         # Always offer the whole block as parent context; _emit drops it when the
         # piece already is the whole block, and keeps it when the safety net in
         # _enforce_limit splits the block further.
-        parent = self._bound_parent(text)
+        parent = text
         for piece in pieces:
             self._emit(
                 [block],
@@ -470,10 +467,38 @@ class _Chunker:
             )
 
     @staticmethod
-    def _bound_parent(text: str) -> str:
+    def _bound_parent(text: str, focus: str) -> str:
+        """Return a bounded parent window centered on the retrieved piece.
+
+        Returning the first N characters of every oversized parent made later
+        chunks retrieve the beginning of a document instead of the passage that
+        actually matched. Keep the small-to-big context local to ``focus`` so a
+        result near the end of a long Markdown block, DOCX section, or OCR page
+        exposes its real surroundings.
+        """
         if len(text) <= PARENT_CONTEXT_MAX_CHARS:
             return text
-        return text[:PARENT_CONTEXT_MAX_CHARS] + " …"
+
+        normalized_focus = focus.strip()
+        position = text.find(normalized_focus)
+        if position < 0 and normalized_focus:
+            # Continuation chunks may prepend a repeated heading. A sufficiently
+            # long suffix is still distinctive and normally occurs verbatim.
+            anchor = normalized_focus[-min(500, len(normalized_focus)) :]
+            anchor_position = text.find(anchor)
+            if anchor_position >= 0:
+                position = anchor_position - (len(normalized_focus) - len(anchor))
+        if position < 0:
+            # The focus is already a useful bounded evidence unit; returning it
+            # is safer than unrelated text from the start of the parent.
+            return normalized_focus[:PARENT_CONTEXT_MAX_CHARS]
+
+        focus_length = min(len(normalized_focus), PARENT_CONTEXT_MAX_CHARS)
+        surrounding = PARENT_CONTEXT_MAX_CHARS - focus_length
+        start = max(0, position - surrounding // 2)
+        end = min(len(text), start + PARENT_CONTEXT_MAX_CHARS)
+        start = max(0, end - PARENT_CONTEXT_MAX_CHARS)
+        return text[start:end]
 
     def _split_text(self, text: str, limit: int) -> list[str]:
         """Split oversized text on sentence boundaries, with sentence overlap."""
@@ -675,7 +700,9 @@ class _Chunker:
             # Small-to-big retrieval: the piece is what gets embedded, the parent
             # passage is what the LLM reads (see qa.build_context_from_results).
             if parent and len(parent) > len(piece):
-                metadata["context"] = parent
+                bounded_parent = self._bound_parent(parent, piece)
+                if len(bounded_parent) > len(piece):
+                    metadata["context"] = bounded_parent
             self._chunks.append(
                 Chunk(
                     id=f"{blocks[0].id}-chunk-{self._index}",

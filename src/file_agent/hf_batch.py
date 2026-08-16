@@ -13,7 +13,7 @@ from file_agent.agent_tools import TOOL_AGENT_SYSTEM_PROMPT
 from file_agent.document import Document
 from file_agent.hf_dataset import QADatasetRecord, validate_qa_dataset
 from file_agent.hf_rag import DocumentLoader, GeneratedQARecord, process_hf_qa_record
-from file_agent.lancedb_retriever import DEFAULT_SEMANTIC_MODEL_NAME
+from file_agent.lancedb_retriever import resolve_semantic_model_name
 from file_agent.llm.base import LLMClient
 from file_agent.qa import build_qa_prompt
 from file_agent.rag import load_documents, resolve_max_tool_rounds, resolve_rag_mode
@@ -22,8 +22,9 @@ from file_agent.vlm.base import VLMClient
 
 CHECKPOINT_SCHEMA_VERSION = 3
 CHECKPOINTS_DIRECTORY_NAME = "checkpoints"
-RAG_PIPELINE_VERSION = "section-token-small-to-big-agent-evidence-v3"
+RAG_PIPELINE_VERSION = "section-token-small-to-big-agent-evidence-v15"
 LOGGER = logging.getLogger(__name__)
+DOCUMENT_HASH_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -144,33 +145,52 @@ def generate_hf_qa_records(
 
 
 def _create_cached_document_loader() -> DocumentLoader:
-    cache: dict[Path, Document] = {}
+    cache: dict[tuple[str, str], Document] = {}
+    path_keys: dict[Path, tuple[str, str]] = {}
 
     def load_cached_documents(file_paths: list[str | Path]) -> list[Document]:
         documents: list[Document] = []
 
         for file_path in file_paths:
             source_path = Path(file_path)
-            cache_key = source_path.resolve()
+            resolved_path = source_path.resolve()
+            cache_key = path_keys.get(resolved_path)
+            if cache_key is None:
+                cache_key = (source_path.suffix.casefold(), _file_sha256(source_path))
+                path_keys[resolved_path] = cache_key
             cached_document = cache.get(cache_key)
             if cached_document is None:
-                # Hugging Face snapshot files are symlinks to extensionless blob
-                # paths. Use the resolved path only as the cache identity and
-                # keep the original filename so parser selection still sees
-                # extensions such as .pdf and .docx.
                 cached_document = load_documents([source_path])[0]
                 cache[cache_key] = cached_document
             else:
-                LOGGER.info("Reusing parsed document from batch cache: %s", cache_key)
+                LOGGER.info("Reusing parsed document from content cache: %s", source_path.name)
 
             # HF processing adds row-specific dataset metadata to every block.
             # Return an isolated copy so one question cannot mutate the cached
             # document or leak its metadata into another question.
-            documents.append(deepcopy(cached_document))
+            documents.append(_clone_document_for_source(cached_document, source_path.name))
 
         return documents
 
     return load_cached_documents
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(DOCUMENT_HASH_CHUNK_SIZE), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _clone_document_for_source(document: Document, source_file: str) -> Document:
+    cloned = deepcopy(document)
+    cloned.file_name = source_file
+    if "source_file" in cloned.metadata:
+        cloned.metadata["source_file"] = source_file
+    for block in cloned.blocks:
+        block.metadata["source_file"] = source_file
+    return cloned
 
 
 def build_generation_parameters(
@@ -208,7 +228,7 @@ def build_generation_parameters(
         "require_evidence_tool": active_rag_mode == "tool_agent",
         "retriever": _component_identifier(retriever) if retriever is not None else "default",
         "rag_pipeline_version": RAG_PIPELINE_VERSION,
-        "embedding_model": os.getenv("EMBEDDING_MODEL") or DEFAULT_SEMANTIC_MODEL_NAME,
+        "embedding_model": resolve_semantic_model_name(),
         "ocr_engine": os.getenv("OCR_ENGINE", "easyocr").strip().lower(),
         "ocr_langs": os.getenv("OCR_LANGS", "ru,en").strip(),
         "vlm_backend": os.getenv("VLM_BACKEND", "off").strip().lower(),

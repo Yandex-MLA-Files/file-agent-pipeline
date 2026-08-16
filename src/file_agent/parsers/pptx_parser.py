@@ -63,7 +63,7 @@ def _get_slide_title(slide: Any) -> str:
 def _get_text_lines(slide: Any, title: str) -> list[str]:
     lines: list[str] = []
 
-    for shape in slide.shapes:
+    for shape in _iter_shapes(slide.shapes):
         if not getattr(shape, "has_text_frame", False):
             continue
         text = shape.text.strip()
@@ -77,7 +77,7 @@ def _get_text_lines(slide: Any, title: str) -> list[str]:
 def _get_table_lines(slide: Any) -> list[str]:
     lines: list[str] = []
 
-    for shape in slide.shapes:
+    for shape in _iter_shapes(slide.shapes):
         if not getattr(shape, "has_table", False):
             continue
         for row in shape.table.rows:
@@ -86,3 +86,12 @@ def _get_table_lines(slide: Any) -> list[str]:
                 lines.append("\t".join(values))
 
     return lines
+
+
+def _iter_shapes(shapes: Any):
+    """Yield top-level and grouped shapes in their presentation order."""
+    for shape in shapes:
+        yield shape
+        child_shapes = getattr(shape, "shapes", None)
+        if child_shapes is not None:
+            yield from _iter_shapes(child_shapes)

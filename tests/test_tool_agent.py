@@ -110,6 +110,7 @@ def invoke_tool_agent(
     vlm_client=None,
     asset_store=None,
     require_evidence_tool=False,
+    required_evidence_files=(),
 ):
     return build_tool_agent_graph().invoke(
         {
@@ -125,6 +126,7 @@ def invoke_tool_agent(
             vlm_client=vlm_client,
             asset_store=asset_store,
             require_evidence_tool=require_evidence_tool,
+            required_evidence_files=required_evidence_files,
         ),
     )
 
@@ -254,6 +256,63 @@ def test_tool_agent_recovers_an_empty_response_after_document_evidence():
     assert "Return the final answer now" in llm_client.calls[-1]["messages"][-1].content
 
 
+def test_tool_agent_rewrites_an_excessively_long_final_answer():
+    repetitive_answer = ("The project deadline is Friday. " * 160).strip()
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "project deadline"},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content=repetitive_answer),
+            AIMessage(content="The project deadline is Friday [plan.md, page 2]."),
+        ]
+    )
+
+    state = invoke_tool_agent(llm_client, FakeRetriever([make_search_result()]))
+
+    assert state["response"].answer == "The project deadline is Friday [plan.md, page 2]."
+    assert len(llm_client.calls) == 3
+    assert llm_client.calls[-1]["tool_names"] == []
+    assert "at most 80 words" in llm_client.calls[-1]["messages"][-1].content
+
+
+def test_tool_agent_rewrites_repeated_paragraphs_in_a_shorter_answer():
+    repeated_paragraph = (
+        "The evidence explicitly says the deadline is Friday and identifies the "
+        "project schedule as the source."
+    )
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "project deadline"},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content=f"{repeated_paragraph}\n\n{repeated_paragraph}"),
+            AIMessage(content="The project deadline is Friday."),
+        ]
+    )
+
+    state = invoke_tool_agent(llm_client, FakeRetriever([make_search_result()]))
+
+    assert state["response"].answer == "The project deadline is Friday."
+    assert len(llm_client.calls) == 3
+
+
 def test_tool_agent_can_require_a_document_evidence_tool():
     llm_client = FakeToolCallingLLM([AIMessage(content="An unsupported direct answer.")])
 
@@ -293,6 +352,81 @@ def test_required_document_evidence_returns_to_auto_after_a_tool_result():
 
     assert state["response"].answer == "The project deadline is Friday."
     assert [call["tool_choice"] for call in llm_client.calls] == ["required", "auto"]
+
+
+def test_multi_document_evaluation_collects_evidence_from_every_required_file():
+    second_document = Document(
+        file_name="details.pdf",
+        file_type="pdf",
+        blocks=[
+            Block(
+                id="details-block",
+                text="The detailed budget is 42 units.",
+                type="text",
+                metadata={"source_file": "details.pdf", "page_number": 3},
+            )
+        ],
+    )
+    second_result = SearchResult(
+        chunk=Chunk(
+            id="details-chunk",
+            text="detailed budget",
+            metadata={
+                "context": "The detailed budget is 42 units.",
+                "source_file": "details.pdf",
+                "page_number": 3,
+            },
+        ),
+        score=0.8,
+    )
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "deadline", "source_file": "plan.md"},
+                        "id": "search-plan",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The deadline is Friday."),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_documents",
+                        "args": {"query": "budget", "source_file": "details.pdf"},
+                        "id": "search-details",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The deadline is Friday and the budget is 42 units."),
+        ]
+    )
+
+    state = invoke_tool_agent(
+        llm_client,
+        FakeRetriever([make_search_result(), second_result]),
+        documents=[make_document(), second_document],
+        require_evidence_tool=True,
+        required_evidence_files=("plan.md", "details.pdf"),
+    )
+
+    assert state["response"].answer == ("The deadline is Friday and the budget is 42 units.")
+    assert [call["tool_choice"] for call in llm_client.calls] == [
+        "required",
+        "auto",
+        "required",
+        "auto",
+    ]
+    assert {result.chunk.metadata["source_file"] for result in state["response"].sources} == {
+        "plan.md",
+        "details.pdf",
+    }
 
 
 def test_required_evidence_allows_a_successful_search_with_no_matches():
@@ -646,10 +780,173 @@ def test_tool_agent_can_navigate_outline_and_read_section():
     section = json.loads(str(tool_messages[1].content))
     assert outline["table_of_contents"][0]["section_id"] == "heading-main"
     assert outline["tables"][0]["table_id"] == "table-1"
+    assert outline["locations"] == {"slides": [], "sheets": []}
     assert "Main section body." in section["text"]
     assert "Child section body." in section["text"]
     assert "must not be returned" not in section["text"]
     assert state["response"].sources[0].chunk.metadata["page_numbers"] == [1, 2]
+
+
+def test_document_outline_includes_presentation_slide_map():
+    document = Document(
+        file_name="deck.pptx",
+        file_type="pptx",
+        blocks=[
+            Block(
+                id="slide-1",
+                text="Slide 1\nText:\nPresentation title",
+                type="pptx_slide",
+                metadata={"slide_number": 1},
+            ),
+            Block(
+                id="slide-2",
+                text="Slide 2\nTitle: Main topic\nText:\nDetails",
+                type="pptx_slide",
+                metadata={"slide_number": 2},
+            ),
+        ],
+    )
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_document_outline",
+                        "args": {"source_file": "deck.pptx"},
+                        "id": "outline-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The deck has two slides."),
+        ]
+    )
+
+    invoke_tool_agent(llm_client, FakeRetriever(), documents=[document])
+
+    outline = json.loads(str(tool_messages_seen_by_model(llm_client)[0].content))
+    assert outline["locations"]["slides"] == [
+        {"slide_number": 1, "title": "Presentation title"},
+        {"slide_number": 2, "title": "Main topic"},
+    ]
+
+
+def test_document_outline_identifies_numbered_presentation_sections():
+    document = Document(
+        file_name="deck.pptx",
+        file_type="pptx",
+        blocks=[
+            Block(
+                id="slide-1",
+                text="Slide 1\nText:\nPresentation title",
+                type="pptx_slide",
+                metadata={"slide_number": 1},
+            ),
+            Block(
+                id="slide-2",
+                text="Slide 2\nText:\nCommunication models\n1",
+                type="pptx_slide",
+                metadata={"slide_number": 2},
+            ),
+            Block(
+                id="slide-3",
+                text="Slide 3\nText:\nModel details\nNot a divider",
+                type="pptx_slide",
+                metadata={"slide_number": 3},
+            ),
+        ],
+    )
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_document_outline",
+                        "args": {"source_file": "deck.pptx"},
+                        "id": "outline-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The deck has one numbered section."),
+        ]
+    )
+
+    invoke_tool_agent(llm_client, FakeRetriever(), documents=[document])
+
+    outline = json.loads(str(tool_messages_seen_by_model(llm_client)[0].content))
+    assert outline["locations"]["numbered_sections"] == [
+        {"section_number": 1, "title": "Communication models", "slide_number": 2}
+    ]
+    assert outline["locations"]["thematic_section_review"] == {
+        "opening_numbered_candidates": [
+            {"section_number": 1, "title": "Communication models", "slide_number": 2}
+        ],
+        "substantial_unnumbered_candidates": [],
+        "guidance": (
+            "Do not copy the numbered-divider count mechanically. Inspect opening "
+            "candidates and exclude them when they are introductory; include each "
+            "substantial unnumbered topic, then list the final thematic sections."
+        ),
+    }
+
+
+def test_document_outline_flags_substantial_unnumbered_presentation_topic():
+    document = Document(
+        file_name="deck.pptx",
+        file_type="pptx",
+        blocks=[
+            Block(
+                id="slide-1",
+                text="Slide 1\nText:\nPresentation title",
+                type="pptx_slide",
+                metadata={"slide_number": 1},
+            ),
+            Block(
+                id="slide-2",
+                text="Slide 2\nText:\nIntroductory overview\n1",
+                type="pptx_slide",
+                metadata={"slide_number": 2},
+            ),
+            Block(
+                id="slide-3",
+                text="Slide 3\nText:\nCommunication barriers\nExamples",
+                type="pptx_slide",
+                metadata={"slide_number": 3},
+            ),
+        ],
+    )
+    llm_client = FakeToolCallingLLM(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "get_document_outline",
+                        "args": {"source_file": "deck.pptx"},
+                        "id": "outline-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="The deck has one thematic section."),
+        ]
+    )
+
+    invoke_tool_agent(llm_client, FakeRetriever(), documents=[document])
+
+    outline = json.loads(str(tool_messages_seen_by_model(llm_client)[0].content))
+    assert outline["locations"]["thematic_section_review"]["substantial_unnumbered_candidates"] == [
+        {"slide_number": 3, "title": "Communication barriers"}
+    ]
+    assert outline["locations"]["thematic_section_review"]["introductory_numbered_sections"] == [
+        {"section_number": 1, "title": "Introductory overview", "slide_number": 2}
+    ]
+    assert outline["locations"]["thematic_section_review"]["recommended_thematic_sections"] == [
+        {"slide_number": 3, "title": "Communication barriers"}
+    ]
 
 
 def test_direct_read_source_preserves_dataset_document_id():
@@ -838,6 +1135,8 @@ def test_tool_agent_can_read_table_rows_with_pagination():
     assert payload["format"] == "tsv"
     assert payload["rows"] == ["A\t1", "B\t2"]
     assert payload["next_offset"] == 3
+    assert payload["total_rows"] == 4
+    assert payload["data_rows"] == 3
     assert state["response"].sources[0].chunk.metadata["table_id"] == "sheet-1"
 
 
@@ -1069,6 +1368,12 @@ def test_calculate_performs_decimal_arithmetic(
         "result": expected_result,
         "unit": expected_unit,
     }
+
+
+def test_calculate_uses_vllm_compatible_numeric_schema():
+    schema = calculate.args_schema.model_json_schema()
+
+    assert schema["properties"]["values"]["items"] == {"type": "number"}
 
 
 @pytest.mark.parametrize(

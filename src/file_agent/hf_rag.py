@@ -293,6 +293,11 @@ def process_qa_record(
             vlm_client=vlm_client,
             asset_store=asset_store,
             require_evidence_tool=active_mode == "tool_agent",
+            required_evidence_files=(
+                tuple(document.file_name for document in documents)
+                if active_mode == "tool_agent" and len(documents) > 1
+                else ()
+            ),
         )
         duration_seconds = time.perf_counter() - started_at
         counters_after = _llm_counters(llm_client)

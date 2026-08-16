@@ -7,6 +7,7 @@ from file_agent.hf_batch import BatchGenerationResult
 from file_agent.hf_cli import (
     HFGenerationConfig,
     HFGenerationRunResult,
+    _select_rows,
     main,
     run_hf_dataset_generation,
 )
@@ -144,13 +145,14 @@ def test_run_hf_dataset_generation_orchestrates_limited_run_and_writes_manifest(
         "available_rows": 2,
         "selected_rows": 1,
         "limit": 1,
+        "record_ids": [],
         "records_sha256": manifest["dataset"]["records_sha256"],
     }
     assert len(manifest["dataset"]["records_sha256"]) == 64
     assert manifest["generation"]["model_id"] == "fake/model"
     assert (
         manifest["generation"]["rag_pipeline_version"]
-        == "section-token-small-to-big-agent-evidence-v3"
+        == "section-token-small-to-big-agent-evidence-v15"
     )
     assert manifest["generation"]["rag_mode"] == "standard"
     assert manifest["generation"]["max_tool_rounds"] is None
@@ -187,6 +189,30 @@ def test_generation_config_rejects_invalid_numeric_values(tmp_path, overrides, m
 
     with pytest.raises(ValueError, match=message):
         HFGenerationConfig(**values)
+
+
+@pytest.mark.parametrize(
+    "record_ids",
+    [("",), ("q0001", "q0001")],
+)
+def test_generation_config_rejects_invalid_record_ids(tmp_path, record_ids):
+    with pytest.raises(ValueError, match="record_ids"):
+        HFGenerationConfig(
+            dataset_id="owner/rag-qa",
+            output_dir=tmp_path / "run",
+            record_ids=record_ids,
+        )
+
+
+def test_select_rows_uses_requested_record_order():
+    selected = _select_rows(make_source_dataset(), None, ("q0002", "q0001"))
+
+    assert selected["id"] == ["q0002", "q0001"]
+
+
+def test_select_rows_rejects_unknown_record_id():
+    with pytest.raises(ValueError, match="q9999"):
+        _select_rows(make_source_dataset(), None, ("q9999",))
 
 
 def test_run_hf_dataset_generation_rejects_final_outputs_before_loading(
