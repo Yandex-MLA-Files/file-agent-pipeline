@@ -160,6 +160,21 @@ def test_visual_tool_does_not_expose_paths_or_bounding_boxes():
     }
 
 
+def test_table_comparison_tool_schema_is_explicit():
+    comparison_tool = next(tool for tool in DOCUMENT_TOOLS if tool.name == "compare_table_columns")
+
+    assert set(comparison_tool.tool_call_schema.model_json_schema()["properties"]) == {
+        "left_source_file",
+        "left_table_id",
+        "left_column",
+        "right_source_file",
+        "right_table_id",
+        "right_column",
+        "operation",
+        "top_n",
+    }
+
+
 def test_new_tool_schemas_are_small_and_explicit():
     read_tool = next(tool for tool in DOCUMENT_TOOLS if tool.name == "read_document")
 
@@ -917,6 +932,115 @@ def test_tool_agent_can_analyze_all_table_rows(arguments, expected_result):
     assert payload["rows_skipped"] == 0
     assert payload["result"] == expected_result
     assert state["response"].sources[0].chunk.metadata["table_operation"] == arguments["operation"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_count", "expected_examples"),
+    [
+        (
+            "intersection",
+            3,
+            ["Luxurious Steel Chips", "Practical Steel Bike", "Rustic Gold Shoes"],
+        ),
+        ("left_only", 1, ["Only Inventory"]),
+        ("right_only", 1, ["Only Sales"]),
+        (
+            "union",
+            5,
+            [
+                "Luxurious Steel Chips",
+                "Only Inventory",
+                "Only Sales",
+                "Practical Steel Bike",
+                "Rustic Gold Shoes",
+            ],
+        ),
+    ],
+)
+def test_tool_agent_compares_complete_columns_across_tables(
+    operation,
+    expected_count,
+    expected_examples,
+):
+    inventory = Document(
+        file_name="inventory.xlsx",
+        file_type="xlsx",
+        blocks=[
+            Block(
+                id="sheet-inventory",
+                text=(
+                    "product\tstock\n"
+                    "Practical Steel Bike\t2\n"
+                    "Rustic  Gold Shoes\t3\n"
+                    "Luxurious Steel Chips\t1\n"
+                    "Only Inventory\t8\n"
+                    "practical steel bike\t5"
+                ),
+                type="xlsx_sheet",
+                metadata={
+                    "sheet_name": "Inventory",
+                    "dataset_doc_id": "q0122/inventory.xlsx",
+                },
+                block_type=BlockType.TABLE,
+            )
+        ],
+    )
+    sales = Document(
+        file_name="sales.xlsx",
+        file_type="xlsx",
+        blocks=[
+            Block(
+                id="sheet-sales",
+                text=(
+                    "item\tamount\n"
+                    " practical steel bike \t10\n"
+                    "Rustic Gold Shoes\t20\n"
+                    "LUXURIOUS STEEL CHIPS\t30\n"
+                    "Only Sales\t40"
+                ),
+                type="xlsx_sheet",
+                metadata={
+                    "sheet_name": "Sales",
+                    "dataset_doc_id": "q0122/sales.xlsx",
+                },
+                block_type=BlockType.TABLE,
+            )
+        ],
+    )
+
+    state, llm_client = _invoke_single_read_tool(
+        "compare_table_columns",
+        {
+            "left_source_file": "inventory.xlsx",
+            "left_table_id": "sheet-inventory",
+            "left_column": "product",
+            "right_source_file": "sales.xlsx",
+            "right_table_id": "sheet-sales",
+            "right_column": "item",
+            "operation": operation,
+        },
+        [inventory, sales],
+    )
+
+    payload = json.loads(str(tool_messages_seen_by_model(llm_client)[0].content))
+    assert payload["left"]["total_data_rows"] == 5
+    assert payload["left"]["distinct_non_empty_values"] == 4
+    assert payload["right"]["total_data_rows"] == 4
+    assert payload["right"]["distinct_non_empty_values"] == 4
+    assert payload["result"] == {
+        "count": expected_count,
+        "examples": expected_examples,
+        "examples_truncated": False,
+    }
+    sources = state["response"].sources
+    assert len(sources) == 2
+    assert {source.chunk.metadata["dataset_doc_id"] for source in sources} == {
+        "q0122/inventory.xlsx",
+        "q0122/sales.xlsx",
+    }
+    assert {source.chunk.metadata["table_operation"] for source in sources} == {
+        f"compare_{operation}"
+    }
 
 
 @pytest.mark.parametrize(

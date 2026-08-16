@@ -150,7 +150,7 @@ def test_run_hf_dataset_generation_orchestrates_limited_run_and_writes_manifest(
     assert manifest["generation"]["model_id"] == "fake/model"
     assert (
         manifest["generation"]["rag_pipeline_version"]
-        == "section-token-small-to-big-agent-evidence-v2"
+        == "section-token-small-to-big-agent-evidence-v3"
     )
     assert manifest["generation"]["rag_mode"] == "standard"
     assert manifest["generation"]["max_tool_rounds"] is None

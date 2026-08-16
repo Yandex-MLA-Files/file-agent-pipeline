@@ -63,6 +63,10 @@ navigate available files. Use read_document for a complete overview or an exhaus
 question about a short or unstructured file, following next_offset when necessary.
 For structured files, prefer read_document_section for a specific section,
 read_document_location for a page, slide, or sheet, and read_table for tabular data.
+For exact totals, extrema, distinct counts, or grouped totals over a whole table,
+use analyze_table instead of paging through rows. For overlap or differences between
+columns in two tables, inspect their headers and use compare_table_columns instead
+of reading every row yourself.
 Use calculate for arithmetic over values obtained from document tools, especially
 differences, ratios, averages, shares, and percentage changes. Preserve the input
 order required by the operation. calculate is not document evidence and never
@@ -543,6 +547,88 @@ def analyze_table(
 
 
 @tool
+def compare_table_columns(
+    left_source_file: str,
+    left_table_id: str,
+    left_column: str,
+    right_source_file: str,
+    right_table_id: str,
+    right_column: str,
+    operation: Literal["intersection", "left_only", "right_only", "union"],
+    runtime: ToolRuntime[Any, dict],
+    top_n: int = 10,
+) -> Command:
+    """Compare distinct values from columns in two complete tables or XLSX sheets.
+
+    Use this for exact cross-file or cross-sheet overlap and difference questions.
+    Values are trimmed, whitespace-normalized, and compared case-insensitively.
+    The count covers the complete tables; ``top_n`` only limits returned examples.
+
+    Args:
+        left_source_file: Exact first file name returned by list_documents.
+        left_table_id: Exact first table_id returned by get_document_outline.
+        left_column: Column from the first table to compare.
+        right_source_file: Exact second file name returned by list_documents.
+        right_table_id: Exact second table_id returned by get_document_outline.
+        right_column: Column from the second table to compare.
+        operation: intersection, left_only, right_only, or union.
+        top_n: Number of example values to return, from 1 to 20.
+    """
+    left_document = _find_document(runtime.context.documents, left_source_file)
+    right_document = _find_document(runtime.context.documents, right_source_file)
+    left_block = _find_table_block(left_document, left_table_id)
+    right_block = _find_table_block(right_document, right_table_id)
+
+    left_headers, left_rows = _parse_table_rows(left_document, left_block)
+    right_headers, right_rows = _parse_table_rows(right_document, right_block)
+    left_key = _resolve_table_column(left_headers, left_column)
+    right_key = _resolve_table_column(right_headers, right_column)
+    bounded_top_n = _bounded_table_analysis_results(top_n)
+
+    left_values = _distinct_table_values(left_rows, left_key)
+    right_values = _distinct_table_values(right_rows, right_key)
+    result_values = _compare_distinct_values(left_values, right_values, operation)
+    result_labels = [result_values[key] for key in sorted(result_values)]
+    examples = result_labels[:bounded_top_n]
+
+    left_summary = {
+        "source_file": left_document.file_name,
+        "table_id": left_block.id,
+        "column": left_key,
+        "total_data_rows": len(left_rows),
+        "distinct_non_empty_values": len(left_values),
+    }
+    right_summary = {
+        "source_file": right_document.file_name,
+        "table_id": right_block.id,
+        "column": right_key,
+        "total_data_rows": len(right_rows),
+        "distinct_non_empty_values": len(right_values),
+    }
+    payload = {
+        "operation": operation,
+        "normalization": "trim_whitespace_casefold",
+        "left": left_summary,
+        "right": right_summary,
+        "result": {
+            "count": len(result_labels),
+            "examples": examples,
+            "examples_truncated": len(result_labels) > len(examples),
+        },
+    }
+    evidence_text = json.dumps(payload, ensure_ascii=False, default=str)
+    sources = _table_comparison_sources(
+        left_document=left_document,
+        left_block=left_block,
+        right_document=right_document,
+        right_block=right_block,
+        operation=operation,
+        evidence_text=evidence_text,
+    )
+    return _tool_command(payload, runtime, sources=sources)
+
+
+@tool
 def calculate(
     operation: Literal[
         "add",
@@ -720,6 +806,7 @@ DOCUMENT_TOOLS: list[BaseTool] = [
     read_document_section,
     read_document_location,
     analyze_table,
+    compare_table_columns,
     read_table,
     calculate,
     analyze_document_visual,
@@ -865,6 +952,23 @@ def _is_table_block(document: Document, block: Block) -> bool:
     )
 
 
+def _find_table_block(document: Document, table_id: str) -> Block:
+    normalized_id = table_id.strip()
+    if not normalized_id:
+        raise ValueError("table_id must not be empty")
+    block = next(
+        (
+            item
+            for item in document.blocks
+            if item.id == normalized_id and _is_table_block(document, item)
+        ),
+        None,
+    )
+    if block is None:
+        raise ValueError(f"table is not indexed in {document.file_name}: {table_id}")
+    return block
+
+
 def _table_format(document: Document, block: Block) -> str:
     if document.file_type.lower().lstrip(".") == "xlsx" or "\t" in block.text:
         return "tsv"
@@ -923,6 +1027,81 @@ def _bounded_table_analysis_results(top_n: int) -> int:
     if not isinstance(top_n, int) or isinstance(top_n, bool):
         raise ValueError("top_n must be an integer")
     return max(1, min(top_n, MAX_TABLE_ANALYSIS_RESULTS))
+
+
+def _distinct_table_values(
+    rows: list[dict[str, str]],
+    column: str,
+) -> dict[str, str]:
+    distinct: dict[str, str] = {}
+    for row in rows:
+        display_value = " ".join(row[column].split())
+        if display_value:
+            distinct.setdefault(display_value.casefold(), display_value)
+    return distinct
+
+
+def _compare_distinct_values(
+    left_values: dict[str, str],
+    right_values: dict[str, str],
+    operation: str,
+) -> dict[str, str]:
+    left_keys = set(left_values)
+    right_keys = set(right_values)
+    if operation == "intersection":
+        result_keys = left_keys & right_keys
+    elif operation == "left_only":
+        result_keys = left_keys - right_keys
+    elif operation == "right_only":
+        result_keys = right_keys - left_keys
+    elif operation == "union":
+        result_keys = left_keys | right_keys
+    else:
+        raise ValueError(f"unsupported table comparison operation: {operation}")
+
+    return {
+        key: left_values[key] if key in left_values else right_values[key] for key in result_keys
+    }
+
+
+def _table_comparison_sources(
+    left_document: Document,
+    left_block: Block,
+    right_document: Document,
+    right_block: Block,
+    operation: str,
+    evidence_text: str,
+) -> list[SearchResult]:
+    comparison_id = (
+        f"{left_document.file_name}:{left_block.id}:"
+        f"{right_document.file_name}:{right_block.id}:{operation}"
+    )
+    sources = []
+    for role, document, block, other_document in (
+        ("left", left_document, left_block, right_document),
+        ("right", right_document, right_block, left_document),
+    ):
+        metadata = _source_metadata(document, [block])
+        metadata.update(
+            {
+                "table_id": block.id,
+                "table_format": _table_format(document, block),
+                "table_operation": f"compare_{operation}",
+                "comparison_role": role,
+                "compared_source_file": other_document.file_name,
+            }
+        )
+        sources.append(
+            SearchResult(
+                chunk=Chunk(
+                    id=f"table-comparison:{comparison_id}:{role}",
+                    text=evidence_text,
+                    metadata=metadata,
+                ),
+                score=1.0,
+            )
+        )
+    return sources
 
 
 def _calculate_values(

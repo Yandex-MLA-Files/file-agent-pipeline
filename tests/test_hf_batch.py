@@ -109,7 +109,7 @@ def test_generate_hf_qa_records_processes_in_order_and_writes_checkpoints(
     assert first_checkpoint["parameters"]["model_id"] == "fake/model"
     assert (
         first_checkpoint["parameters"]["rag_pipeline_version"]
-        == "section-token-small-to-big-agent-evidence-v2"
+        == "section-token-small-to-big-agent-evidence-v3"
     )
     assert first_checkpoint["parameters"]["rag_mode"] == "standard"
     assert first_checkpoint["parameters"]["max_tool_rounds"] is None

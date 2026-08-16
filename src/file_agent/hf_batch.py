@@ -22,7 +22,7 @@ from file_agent.vlm.base import VLMClient
 
 CHECKPOINT_SCHEMA_VERSION = 3
 CHECKPOINTS_DIRECTORY_NAME = "checkpoints"
-RAG_PIPELINE_VERSION = "section-token-small-to-big-agent-evidence-v2"
+RAG_PIPELINE_VERSION = "section-token-small-to-big-agent-evidence-v3"
 LOGGER = logging.getLogger(__name__)
 
 
