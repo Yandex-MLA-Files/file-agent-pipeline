@@ -23,8 +23,19 @@ uv sync
 ## Run
 
 ```
-uv run python scripts/run_eval.py --run run.parquet --out reports/v1
+uv run python scripts/run_eval.py --run run.parquet --out reports/v1 --resume
 ```
+
+The input is evaluated in batches of five rows by default. After every
+successful batch, `reports/v1/checkpoint.parquet` is replaced atomically. If
+the process is interrupted, run the same command with `--resume`: rows already
+present in the checkpoint are skipped. Use `--batch-size N` to change the
+maximum number of rows that may need to be repeated after an interruption.
+
+The checkpoint manifest binds saved scores to the input Parquet content, judge
+model, embedding model, and metric list. Resume fails safely if any of these
+change. Running without `--resume` intentionally starts the output directory
+from scratch and removes its old checkpoint and final report.
 
 `RagasJudge` talks to any OpenAI-compatible API for the judge LLM, configured
 via `JUDGE_BASE_URL`, `JUDGE_API_KEY`, `JUDGE_MODEL` (see `.env.example`).
@@ -43,8 +54,9 @@ First use downloads the model from HuggingFace Hub.
 Every `evaluate()` call writes under `logs/` (gitignored, created
 automatically if missing):
 
-- `logs/usage_log.jsonl` -- appended, one cost line per run with token
-  counts and RUB cost. Configurable via `JUDGE_USAGE_LOG_PATH` and
+- `logs/usage_log.jsonl` -- appended, one cost line per completed batch with
+  token counts and RUB cost. Sum the batch entries belonging to an evaluation
+  to get its locally estimated total. Configurable via `JUDGE_USAGE_LOG_PATH` and
   `JUDGE_PRICE_PER_1K_{INPUT,OUTPUT,CACHED}_TOKENS` (see `.env.example`, and
   the module docstring in `ragas_judge.py` for why cached tokens are billed
   separately).
