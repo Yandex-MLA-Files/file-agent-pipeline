@@ -33,7 +33,7 @@ coordinates and a document title.
 | PDF | Docling (layout model, reading order, tables) + post-processing in `docling_parser.py` | heading levels inferred from numbering (`1.2.3` → level 3), consecutive list items grouped into one list block (bullet glyphs stripped), captions folded into figure/table blocks, headings split over two lines stitched, running headers/footers dropped |
 | DOCX | `python-docx` (`docx_parser.py`), Docling as fallback | whole paragraphs; heading levels from `Heading N`/`Заголовок N` styles, outline levels or bold-and-larger formatting; numbered/bulleted lists; tables with merged cells; embedded pictures with captions; monospace paragraphs as code |
 | PPTX | `python-pptx` (`pptx_parser.py`) | slide title → heading (level 1 for section dividers, else 2), body in visual reading order with grouped shapes flattened, bullet lists with indentation, tables and charts as Markdown, pictures with image bytes, speaker notes; slide number stored as `page_number` |
-| XLSX | `openpyxl` (`xlsx_parser.py`) | one heading per sheet, one Markdown table per data region (blank rows split regions), one- or two-row header detection, merged cells filled, note cells kept as text, `1100.0 → 1100`, ISO dates |
+| XLSX | `openpyxl` (`xlsx_parser.py`) | one heading per sheet, one Markdown table per data region (blank rows split regions), one- or two-row header detection, merged cells filled, note cells kept as text, `1100.0 → 1100`, ISO dates; a **profile block** per table (row count, column types, min/max with row label, sums/means, distinct values, sums grouped by every low-cardinality column) so aggregate questions are answerable from retrieval |
 | HTML | BeautifulSoup walker (`html_parser.py`) | `h1–h6`, paragraphs, nested lists, tables, `pre` code, `img` alt text; nav/header/footer/script/style removed |
 | Markdown | `md_parser.py` | ATX/setext headings, fenced code, pipe tables, lists, images, YAML front matter |
 | TXT | `txt_parser.py` | encoding detection (UTF-8/16, cp1251, koi8-r, cp866); prose: paragraph reflow of hard-wrapped lines and title detection (`* CAPS *`, standalone short lines); transcripts: timestamps removed, captions re-flowed into ~140-word paragraphs with `time_start` metadata |
@@ -96,9 +96,18 @@ and adds:
   Russian) loaded in fp16 on the GPU; hybrid BM25 + vector search with RRF is
   unchanged. `EMBEDDING_MODEL` selects any sentence-transformers model
   (the chunker budgets with the same model's tokenizer).
+- Optional cross-encoder reranking (`RERANKER_MODEL`, recommended
+  `BAAI/bge-reranker-v2-m3`): the top-20 hybrid hits are re-scored with the
+  query and passage side by side, which is what finally ranks a numeric
+  financial table above prose that merely repeats the query words.
+- Document-diverse top-k (`RETRIEVAL_DIVERSIFY_DOCS`, on): with several
+  indexed files, the best hit of every file is kept before the remaining
+  slots are filled by score, so "compare A and B" questions see both files.
 - The QA prompt (`QA_PROMPT=v2`) shows every passage under a compact header
   (`source_file`, pages, heading path) instead of raw retrieval metadata and
-  asks for a complete, grounded answer with sources; `v1` is the original.
+  asks for a complete, grounded answer with sources, and for an explicit
+  conclusion on comparison / "does the document mention" questions; `v1` is
+  the original prompt.
 
 ### 2.5 Evaluation harness changes
 
