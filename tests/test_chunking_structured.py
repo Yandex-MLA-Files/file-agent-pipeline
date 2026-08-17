@@ -173,3 +173,33 @@ def test_semantic_split_is_off_by_default():
     from file_agent import chunking
 
     assert chunking._semantic_split_enabled() is False
+
+
+def test_row_records_of_one_table_share_their_parent_passage():
+    """Records of neighbouring rows must not print five slices of one table."""
+    header = "| Регион | Выручка |\n| --- | --- |"
+    rows = [f"| Регион {i} | {i * 100} |" for i in range(30)]
+    document = Document(
+        file_name="sales.xlsx",
+        file_type="xlsx",
+        blocks=[
+            Block(
+                id="t1",
+                text=header + "\n" + "\n".join(rows),
+                type="table",
+                block_type=BlockType.TABLE,
+            )
+        ],
+    )
+
+    records = [
+        c
+        for c in chunk_document(document, max_chars=400, overlap=40)
+        if c.metadata.get("representation") == "row"
+    ]
+
+    contexts = {c.metadata["context"] for c in records}
+    assert len(records) == 30
+    # The whole table fits the parent budget, so every record points at it once.
+    assert len(contexts) == 1
+    assert "| Регион 29 | 2900 |" in contexts.pop()

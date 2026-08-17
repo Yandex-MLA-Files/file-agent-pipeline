@@ -908,6 +908,7 @@ class _Chunker:
             return
         title = " ".join(caption.split()) if caption else str(block.metadata.get("caption") or "")
         title = _shorten(title, BREADCRUMB_MAX_CRUMB_CHARS * 2) if title else ""
+        contexts = self._row_contexts(caption, header, rows)
 
         for index, row in enumerate(rows):
             cells = _table_cells(row)
@@ -932,32 +933,32 @@ class _Chunker:
                 sections=[heading] if heading else [],
                 path=path,
                 text=text,
-                parent=self._row_context(caption, header, rows, index),
+                parent=contexts[index],
                 extra={"representation": "row", "row_index": index + 1},
             )
 
-    def _row_context(self, caption: str, header: str, rows: list[str], index: int) -> str:
-        """The table around one row: caption, header and as many neighbours as fit."""
+    def _row_contexts(self, caption: str, header: str, rows: list[str]) -> list[str]:
+        """Parent passage per row: the caption, the header and its block of rows.
+
+        Rows are grouped into fixed blocks rather than given a window centred on
+        each one, so several records of the same table hand the LLM the *same*
+        passage — which the prompt builder then shows once instead of printing
+        five nearly identical slices of one table.
+        """
         head = "\n".join(line for line in (caption, header) if line)
-        budget = PARENT_CONTEXT_MAX_CHARS - len(head)
-        window = [rows[index]]
-        size = len(rows[index])
-        before, after = index - 1, index + 1
-        while before >= 0 or after < len(rows):
-            grew = False
-            if before >= 0 and size + len(rows[before]) + 1 <= budget:
-                window.insert(0, rows[before])
-                size += len(rows[before]) + 1
-                before -= 1
-                grew = True
-            if after < len(rows) and size + len(rows[after]) + 1 <= budget:
-                window.append(rows[after])
-                size += len(rows[after]) + 1
-                after += 1
-                grew = True
-            if not grew:
-                break
-        return self._join_table(head, window)
+        budget = max(200, PARENT_CONTEXT_MAX_CHARS - len(head))
+
+        contexts: list[str] = []
+        start = 0
+        while start < len(rows):
+            end, size = start, 0
+            while end < len(rows) and (size + len(rows[end]) + 1 <= budget or end == start):
+                size += len(rows[end]) + 1
+                end += 1
+            window = self._join_table(head, rows[start:end])
+            contexts.extend([window] * (end - start))
+            start = end
+        return contexts
 
     # -- breadcrumbs ----------------------------------------------------------------
 
