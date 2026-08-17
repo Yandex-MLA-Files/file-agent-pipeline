@@ -24,10 +24,20 @@ DEFAULT_FTS_LANGUAGE = "Russian"
 DEFAULT_RRF_K = 60
 DEFAULT_SEMANTIC_MIN_SCORE = 0.25
 DEFAULT_TABLE_NAME = "chunks"
+# Optional second stage: a cross-encoder re-scores the top hybrid candidates
+# with the query and the chunk text side by side. ``RERANKER_MODEL`` (e.g.
+# ``BAAI/bge-reranker-v2-m3``) turns it on; ``RERANKER_CANDIDATES`` is how many
+# hybrid hits are re-scored (default 4x top_k, at least 20).
+DEFAULT_RERANKER_CANDIDATES_FACTOR = 4
+DEFAULT_RERANKER_MIN_CANDIDATES = 20
 
 
 class EmbeddingModel(Protocol):
     def encode(self, sentences): ...
+
+
+class Reranker(Protocol):
+    def predict(self, pairs): ...
 
 
 class LanceDBRetriever:
@@ -39,11 +49,13 @@ class LanceDBRetriever:
         fts_language: str = DEFAULT_FTS_LANGUAGE,
         rrf_k: int = DEFAULT_RRF_K,
         semantic_min_score: float = DEFAULT_SEMANTIC_MIN_SCORE,
+        reranker: Reranker | None = None,
     ) -> None:
         if not -1.0 <= semantic_min_score <= 1.0:
             raise ValueError("semantic_min_score must be between -1 and 1")
 
         self._embedding_model = embedding_model
+        self._reranker = reranker
         self._connection = lancedb.connect(uri)
         self._table_name = table_name
         self._fts_language = fts_language
@@ -103,6 +115,15 @@ class LanceDBRetriever:
                 span.set_attribute("file_agent.result_count", 0)
                 return []
 
+            reranker = self._reranker or _load_default_reranker()
+            candidate_count = top_k
+            if reranker is not None:
+                candidate_count = max(
+                    top_k * DEFAULT_RERANKER_CANDIDATES_FACTOR,
+                    DEFAULT_RERANKER_MIN_CANDIDATES,
+                    _int_env("RERANKER_CANDIDATES", 0),
+                )
+
             query_vector = self._encode([query])[0].tolist()
             rows = (
                 self._table.search(
@@ -115,14 +136,32 @@ class LanceDBRetriever:
                 .distance_type("cosine")
                 .distance_range(upper_bound=1.0 - self._semantic_min_score)
                 .rerank(RRFReranker(K=self._rrf_k))
-                .limit(top_k)
+                .limit(candidate_count)
                 .to_list()
             )
 
             results = [self._to_search_result(row) for row in rows]
+            if reranker is not None and len(results) > 1:
+                results = self._rerank(reranker, query, results)
+            results = results[:top_k]
             span.set_attribute("file_agent.result_count", len(results))
+            span.set_attribute("file_agent.reranked", reranker is not None)
             logger.info("Query %r returned %d result(s)", query, len(results))
             return results
+
+    @staticmethod
+    def _rerank(reranker: Reranker, query: str, results: list[SearchResult]) -> list[SearchResult]:
+        """Re-score candidates with a cross-encoder; the score becomes the relevance."""
+        pairs = [(query, result.chunk.text) for result in results]
+        scores = reranker.predict(pairs)
+        if hasattr(scores, "tolist"):
+            scores = scores.tolist()
+        rescored = [
+            SearchResult(chunk=result.chunk, score=float(score))
+            for result, score in zip(results, scores, strict=True)
+        ]
+        rescored.sort(key=lambda item: item.score, reverse=True)
+        return rescored
 
     def clear(self) -> None:
         self._connection.drop_table(self._table_name, ignore_missing=True)
@@ -182,3 +221,40 @@ def _load_embedding_model(name: str) -> EmbeddingModel:
 
 def _load_default_embedding_model() -> EmbeddingModel:
     return _load_embedding_model(resolve_embedding_model_name())
+
+
+def resolve_reranker_model_name() -> str | None:
+    name = (os.getenv("RERANKER_MODEL") or "").strip()
+    return name or None
+
+
+@lru_cache(maxsize=2)
+def _load_reranker(name: str) -> Reranker:
+    from sentence_transformers import CrossEncoder
+
+    kwargs = {}
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
+    except Exception:  # pragma: no cover
+        pass
+    model = CrossEncoder(name, max_length=1024, **kwargs)
+    logger.info("Loaded reranker %s", name)
+    return model
+
+
+def _load_default_reranker() -> Reranker | None:
+    name = resolve_reranker_model_name()
+    return _load_reranker(name) if name else None
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default

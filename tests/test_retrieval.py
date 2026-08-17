@@ -136,3 +136,41 @@ def test_lancedb_retriever_keeps_embeddings_unnormalized_for_cosine_search():
 
     assert embeddings.tolist() == [[3.0, 4.0]]
     assert model.calls == [["document"]]
+
+
+class FakeReranker:
+    def __init__(self, scores):
+        self.scores = scores
+        self.calls = []
+
+    def predict(self, pairs):
+        self.calls.append(list(pairs))
+        return [self.scores[text] for _, text in pairs]
+
+
+def test_optional_reranker_reorders_hybrid_candidates():
+    chunks = [
+        Chunk(id="a", text="python code"),
+        Chunk(id="b", text="python automobile"),
+        Chunk(id="c", text="automobile engine"),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "python code": [0.0, 1.0],
+            "python automobile": [1.0, 0.0],
+            "automobile engine": [1.0, 0.0],
+            "python vehicle": [1.0, 0.0],
+        }
+    )
+    reranker = FakeReranker(
+        {"python code": 0.9, "python automobile": 0.2, "automobile engine": 0.1}
+    )
+    retriever = LanceDBRetriever(embedding_model=model, reranker=reranker)
+
+    retriever.index(chunks)
+    results = retriever.search("python vehicle", top_k=2)
+
+    assert [result.chunk.id for result in results] == ["a", "b"]
+    assert results[0].score == 0.9
+    # All hybrid candidates were offered to the reranker, then cut to top_k.
+    assert len(reranker.calls[0]) == 3

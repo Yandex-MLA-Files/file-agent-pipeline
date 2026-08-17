@@ -16,7 +16,7 @@ from datasets import Dataset
 from file_agent.document import Document
 from file_agent.hf_dataset import QADatasetRecord, validate_qa_dataset
 from file_agent.hf_rag import DocumentLoader, GeneratedQARecord, process_hf_qa_record
-from file_agent.lancedb_retriever import resolve_embedding_model_name
+from file_agent.lancedb_retriever import resolve_embedding_model_name, resolve_reranker_model_name
 from file_agent.llm.base import LLMClient
 from file_agent.qa import build_qa_prompt
 from file_agent.rag import load_documents
@@ -263,6 +263,7 @@ def build_generation_parameters(
         "retriever": _component_identifier(retriever) if retriever is not None else "default",
         "rag_pipeline_version": RAG_PIPELINE_VERSION,
         "embedding_model": resolve_embedding_model_name(),
+        "reranker_model": resolve_reranker_model_name(),
         "parser_profile": os.getenv("PARSER_PROFILE", "structured").strip().lower(),
         "chunking_strategy": os.getenv("CHUNKING_STRATEGY", "structured").strip().lower(),
         "chunk_target_tokens": os.getenv("CHUNK_TARGET_TOKENS") or None,
