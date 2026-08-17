@@ -271,6 +271,7 @@ def build_generation_parameters(
         "max_chars": max_chars,
         "overlap": overlap,
         "prompt_sha256": hashlib.sha256(prompt_template.encode("utf-8")).hexdigest(),
+        "qa_prompt": os.getenv("QA_PROMPT", "v2").strip().lower(),
     }
 
 
