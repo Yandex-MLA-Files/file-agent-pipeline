@@ -233,6 +233,7 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | v4 without reranker | 127 | 0 | 0.837 | 0.604 | 0.855 | 0.705 | 0.827 | 25.0 |
 | v4, source footer stripped | 127 | 0 | 0.945 | 0.603 | 0.830 | 0.760 | 0.814 | — |
 | **v5 (default)** | 127 | 0 | **0.958** | 0.605 | 0.831 | 0.777 | **0.865** | **18.5** |
+| v5, judged a second time | 127 | 0 | 0.956 | 0.616 | 0.823 | 0.763 | 0.861 | — |
 
 Means over successfully processed rows only differ for the baseline (0.715 /
 0.429 / 0.560 / 0.570 / 0.630 over 122 rows).
@@ -247,11 +248,15 @@ reference. Two properties of that protocol dominate the number:
   the terse reference does not mention (the segment breakdown next to the
   total revenue, childhood incidence next to adult incidence), and every
   added claim counts against the answer.
-- The same answer scores differently between runs. `q0064` is byte-identical
-  in v4 and v5 apart from the removed source footer, and scored 1.00 in one
-  run and 0.00 in the other. The distribution is bimodal (v5: 52 rows at 1.0,
-  30 at 0.0), so single rows flip and the mean moves without the pipeline
-  changing.
+- A byte-identical answer can score differently in different judge runs.
+  `q0064` has exactly the same 846 characters in the footer-stripped v4 run
+  and in v5; it scored 1.00 in the first judging and 0.00 in the second.
+  Judging the *same* run twice (`pc-v5-rejudge`) shows the effect is small in
+  aggregate — mean per-row difference 0.017 for correctness, 0.008–0.015 for
+  the other metrics, and no row moved by more than 0.5 — but between the v4
+  and the footer-stripped v4 judging four rows of 127 (3 %) flipped between
+  0 and 1. Single rows are therefore not evidence; only differences well
+  above ±0.02 in the mean are.
 
 Faithfulness, context precision and context recall are stable and are what
 the v4 → v5 comparison rests on.
