@@ -109,7 +109,9 @@ def profile_table(header: list[str], body: list[list[str]]) -> str:
     ]
     label_index = max(text_columns, key=lambda i: len(set(values[i])), default=None)
 
-    if not measures and not categorical:
+    # Without a numeric column there is nothing to aggregate: a list of the
+    # values of a text table only repeats the table it came from.
+    if not measures:
         return ""
 
     lines = [f"строк: {len(body)}; столбцы: {', '.join(columns)}"]
