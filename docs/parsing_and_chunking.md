@@ -77,6 +77,28 @@ multimodal, so by default the **same endpoint** is used for vision:
 `VLM_BACKEND=openai` (separate vision endpoint), `smolvlm` (local) and `off`
 remain available.
 
+#### Formulas and code (`PDF_ENRICHMENT`)
+
+A formula has no text layer worth reading: Docling emitted **zero** formula
+blocks for the 85-page probability lecture of the corpus, and the glyphs that
+did survive landed in the surrounding paragraph as noise. With enrichment on,
+the same document yields 378 formula blocks, 374 of them proper LaTeX
+(`P ( A ) \colon = \sum _ { \omega \in A } P ( \omega ) .`) and 31 % more
+indexed text.
+
+It is a vision model per region, and the cost follows the number of formulas,
+not the number of pages:
+
+| Document | enrichment off | enrichment on |
+|---|---|---|
+| 85-page lecture with formulas | 19 s, 0 formulas | 523 s, 378 formulas (374 LaTeX) |
+| 26-page English paper | 21 s, 3 code blocks | 37 s, same content |
+
+On a CPU the same pass takes tens of minutes, which is why the default is
+`auto`: enrichment runs when a CUDA device is visible and is skipped
+otherwise. `on` / `off` force it, and a conversion that cannot load the models
+repeats itself without them rather than failing.
+
 #### Why the model reads scans better than an OCR engine
 
 The question "is a VLM really better than EasyOCR here, in quality *and*

@@ -30,17 +30,31 @@ def _silence_ocr_backend_noise() -> None:
 
 _silence_ocr_backend_noise()
 
-# Formula and code enrichment re-read the regions the layout model classified
-# as such with a dedicated model (CodeFormula). It downloads once (~400 MB) and
-# costs time per formula, so it can be turned off for a fast bulk conversion.
-DEFAULT_ENRICHMENT = True
+# Formula and code enrichment re-reads the regions the layout model classified
+# as such with a dedicated model (CodeFormula, ~400 MB, downloaded once). It is
+# a vision model running per region, which is affordable on a GPU and is not on
+# a CPU: an 85-page lecture spends minutes there. ``auto`` (the default)
+# therefore enables it only when a CUDA device is visible; ``on`` / ``off``
+# force it either way.
+DEFAULT_ENRICHMENT = "auto"
 
 
 def resolve_enrichment() -> bool:
-    raw = os.getenv("PDF_ENRICHMENT")
-    if raw is None:
-        return DEFAULT_ENRICHMENT
-    return raw.strip().lower() in {"1", "true", "yes", "on", "auto"}
+    mode = (os.getenv("PDF_ENRICHMENT") or DEFAULT_ENRICHMENT).strip().lower()
+    if mode in {"1", "true", "yes", "on"}:
+        return True
+    if mode in {"0", "false", "no", "off"}:
+        return False
+    return _gpu_available()
+
+
+def _gpu_available() -> bool:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:  # pragma: no cover - torch always present in practice
+        return False
 
 
 class DoclingParser(BaseParser):
