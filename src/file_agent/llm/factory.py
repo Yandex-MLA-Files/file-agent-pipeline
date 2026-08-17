@@ -14,6 +14,8 @@ DEFAULT_LOCAL_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_LOCAL_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_MAX_RETRIES = 0
+DEFAULT_TEMPERATURE = 0.2
+DEFAULT_MAX_TOKENS = 2000
 LOCAL_API_KEY_PLACEHOLDER = "not-used"
 
 
@@ -56,6 +58,7 @@ def _create_yandex_client() -> OpenAILLMClient:
     return OpenAILLMClient(
         client=client,
         model=_build_yandex_model_uri(folder_id=folder_id, model=model),
+        **_generation_settings(),
     )
 
 
@@ -67,7 +70,26 @@ def _create_local_client() -> OpenAILLMClient:
     return OpenAILLMClient(
         client=client,
         model=_getenv("LOCAL_LLM_MODEL", DEFAULT_LOCAL_MODEL),
+        **_generation_settings(),
     )
+
+
+def _generation_settings() -> dict[str, object]:
+    """Sampling settings shared by every backend, overridable from the environment.
+
+    ``LLM_ENABLE_THINKING`` matters for reasoning models served with a reasoning
+    parser (Qwen3.5 on vLLM): left unset the server default applies, ``false``
+    turns thinking off (fast, deterministic answers for batch evaluation),
+    ``true`` forces it on.
+    """
+    settings: dict[str, object] = {
+        "temperature": _float_env("LLM_TEMPERATURE", DEFAULT_TEMPERATURE),
+        "max_tokens": _int_env("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS),
+    }
+    thinking = _bool_env("LLM_ENABLE_THINKING")
+    if thinking is not None:
+        settings["enable_thinking"] = thinking
+    return settings
 
 
 def _create_openai_client(
@@ -82,8 +104,8 @@ def _create_openai_client(
         api_key=api_key,
         base_url=base_url,
         project=project,
-        timeout=DEFAULT_TIMEOUT_SECONDS,
-        max_retries=DEFAULT_MAX_RETRIES,
+        timeout=_float_env("LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
+        max_retries=_int_env("LLM_MAX_RETRIES", DEFAULT_MAX_RETRIES),
     )
 
 
@@ -100,3 +122,35 @@ def _getenv(name: str, default: str | None = None) -> str | None:
         return None
 
     return value.strip()
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = _getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = _getenv(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def _bool_env(name: str) -> bool | None:
+    raw = _getenv(name)
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean (true/false), got {raw!r}")

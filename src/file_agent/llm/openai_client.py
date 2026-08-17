@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from openai import OpenAI
 
@@ -14,11 +15,17 @@ class OpenAILLMClient:
         model: str,
         temperature: float = 0.2,
         max_tokens: int = 2000,
+        enable_thinking: bool | None = None,
     ) -> None:
         self.client = client
         self.model = model.strip()
         self.temperature = temperature
         self.max_tokens = max_tokens
+        # Reasoning models (Qwen3 family) think by default when served by vLLM
+        # with a reasoning parser. ``None`` keeps the server default; ``True`` /
+        # ``False`` are forwarded through ``chat_template_kwargs`` so the same
+        # client works both with and without a reasoning parser.
+        self.enable_thinking = enable_thinking
 
         if not self.model:
             raise ValueError("model is required")
@@ -33,6 +40,7 @@ class OpenAILLMClient:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                **self._extra_request_kwargs(),
             )
 
             if not response.choices:
@@ -58,3 +66,8 @@ class OpenAILLMClient:
                 len(prompt),
             )
             return text
+
+    def _extra_request_kwargs(self) -> dict[str, Any]:
+        if self.enable_thinking is None:
+            return {}
+        return {"extra_body": {"chat_template_kwargs": {"enable_thinking": self.enable_thinking}}}

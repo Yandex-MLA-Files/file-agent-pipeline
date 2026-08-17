@@ -178,6 +178,7 @@ def build_generation_parameters(
         "model_id": _model_identifier(llm_client),
         "temperature": _optional_scalar_attribute(llm_client, "temperature"),
         "max_tokens": _optional_scalar_attribute(llm_client, "max_tokens"),
+        "enable_thinking": _optional_scalar_attribute(llm_client, "enable_thinking"),
         "retriever": _component_identifier(retriever) if retriever is not None else "default",
         "rag_pipeline_version": RAG_PIPELINE_VERSION,
         "embedding_model": os.getenv("EMBEDDING_MODEL") or DEFAULT_SEMANTIC_MODEL_NAME,
