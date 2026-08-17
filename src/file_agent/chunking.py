@@ -861,10 +861,12 @@ class _Chunker:
         # chunk already opens with that heading, do not repeat it.
         prefix = ""
         if crumb:
+            crumbs = crumb.split(BREADCRUMB_SEPARATOR)
             first_line = body.split("\n", 1)[0].strip()
-            last_crumb = crumb.split(BREADCRUMB_SEPARATOR)[-1]
-            if not (first_line == last_crumb and crumb == last_crumb):
-                prefix = f"{crumb}{_SEPARATOR}"
+            if crumbs and first_line == crumbs[-1]:
+                crumbs = crumbs[:-1]
+            if crumbs:
+                prefix = f"{BREADCRUMB_SEPARATOR.join(crumbs)}{_SEPARATOR}"
         chunk_text = f"{prefix}{body}"
 
         # Hard guarantee: never emit a chunk the encoder would truncate, whatever
