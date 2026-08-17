@@ -23,6 +23,13 @@ dependencies = [
     "opentelemetry-api>=1.27.0",
     "opentelemetry-sdk>=1.27.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.43.0",
+    # GPU servers run NVIDIA driver 12.8 and include V100 (sm_70) cards:
+    # torch cu13x builds refuse that driver and CUDA 13 dropped sm_70
+    # entirely, silently pushing parsing/OCR/embedding to CPU. Pin the
+    # newest cu124 build on Linux (see [tool.uv.sources] below); other
+    # platforms keep the default resolution.
+    "torch==2.6.0; sys_platform == 'linux'",
+    "torchvision==0.21.0; sys_platform == 'linux'",
 ]
 
 [dependency-groups]
@@ -34,6 +41,15 @@ dev = [
 
 [tool.uv]
 package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu124", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu124", marker = "sys_platform == 'linux'" }]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

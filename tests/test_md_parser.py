@@ -1,9 +1,13 @@
+from file_agent.document import BlockType
 from file_agent.parsers.md_parser import MarkdownParser
 
 
-def test_markdown_parser_returns_document(tmp_path):
+def test_markdown_parser_splits_headings_and_body(tmp_path):
     file_path = tmp_path / "notes.md"
-    file_path.write_text("# Title\n\nHello, Markdown!", encoding="utf-8")
+    file_path.write_text(
+        "# Title\n\nIntro text.\n\n## Details\n\nMore text.",
+        encoding="utf-8",
+    )
 
     document = MarkdownParser().parse(file_path)
 
