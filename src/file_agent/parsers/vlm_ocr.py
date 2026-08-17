@@ -118,6 +118,7 @@ class VLMPageOCR:
         self.fallback = fallback
         self.stats: dict[str, int] = {}
         self._render_lock = threading.Lock()
+        self._stats_lock = threading.Lock()
 
     # -- public API ---------------------------------------------------------
 
@@ -244,7 +245,10 @@ class VLMPageOCR:
         return self.fallback.text_to_blocks(text, path.name, page_number)
 
     def _count(self, key: str) -> None:
-        self.stats[key] = self.stats.get(key, 0) + 1
+        # Pages are counted from worker threads; a read-modify-write on a dict
+        # is not atomic, so the tally needs the lock to stay truthful.
+        with self._stats_lock:
+            self.stats[key] = self.stats.get(key, 0) + 1
 
     @staticmethod
     def _to_blocks(markdown: str, source_file: str, page_number: int) -> list[Block]:
