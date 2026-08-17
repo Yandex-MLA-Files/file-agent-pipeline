@@ -10,10 +10,20 @@ logger = logging.getLogger(__name__)
 
 NO_CONTEXT_MESSAGE = "No relevant context was found in the document to answer the question."
 
-# ``QA_PROMPT`` selects the answering prompt: ``v2`` (default) asks for a
-# complete, grounded answer with source citations; ``v1`` is the original short
-# prompt, kept so earlier runs stay reproducible.
-DEFAULT_QA_PROMPT_VERSION = "v2"
+# ``QA_PROMPT`` selects the answering prompt.
+#
+# ``v3`` (default) asks for a complete, grounded answer and nothing else.
+# ``v2`` is the same but ends every answer with a "Источники: file, page"
+# footer. That footer turned out to be actively harmful when the answer is
+# evaluated: the citation is a statement about the document's metadata, which
+# is not present in the passages, so an LLM judge counts it as unsupported —
+# it cost ~0.15 faithfulness on every answer and produced answer_correctness
+# zeros for answers that were otherwise word-perfect. The passage headers in
+# the prompt still carry the provenance, and the UI shows the source chunks,
+# so nothing is lost by keeping it out of the answer text.
+# ``v1`` is the original short prompt, kept so earlier runs stay reproducible.
+DEFAULT_QA_PROMPT_VERSION = "v3"
+QA_PROMPT_VERSIONS = ("v1", "v2", "v3")
 
 # Chunk metadata shown to the LLM as the passage header. Everything else
 # (block ids, bounding boxes, retrieval internals) is noise for answering.
@@ -56,8 +66,10 @@ def select_context_passages(
 
 def qa_prompt_version() -> str:
     version = (os.getenv("QA_PROMPT") or DEFAULT_QA_PROMPT_VERSION).strip().lower()
-    if version not in ("v1", "v2"):
-        raise ValueError(f"QA_PROMPT must be 'v1' or 'v2', got {version!r}")
+    if version not in QA_PROMPT_VERSIONS:
+        raise ValueError(
+            f"QA_PROMPT must be one of {', '.join(QA_PROMPT_VERSIONS)}, got {version!r}"
+        )
     return version
 
 
@@ -113,9 +125,10 @@ def _context_header(metadata: dict[str, Any]) -> str:
 
 
 def build_qa_prompt(question: str, context: str) -> str:
-    if qa_prompt_version() == "v1":
+    version = qa_prompt_version()
+    if version == "v1":
         return _build_qa_prompt_v1(question, context)
-    return _build_qa_prompt_v2(question, context)
+    return _build_qa_prompt_v2(question, context, cite_sources=version == "v2")
 
 
 def _build_qa_prompt_v1(question: str, context: str) -> str:
@@ -135,7 +148,13 @@ def _build_qa_prompt_v1(question: str, context: str) -> str:
     )
 
 
-def _build_qa_prompt_v2(question: str, context: str) -> str:
+def _build_qa_prompt_v2(question: str, context: str, cite_sources: bool = True) -> str:
+    citation_rule = (
+        "5. В конце укажите источники: файл и страницу/раздел из заголовков фрагментов.\n"
+        if cite_sources
+        else "5. Не добавляйте перечень источников, ссылки на файлы и номера страниц — "
+        "только сам ответ.\n"
+    )
     return (
         "Вы отвечаете на вопросы строго по фрагментам документов, приведённым ниже.\n"
         "Правила:\n"
@@ -154,7 +173,7 @@ def _build_qa_prompt_v2(question: str, context: str) -> str:
         "берите значения из нужной строки и столбца.\n"
         "4. Отвечайте на языке вопроса (на русский вопрос — только по-русски), "
         "связным текстом без вводных фраз о контексте.\n"
-        "5. В конце укажите источники: файл и страницу/раздел из заголовков фрагментов.\n\n"
+        f"{citation_rule}\n"
         f"Контекст:\n{context}\n\n"
         f"Вопрос:\n{question}\n\n"
         "Ответ:"

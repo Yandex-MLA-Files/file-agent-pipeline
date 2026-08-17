@@ -35,6 +35,21 @@ def test_consecutive_list_items_become_one_list_block():
     assert "_items" not in merged[1].metadata
 
 
+def test_words_broken_by_line_hyphenation_are_rejoined():
+    blocks = [
+        _block("t1", "Дивиденды по обыкновен- ным и привилеги- рованным акциям", BlockType.TEXT),
+        _block("t2", "врача-офтальмолога и из-за чего", BlockType.TEXT),
+        _block("t3", "| Показатель | 2024-2025 |", BlockType.TABLE),
+    ]
+
+    merged = _postprocess_blocks(blocks)
+
+    assert merged[0].text == "Дивиденды по обыкновенным и привилегированным акциям"
+    # Real compounds and ranges have no space after the hyphen and stay intact.
+    assert merged[1].text == "врача-офтальмолога и из-за чего"
+    assert merged[2].text == "| Показатель | 2024-2025 |"
+
+
 def test_inline_group_fragments_are_merged_into_one_paragraph():
     blocks = [
         _block("t1", "Целью", BlockType.TEXT, parent="#/groups/1", parent_label="inline"),

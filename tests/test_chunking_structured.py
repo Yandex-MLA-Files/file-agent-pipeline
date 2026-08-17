@@ -141,3 +141,35 @@ def test_untyped_blocks_keep_legacy_behavior():
     chunks = chunk_document(document, max_chars=4, overlap=1)
 
     assert [chunk.text for chunk in chunks] == ["abcd", "defg", "ghij", "j"]
+
+
+def test_semantic_split_cuts_at_topic_boundaries(monkeypatch):
+    """With CHUNK_SEMANTIC_SPLIT=on, long prose is cut where the subject changes."""
+    from file_agent import chunking
+
+    topic_a = " ".join(f"Первое предложение про базы данных номер {i}." for i in range(14))
+    topic_b = " ".join(f"Второе предложение про кулинарию номер {i}." for i in range(14))
+    document = Document(
+        file_name="doc.txt",
+        file_type="txt",
+        blocks=[
+            Block(id="b1", text=topic_a + " " + topic_b, type="text", block_type=BlockType.TEXT)
+        ],
+    )
+
+    monkeypatch.setenv("CHUNK_SEMANTIC_SPLIT", "on")
+    # The boundary between the two topics is sentence 14.
+    monkeypatch.setattr(chunking, "topic_boundaries", lambda sentences: {14})
+
+    chunks = chunk_document(document, max_chars=400, overlap=40)
+    texts = [c.text for c in chunks]
+
+    assert len(texts) > 1
+    # No chunk mixes the two topics: the cut lands exactly on the boundary.
+    assert not any("баз" in text and "кулинари" in text for text in texts)
+
+
+def test_semantic_split_is_off_by_default():
+    from file_agent import chunking
+
+    assert chunking._semantic_split_enabled() is False

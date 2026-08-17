@@ -35,7 +35,14 @@ DEFAULT_MIN_FIGURE_AREA = 5000.0
 DEFAULT_MIN_IMAGE_PIXELS = 120 * 120
 # Upper bound on VLM calls per document, so a 100-figure deck cannot silently
 # turn into a 100-request bill. The largest figures are described first.
+#
+# A flat cap is wrong in both directions: eight descriptions are plenty for a
+# ten-page report and cover a tenth of an eighty-slide deck whose charts *are*
+# the content. The budget therefore scales with the length of the document
+# (``VLM_MAX_FIGURES`` overrides it with a fixed number).
 DEFAULT_MAX_FIGURES = 8
+FIGURES_PER_PAGE = 0.25
+MAX_FIGURES_CEILING = 32
 # Figures of one document are described concurrently: vLLM batches the
 # requests, so wall-clock time is close to that of a single call.
 DEFAULT_VLM_CONCURRENCY = 4
@@ -64,17 +71,26 @@ class DocumentEnhancer:
             if min_figure_area is None
             else min_figure_area
         )
+        configured = os.getenv("VLM_MAX_FIGURES")
         self.max_figures = (
-            int(os.getenv("VLM_MAX_FIGURES", DEFAULT_MAX_FIGURES))
-            if max_figures is None
-            else max_figures
+            max_figures if max_figures is not None else (int(configured) if configured else None)
         )
+
+    def _figure_budget(self, doc: Document) -> int:
+        if self.max_figures is not None:
+            return self.max_figures
+        try:
+            pages = int(doc.metadata.get("total_pages") or 0)
+        except (TypeError, ValueError):
+            pages = 0
+        return max(DEFAULT_MAX_FIGURES, min(int(pages * FIGURES_PER_PAGE), MAX_FIGURES_CEILING))
 
     def enhance(self, doc: Document, file_path: Path) -> Document:
         is_pdf = Path(file_path).suffix.lower() == ".pdf"
+        budget = self._figure_budget(doc)
         candidates = [block for block in doc.blocks if self._should_describe(block, is_pdf)]
         candidates.sort(key=self._figure_area, reverse=True)
-        selected = candidates[: self.max_figures]
+        selected = candidates[:budget]
         skipped = len(candidates) - len(selected)
         if skipped > 0:
             logger.info(

@@ -479,6 +479,25 @@ _HEADING_CONTINUES = re.compile(
     r"[,(\-–—:;/]\s*$|\b(и|или|the|of|and|for|по|для|в|на|с)\s*$", re.IGNORECASE
 )
 
+# A word broken by justification across a line break: PDF text extraction keeps
+# the hyphen and turns the line break into a space ("обыкновен- ных"). Left as
+# is, the term is invisible to both BM25 and the encoder — which is exactly how
+# a question about "обыкновенных акций" misses the table row that answers it.
+# A real compound never has a space after its hyphen, so requiring one is safe.
+_HYPHEN_BREAK = re.compile(r"([^\W\d_]{2,})[-‐]\s+([^\W\d_]{2,})")
+_SOFT_HYPHEN = "­"
+
+
+def repair_hyphenation(text: str) -> str:
+    """Rejoin words split by end-of-line hyphenation."""
+    if _SOFT_HYPHEN in text:
+        text = text.replace(_SOFT_HYPHEN, "")
+    if "-" not in text and "‐" not in text:
+        return text
+    repaired = _HYPHEN_BREAK.sub(lambda m: m.group(1) + m.group(2), text)
+    # A second pass catches chains ("при- виле- гированных").
+    return _HYPHEN_BREAK.sub(lambda m: m.group(1) + m.group(2), repaired)
+
 
 def _postprocess_blocks(blocks: list[Block]) -> list[Block]:
     """Turn Docling's flat item stream into retrieval-friendly blocks.
@@ -492,6 +511,13 @@ def _postprocess_blocks(blocks: list[Block]) -> list[Block]:
     """
     merged: list[Block] = []
     for block in blocks:
+        if block.text and block.block_type in (
+            BlockType.TEXT,
+            BlockType.LIST,
+            BlockType.HEADING,
+            BlockType.TABLE,
+        ):
+            block.text = repair_hyphenation(block.text)
         previous = merged[-1] if merged else None
         parent = block.metadata.get("docling_parent", "")
 

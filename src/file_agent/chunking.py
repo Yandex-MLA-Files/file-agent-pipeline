@@ -88,6 +88,19 @@ TABLE_ROW_RECORD_MAX_COLUMNS = 40
 # are already good chunks; records would only duplicate them.
 TABLE_ROW_RECORD_MAX_CELL_CHARS = 300
 
+# Semantic (topic-boundary) splitting of long unstructured prose. Structured
+# documents are already cut on their own headings, but a transcript or a
+# lecture with no subheadings is cut at the token budget, which lands mid-topic.
+# With CHUNK_SEMANTIC_SPLIT=on the sentences of such a section are embedded and
+# the cuts are placed where consecutive sentences are least similar. It costs an
+# encoder pass over the section, so it is opt-in.
+DEFAULT_SEMANTIC_SPLIT = False
+# Only sections this many times over the budget are worth the extra pass.
+SEMANTIC_SPLIT_MIN_RATIO = 3
+SEMANTIC_SPLIT_MIN_SENTENCES = 12
+# A boundary is a similarity drop below this percentile of all drops.
+SEMANTIC_SPLIT_PERCENTILE = 25
+
 # The breadcrumb ("Doc title > Chapter > Section") prepended to chunk text may
 # use at most this share of the budget; deeper crumbs are dropped first.
 BREADCRUMB_MAX_RATIO = 0.2
@@ -626,6 +639,10 @@ class _Chunker:
         if not sentences:
             return self._hard_split(text, limit)
 
+        boundaries = self._semantic_boundaries(sentences, text, limit)
+        if boundaries:
+            return self._pack_sentences(sentences, limit, boundaries)
+
         pieces: list[str] = []
         current: list[str] = []
         current_size = 0
@@ -647,6 +664,41 @@ class _Chunker:
             current.append(sentence)
             current_size += size
 
+        if current:
+            pieces.append(" ".join(current))
+        return pieces
+
+    def _semantic_boundaries(self, sentences: list[str], text: str, limit: int) -> set[int] | None:
+        """Sentence indices where the topic shifts, or None when not applicable."""
+        if not _semantic_split_enabled():
+            return None
+        if len(sentences) < SEMANTIC_SPLIT_MIN_SENTENCES:
+            return None
+        if self._budget.size(text) < limit * SEMANTIC_SPLIT_MIN_RATIO:
+            return None
+        return topic_boundaries(sentences)
+
+    def _pack_sentences(self, sentences: list[str], limit: int, boundaries: set[int]) -> list[str]:
+        """Pack sentences up to the budget, preferring to close at a boundary."""
+        pieces: list[str] = []
+        current: list[str] = []
+        current_size = 0
+        for index, sentence in enumerate(sentences):
+            size = self._budget.size(sentence)
+            if size > limit:
+                if current:
+                    pieces.append(" ".join(current))
+                    current, current_size = [], 0
+                pieces.extend(self._hard_split(sentence, limit))
+                continue
+            starts_topic = index in boundaries and current_size >= self._budget.minimum
+            if current and (current_size + size > limit or starts_topic):
+                pieces.append(" ".join(current))
+                # A topic boundary is a real break: carrying the previous topic
+                # into the next chunk is what the overlap is there to avoid.
+                current, current_size = ([], 0) if starts_topic else self._sentence_overlap(current)
+            current.append(sentence)
+            current_size += size
         if current:
             pieces.append(" ".join(current))
         return pieces
@@ -1074,6 +1126,40 @@ class _Chunker:
             metadata["vlm_description"] = " ".join(descriptions)
 
         return metadata
+
+
+def _semantic_split_enabled() -> bool:
+    raw = os.getenv("CHUNK_SEMANTIC_SPLIT")
+    if raw is None:
+        return DEFAULT_SEMANTIC_SPLIT
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def topic_boundaries(sentences: list[str]) -> set[int] | None:
+    """Indices of sentences that open a new topic, by embedding similarity.
+
+    Consecutive sentences are embedded with the retrieval encoder and the
+    cosine similarity of each neighbouring pair is measured; the pairs in the
+    lowest percentile of similarity are where the text changes subject. Returns
+    None when no encoder is available, so chunking never fails because of it.
+    """
+    try:
+        import numpy as np
+
+        from file_agent.lancedb_retriever import _load_default_embedding_model
+
+        model = _load_default_embedding_model()
+        vectors = np.asarray(model.encode(sentences, show_progress_bar=False), dtype="float32")
+        if vectors.ndim != 2 or len(vectors) != len(sentences):
+            return None
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        vectors = vectors / np.clip(norms, 1e-9, None)
+        similarity = np.sum(vectors[:-1] * vectors[1:], axis=1)
+        threshold = float(np.percentile(similarity, SEMANTIC_SPLIT_PERCENTILE))
+        return {index + 1 for index, value in enumerate(similarity) if value <= threshold}
+    except Exception:  # pragma: no cover - encoder unavailable or OOM
+        logger.debug("Semantic split unavailable; using sentence packing.", exc_info=True)
+        return None
 
 
 def _row_records_enabled() -> bool:
