@@ -1,11 +1,29 @@
+"""Retrieval chunking.
+
+Two strategies share one public entry point, :func:`chunk_document`:
+
+``structured`` (default)
+    Section-coherent packing driven by the typed blocks that the parsers emit,
+    with heading-path breadcrumbs, per-block-type splitting (prose by
+    sentences, lists by items, tables by rows with the header repeated, code by
+    lines) and small-to-big parent context windows. See :class:`_Chunker`.
+
+``legacy``
+    The original section-packing chunker, kept verbatim in
+    :mod:`file_agent.chunking_legacy` (``CHUNKING_STRATEGY=legacy``).
+
+Both budget chunk size in the retrieval encoder's own tokens when a tokenizer
+is available (see :func:`get_embedding_tokenizer`), characters otherwise.
+"""
+
 import logging
 import os
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
-from file_agent.document import Block, BlockType, Document
+from file_agent.document import Block, BlockType, Document, heading_level
 from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
@@ -17,10 +35,32 @@ DEFAULT_OVERLAP = 100
 # value (e.g. 1e30) as ``model_max_length``.
 MAX_AUTO_TOKENS = 512
 
+# Target token budget in token mode when the encoder allows more. Retrieval
+# precision is best with focused chunks (~250-400 tokens); the LLM still reads
+# the surrounding parent passage, so nothing is lost by keeping pieces small.
+DEFAULT_TARGET_TOKENS = 384
+
 _SEPARATOR = "\n\n"
 
-# Per-block Docling internals that are meaningless once blocks are packed together.
-_SKIP_BLOCK_METADATA = frozenset({"docling_label", "hierarchy_level"})
+# Per-block parser internals that are meaningless once blocks are packed
+# together (and never useful to the LLM or the UI).
+_SKIP_BLOCK_METADATA = frozenset(
+    {
+        "docling_label",
+        "docling_parent",
+        "docling_parent_label",
+        "hierarchy_level",
+        "block_type",
+        "style",
+        "item_count",
+        "row_count",
+        "figure_index",
+        "table_index",
+        "synthetic_title",
+        "slide_layout",
+        "language",
+    }
+)
 
 # Upper bound for the parent passage stored in chunk metadata (small-to-big
 # retrieval): small chunks give precise embeddings, but the LLM answers from the
@@ -31,9 +71,23 @@ PARENT_CONTEXT_MAX_CHARS = 4000
 # share of the budget; a huge header would crowd out the actual data rows.
 HEADER_REPEAT_MAX_RATIO = 0.25
 
-# Sentence boundary: end punctuation (Latin or Cyrillic text) followed by space,
-# or an explicit line break. Used to avoid cutting a chunk mid-sentence.
-_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+|\n+")
+# The breadcrumb ("Doc title > Chapter > Section") prepended to chunk text may
+# use at most this share of the budget; deeper crumbs are dropped first.
+BREADCRUMB_MAX_RATIO = 0.2
+BREADCRUMB_SEPARATOR = " > "
+BREADCRUMB_MAX_CRUMB_CHARS = 80
+
+# Sentence boundary for Latin/Cyrillic prose. Abbreviations that end with a
+# period but do not close a sentence are protected below.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+(?=[^\sa-zа-яё])|\n+")
+_ABBREVIATIONS = re.compile(
+    r"\b(т|т\.е|т\.к|т\.д|т\.п|др|пр|см|стр|рис|табл|гл|п|пп|ст|г|гг|в|вв|тыс|млн|млрд|руб|коп"
+    r"|им|напр|ул|д|корп|e\.g|i\.e|etc|vs|fig|no|approx|dr|mr|mrs|ms|prof|vol|pp)\.\s",
+    re.IGNORECASE,
+)
+
+ChunkStrategy = Literal["structured", "legacy"]
+DEFAULT_CHUNK_STRATEGY: ChunkStrategy = "structured"
 
 
 class Tokenizer(Protocol):
@@ -57,16 +111,7 @@ class Chunk:
         }
 
 
-@dataclass
-class _Section:
-    """A heading and the blocks that belong to it (its reading-order body)."""
-
-    heading: str | None
-    blocks: list[Block]
-
-    @property
-    def text(self) -> str:
-        return _SEPARATOR.join(b.text for b in self.blocks if b.text)
+# -- budget ------------------------------------------------------------------------
 
 
 class _Budget:
@@ -84,6 +129,7 @@ class _Budget:
         self.minimum = minimum
         self.overlap = overlap
         self._tokenizer = tokenizer
+        self._cache: dict[str, int] = {}
 
     @property
     def unit(self) -> str:
@@ -92,17 +138,24 @@ class _Budget:
     def size(self, text: str) -> int:
         if self._tokenizer is None:
             return len(text)
+        cached = self._cache.get(text)
+        if cached is not None:
+            return cached
         try:
             # verbose=False silences the tokenizer's "sequence longer than the
             # model maximum" notice: measuring long text is exactly the point.
-            return len(self._tokenizer.encode(text, add_special_tokens=False, verbose=False))
+            size = len(self._tokenizer.encode(text, add_special_tokens=False, verbose=False))
         except TypeError:  # tokenizers that do not accept those keywords
             try:
-                return len(self._tokenizer.encode(text, add_special_tokens=False))
+                size = len(self._tokenizer.encode(text, add_special_tokens=False))
             except TypeError:
-                return len(self._tokenizer.encode(text))
+                size = len(self._tokenizer.encode(text))
         except Exception:  # pragma: no cover - never fail chunking on tokenizer issues
-            return len(text)
+            size = len(text)
+        if len(self._cache) > 4096:
+            self._cache.clear()
+        self._cache[text] = size
+        return size
 
 
 def _build_budget(
@@ -117,7 +170,7 @@ def _build_budget(
         minimum = max(1, max_chars // 3) if min_chars is None else min(min_chars, max_chars)
         return _Budget(limit=limit, minimum=minimum, overlap=overlap, tokenizer=None)
 
-    limit = max_tokens or _tokenizer_limit(tokenizer)
+    limit = max_tokens or min(_tokenizer_limit(tokenizer), _target_tokens())
     # Keep the caller's overlap *ratio* when switching units, so the defaults
     # (100 of 1000 chars) stay a sensible 10% in token space too.
     scaled_overlap = round(limit * overlap / max_chars) if max_chars else 0
@@ -127,6 +180,16 @@ def _build_budget(
         overlap=max(0, min(scaled_overlap, limit - 1)),
         tokenizer=tokenizer,
     )
+
+
+def _target_tokens() -> int:
+    raw = os.getenv("CHUNK_TARGET_TOKENS")
+    if not raw:
+        return DEFAULT_TARGET_TOKENS
+    try:
+        return max(32, int(raw))
+    except ValueError:
+        return DEFAULT_TARGET_TOKENS
 
 
 def _tokenizer_limit(tokenizer: Tokenizer) -> int:
@@ -182,6 +245,16 @@ def _sentence_transformers_limit(model_name: str) -> int | None:
         return None
 
 
+# -- public entry point ---------------------------------------------------------------
+
+
+def resolve_chunk_strategy(explicit: str | None = None) -> ChunkStrategy:
+    value = (explicit or os.getenv("CHUNKING_STRATEGY") or DEFAULT_CHUNK_STRATEGY).strip().lower()
+    if value not in ("structured", "legacy"):
+        raise ValueError(f"CHUNKING_STRATEGY must be 'structured' or 'legacy', got {value!r}")
+    return value  # type: ignore[return-value]
+
+
 def chunk_document(
     document: Document,
     max_chars: int = DEFAULT_MAX_CHARS,
@@ -189,10 +262,11 @@ def chunk_document(
     min_chars: int | None = None,
     max_tokens: int | None = None,
     tokenizer: Tokenizer | None = None,
+    strategy: ChunkStrategy | None = None,
 ) -> list[Chunk]:
     """Split a document into retrieval-sized, section-coherent chunks.
 
-    The chunker follows three principles used by production RAG stacks:
+    The structured chunker follows the principles used by production RAG stacks:
 
     1. **Structure first.** Blocks are grouped into sections (a heading plus its
        body), so a heading always opens a chunk and never dangles at the end of
@@ -200,18 +274,18 @@ def chunk_document(
        budget, which keeps small slides/paragraphs from becoming useless
        single-sentence chunks while never mixing a section into a chunk that is
        already large enough to stand on its own.
-    2. **Budget in the encoder's unit.** When ``tokenizer`` is provided, chunk
-       size is measured in tokens (default: the encoder's own window, see
-       :func:`get_embedding_tokenizer`) instead of characters, so nothing is
-       silently truncated at index time and Russian and English text are treated
-       consistently. Without a tokenizer the budget falls back to characters.
-    3. **Split on natural boundaries.** Oversized blocks are divided at sentence
-       boundaries (then words, then characters as a last resort) rather than
-       mid-word, tables are split by rows repeating the header, and continuation
-       chunks keep their section heading as a breadcrumb.
-
-    Each chunk records the section it starts under, all sections it covers, page
-    numbers, block ids and any VLM description for filtering and tracing.
+    2. **Context in every chunk.** Each chunk is prefixed with its heading path
+       ("Title > Chapter > Section") so the embedding and BM25 index know where
+       the passage sits, and the same path is stored in ``metadata["heading_path"]``.
+    3. **Budget in the encoder's unit.** When ``tokenizer`` is provided, chunk
+       size is measured in tokens instead of characters, so nothing is silently
+       truncated at index time and Russian and English are treated consistently.
+    4. **Split by content type.** Prose is cut at sentence boundaries with
+       sentence overlap, lists by items, tables by rows repeating the header,
+       code by lines; a piece never starts with a dangling heading.
+    5. **Small-to-big.** Pieces of a long section carry a parent passage
+       (``metadata["context"]``) — a window of the section around the piece —
+       which is what the LLM actually reads.
     """
     if max_chars <= 0:
         raise ValueError("max_chars must be greater than 0")
@@ -220,10 +294,24 @@ def chunk_document(
     if overlap >= max_chars:
         raise ValueError("overlap must be smaller than max_chars")
 
+    active = resolve_chunk_strategy(strategy)
+    if active == "legacy":
+        from file_agent.chunking_legacy import chunk_document_legacy
+
+        return chunk_document_legacy(
+            document,
+            max_chars=max_chars,
+            overlap=overlap,
+            min_chars=min_chars,
+            max_tokens=max_tokens,
+            tokenizer=tokenizer,
+        )
+
     with tracer.start_as_current_span("file_agent.chunk_document") as span:
         span.set_attribute("file_agent.block_count", len(document.blocks))
         span.set_attribute("file_agent.max_chars", max_chars)
         span.set_attribute("file_agent.overlap", overlap)
+        span.set_attribute("file_agent.strategy", active)
 
         budget = _build_budget(max_chars, overlap, min_chars, max_tokens, tokenizer)
         chunker = _Chunker(document, budget)
@@ -236,14 +324,43 @@ def chunk_document(
         return chunks
 
 
+# -- sections ------------------------------------------------------------------------
+
+
+@dataclass
+class _Section:
+    """A heading and the blocks that belong to it (its reading-order body)."""
+
+    heading: str | None
+    blocks: list[Block]
+    # Headings above this section, outermost first (excluding its own heading).
+    path: list[str] = field(default_factory=list)
+
+    @property
+    def text(self) -> str:
+        return _SEPARATOR.join(b.text for b in self.blocks if b.text)
+
+    @property
+    def body_blocks(self) -> list[Block]:
+        return [b for b in self.blocks if b.block_type != BlockType.HEADING]
+
+
 def _group_sections(blocks: list[Block]) -> list[_Section]:
+    """Split blocks into leaf sections and record the heading path of each."""
     sections: list[_Section] = []
-    current = _Section(heading=None, blocks=[])
+    stack: list[tuple[int, str]] = []  # (level, heading text)
+    current = _Section(heading=None, blocks=[], path=[])
     for block in blocks:
         if block.block_type == BlockType.HEADING and block.text.strip():
             if current.blocks:
                 sections.append(current)
-            current = _Section(heading=block.text.strip(), blocks=[block])
+            level = heading_level(block)
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            path = [text for _, text in stack]
+            title = " ".join(block.text.split())
+            stack.append((level, title))
+            current = _Section(heading=title, blocks=[block], path=path)
         else:
             current.blocks.append(block)
     if current.blocks:
@@ -251,9 +368,18 @@ def _group_sections(blocks: list[Block]) -> list[_Section]:
     return sections
 
 
+_NBSP = "\u00a0"
+
+
 def _split_sentences(text: str) -> list[str]:
-    parts = [part.strip() for part in _SENTENCE_BOUNDARY.split(text)]
+    # Glue abbreviations ("т.е. ", "стр. ", "e.g. ") to the next word with a
+    # non-breaking space so the boundary regex does not cut a sentence there.
+    protected = _ABBREVIATIONS.sub(lambda m: m.group(0)[:-1] + _NBSP, text)
+    parts = [part.replace(_NBSP, " ").strip() for part in _SENTENCE_BOUNDARY.split(protected)]
     return [part for part in parts if part]
+
+
+# -- chunker -----------------------------------------------------------------------
 
 
 class _Chunker:
@@ -267,16 +393,18 @@ class _Chunker:
         self._index = 1
         self._buffer: list[_Section] = []
         self._buffer_size = 0
+        self._title = _document_title(document)
 
     def add_section(self, section: _Section) -> None:
         text = section.text
         if not text:
             return
 
-        size = self._budget.size(text)
+        crumb = self._breadcrumb(section.path)
+        size = self._budget.size(text) + self._crumb_size(crumb)
         if size > self._budget.limit:
             self._flush()
-            self._pack_blocks(section.blocks, section.heading)
+            self._pack_blocks(section)
             return
 
         addition = size + (self._separator_size if self._buffer else 0)
@@ -284,6 +412,12 @@ class _Chunker:
         if self._buffer and (self._buffer_size >= self._budget.minimum or would_exceed):
             self._flush()
             addition = size
+        # Sections packed together share one breadcrumb (that of the first);
+        # a section from a different branch of the outline starts a new chunk.
+        if self._buffer and self._buffer[0].path != section.path and self._buffer_size > 0:
+            if self._buffer_size >= self._budget.minimum // 2:
+                self._flush()
+                addition = size
 
         self._buffer.append(section)
         self._buffer_size += addition
@@ -292,66 +426,75 @@ class _Chunker:
         self._flush()
         return self._chunks
 
-    # -- internals ----------------------------------------------------------
+    # -- packing whole sections ------------------------------------------------------
 
     def _flush(self) -> None:
         if not self._buffer:
             return
         blocks = [block for section in self._buffer for block in section.blocks]
         headings = [section.heading for section in self._buffer if section.heading]
-        self._emit(blocks, section=headings[0] if headings else None, sections=headings)
+        path = self._buffer[0].path
+        self._emit(
+            blocks,
+            section=headings[0] if headings else (path[-1] if path else None),
+            sections=headings,
+            path=path,
+        )
         self._buffer = []
         self._buffer_size = 0
 
-    def _reserved_limit(self, heading: str | None) -> int:
-        """Budget available for content once the breadcrumb heading is added."""
-        if not heading:
-            return self._budget.limit
-        reserve = self._budget.size(heading) + self._separator_size
-        return max(1, self._budget.limit - reserve)
+    # -- splitting oversized sections -------------------------------------------------
 
-    def _pack_blocks(self, blocks: list[Block], heading: str | None) -> None:
-        limit = self._reserved_limit(heading)
-        # Small-to-big retrieval: every piece of this oversized section links back
-        # to the whole section text, which is what the LLM will actually read.
-        parent = self._bound_parent(_SEPARATOR.join(b.text for b in blocks if b.text))
+    def _pack_blocks(self, section: _Section) -> None:
+        heading = section.heading
+        # The heading itself travels in the breadcrumb of every piece; the body
+        # is what gets packed. A piece never consists of a heading alone.
+        blocks = section.body_blocks or section.blocks
+        path = section.path + ([heading] if heading else [])
+        limit = self._reserved_limit(path)
         buffer: list[Block] = []
         buffer_size = 0
+        # Positions of the pieces inside the section, for parent windows.
+        cursor = 0
 
-        def flush_buffer() -> None:
+        def flush_buffer(end_index: int) -> None:
             nonlocal buffer, buffer_size
             if not buffer:
                 return
+            parent = self._parent_window(blocks, end_index - len(buffer), end_index, path)
             self._emit(
                 buffer,
                 section=heading,
                 sections=[heading] if heading else [],
-                prepend_heading=True,
+                path=path,
                 parent=parent,
             )
             buffer = self._overlap_seed(buffer)
             buffer_size = self._packed_size(buffer)
 
-        for block in blocks:
+        for index, block in enumerate(blocks):
             text = block.text
             if not text:
                 continue
 
             size = self._budget.size(text)
             if block.block_type == BlockType.TABLE or size > limit:
-                flush_buffer()
+                flush_buffer(index)
                 buffer, buffer_size = [], 0
-                self._emit_oversized(block, text, heading)
+                parent = self._parent_window(blocks, index, index + 1, path)
+                self._emit_oversized(block, text, heading, path, parent)
+                cursor = index + 1
                 continue
 
             addition = size + (self._separator_size if buffer else 0)
             if buffer and buffer_size + addition > limit:
-                flush_buffer()
+                flush_buffer(index)
                 addition = size + (self._separator_size if buffer else 0)
             buffer.append(block)
             buffer_size += addition
+            cursor = index + 1
 
-        flush_buffer()
+        flush_buffer(cursor)
 
     def _packed_size(self, blocks: list[Block]) -> int:
         if not blocks:
@@ -374,9 +517,50 @@ class _Chunker:
             seed = seed[1:]
         return seed
 
-    def _emit_oversized(self, block: Block, text: str, heading: str | None) -> None:
+    def _parent_window(self, blocks: list[Block], start: int, end: int, path: list[str]) -> str:
+        """Section text around ``blocks[start:end]``, grown both ways up to the cap.
+
+        The heading path opens the passage so the LLM knows which section it is
+        reading even when the window starts mid-section.
+        """
+        start = max(0, start)
+        end = max(start, min(end, len(blocks)))
+        text = _SEPARATOR.join(b.text for b in blocks[start:end] if b.text)
+        heading_line = BREADCRUMB_SEPARATOR.join(path)
+        cap = PARENT_CONTEXT_MAX_CHARS - (
+            len(heading_line) + len(_SEPARATOR) if heading_line else 0
+        )
+        if len(text) >= cap:
+            text = text[:cap] + " …"
+            return f"{heading_line}{_SEPARATOR}{text}" if heading_line else text
+        before, after = start - 1, end
+        while before >= 0 or after < len(blocks):
+            grew = False
+            if before >= 0:
+                candidate = blocks[before].text
+                if not candidate:
+                    grew = True
+                elif len(text) + len(candidate) + len(_SEPARATOR) <= cap:
+                    text = candidate + _SEPARATOR + text
+                    grew = True
+                before -= 1
+            if after < len(blocks):
+                candidate = blocks[after].text
+                if not candidate:
+                    grew = True
+                elif len(text) + len(candidate) + len(_SEPARATOR) <= cap:
+                    text = text + _SEPARATOR + candidate
+                    grew = True
+                after += 1
+            if not grew:
+                break
+        return f"{heading_line}{_SEPARATOR}{text}" if heading_line else text
+
+    def _emit_oversized(
+        self, block: Block, text: str, heading: str | None, path: list[str], parent: str
+    ) -> None:
         sections = [heading] if heading else []
-        limit = self._reserved_limit(heading)
+        limit = self._reserved_limit(path)
 
         if block.block_type == BlockType.TABLE:
             # Keep small tables whole; split large ones by rows so each piece fits
@@ -384,21 +568,29 @@ class _Chunker:
             pieces = self._split_table(text, limit)
         elif self._budget.size(text) <= limit:
             pieces = [text]
+        elif block.block_type == BlockType.LIST:
+            pieces = self._split_lines(text, limit, keep_blank_lines=False)
+        elif block.block_type == BlockType.CODE:
+            pieces = self._split_lines(text, limit, keep_blank_lines=True)
         else:
             pieces = self._split_text(text, limit)
 
         # Always offer the whole block as parent context; _emit drops it when the
         # piece already is the whole block, and keeps it when the safety net in
         # _enforce_limit splits the block further.
-        parent = self._bound_parent(text)
+        whole = self._bound_parent(text)
+        heading_line = BREADCRUMB_SEPARATOR.join(path)
+        if heading_line and len(pieces) > 1:
+            whole = f"{heading_line}{_SEPARATOR}{whole}"
+        block_parent = whole if len(whole) >= len(parent) or len(pieces) > 1 else parent
         for piece in pieces:
             self._emit(
                 [block],
                 section=heading,
                 sections=sections,
+                path=path,
                 text=piece,
-                prepend_heading=True,
-                parent=parent,
+                parent=block_parent,
             )
 
     @staticmethod
@@ -437,6 +629,33 @@ class _Chunker:
         if current:
             pieces.append(" ".join(current))
         return pieces
+
+    def _split_lines(self, text: str, limit: int, keep_blank_lines: bool) -> list[str]:
+        """Split lists/code on line boundaries (items are never cut in half)."""
+        lines = text.split("\n")
+        if not keep_blank_lines:
+            lines = [line for line in lines if line.strip()]
+        pieces: list[str] = []
+        current: list[str] = []
+        current_size = 0
+        for line in lines:
+            size = self._budget.size(line)
+            if size > limit:
+                if current:
+                    pieces.append("\n".join(current))
+                    current, current_size = [], 0
+                pieces.extend(self._split_text(line, limit))
+                continue
+            addition = size + (self._line_size if current else 0)
+            if current and current_size + addition > limit:
+                pieces.append("\n".join(current))
+                current, current_size = [], 0
+                addition = size
+            current.append(line)
+            current_size += addition
+        if current:
+            pieces.append("\n".join(current))
+        return pieces or [text]
 
     def _sentence_overlap(self, sentences: list[str]) -> tuple[list[str], int]:
         if self._budget.overlap == 0:
@@ -488,23 +707,32 @@ class _Chunker:
             else max(0, self._budget.overlap * 3)
         )
 
+    # -- tables --------------------------------------------------------------------
+
     def _split_table(self, text: str, limit: int) -> list[str]:
         if self._budget.size(text) <= limit:
             return [text]
 
-        header, rows = self._table_parts(text)
+        caption, header, rows = self._table_parts(text)
         if not rows:
             # Degenerate export (a header with no data rows, or one merged row):
             # splitting it can only produce header fragments, so keep it whole.
             # The parent context carries the full table to the LLM anyway.
             return [text]
 
-        header_size = (self._budget.size(header) + self._line_size) if header else 0
+        prefix_lines = [line for line in (caption, header) if line]
+        prefix = "\n".join(prefix_lines)
+        prefix_size = (self._budget.size(prefix) + self._line_size) if prefix else 0
         # Repeating a header that eats most of the budget leaves no room for data
         # rows — that is exactly how header-only fragments appear in wide tables.
-        repeat_header = bool(header) and header_size <= limit * HEADER_REPEAT_MAX_RATIO
-        prefix = header if repeat_header else ""
-        prefix_size = header_size if repeat_header else 0
+        repeat_prefix = bool(prefix) and prefix_size <= limit * HEADER_REPEAT_MAX_RATIO
+        if not repeat_prefix and caption and header:
+            # Try the header alone (captions can be long).
+            prefix = header
+            prefix_size = self._budget.size(prefix) + self._line_size
+            repeat_prefix = prefix_size <= limit * HEADER_REPEAT_MAX_RATIO
+        if not repeat_prefix:
+            prefix, prefix_size = "", 0
         row_limit = max(1, limit - prefix_size)
 
         pieces: list[str] = []
@@ -532,15 +760,22 @@ class _Chunker:
             pieces.append(self._join_table(prefix, current))
 
         # Name the columns at least once when the header is too big to repeat.
-        if pieces and header and not repeat_header:
+        if pieces and header and not repeat_prefix:
             first = self._join_table(header, [pieces[0]])
             if self._budget.size(first) <= limit:
                 pieces[0] = first
         return pieces or [text]
 
-    def _table_parts(self, text: str) -> tuple[str, list[str]]:
-        """Return the Markdown header block and the rows that carry real data."""
+    def _table_parts(self, text: str) -> tuple[str, str, list[str]]:
+        """Return (caption lines, Markdown header block, data rows)."""
         lines = text.split("\n")
+        # Non-table lines before the first pipe row are the caption/title.
+        first_row = 0
+        while first_row < len(lines) and "|" not in lines[first_row]:
+            first_row += 1
+        caption = "\n".join(line for line in lines[:first_row] if line.strip())
+        lines = lines[first_row:]
+
         header_lines: list[str] = []
         body = lines
         # A Markdown table header is a row followed by a separator like |---|:--|.
@@ -555,7 +790,7 @@ class _Chunker:
             # tokens but no meaning, so drop them instead of emitting noise.
             if any(cell.strip() for cell in row.split("|")) and not set(row.strip()) <= set("|-: ")
         ]
-        return "\n".join(header_lines), rows
+        return caption, "\n".join(header_lines), rows
 
     def _split_row(self, row: str, limit: int) -> list[str]:
         cells = [cell for cell in row.split("|") if cell.strip()]
@@ -581,32 +816,68 @@ class _Chunker:
         body = "\n".join(rows)
         return f"{header}\n{body}" if header else body
 
+    # -- breadcrumbs ----------------------------------------------------------------
+
+    def _breadcrumb(self, path: list[str]) -> str:
+        """Heading path (with the document title) that prefixes a chunk."""
+        crumbs: list[str] = []
+        if self._title:
+            crumbs.append(self._title)
+        for crumb in path:
+            if crumb and (not crumbs or crumbs[-1] != crumb):
+                crumbs.append(crumb)
+        crumbs = [_shorten(c, BREADCRUMB_MAX_CRUMB_CHARS) for c in crumbs]
+        max_size = max(1, int(self._budget.limit * BREADCRUMB_MAX_RATIO))
+        # Drop the outermost crumbs first: the nearest headings matter most.
+        while crumbs and self._budget.size(BREADCRUMB_SEPARATOR.join(crumbs)) > max_size:
+            crumbs.pop(0)
+        return BREADCRUMB_SEPARATOR.join(crumbs)
+
+    def _crumb_size(self, crumb: str) -> int:
+        return (self._budget.size(crumb) + self._separator_size) if crumb else 0
+
+    def _reserved_limit(self, path: list[str]) -> int:
+        """Budget available for content once the breadcrumb is added."""
+        crumb = self._breadcrumb(path)
+        return max(1, self._budget.limit - self._crumb_size(crumb))
+
+    # -- emission -------------------------------------------------------------------
+
     def _emit(
         self,
         blocks: list[Block],
         section: str | None,
         sections: list[str],
+        path: list[str],
         text: str | None = None,
-        prepend_heading: bool = False,
         parent: str | None = None,
     ) -> None:
-        chunk_text = text if text is not None else _SEPARATOR.join(b.text for b in blocks if b.text)
-        # Give continuation chunks of a long section their heading as context, so
-        # every chunk is self-describing for retrieval (a "breadcrumb").
-        if prepend_heading and section and section not in chunk_text:
-            chunk_text = f"{section}\n\n{chunk_text}"
+        body = text if text is not None else _SEPARATOR.join(b.text for b in blocks if b.text)
+        if not any(char.isalnum() for char in body):
+            return
+        crumb = self._breadcrumb(path)
+        # The breadcrumb makes every chunk self-describing for retrieval; when the
+        # chunk already opens with that heading, do not repeat it.
+        prefix = ""
+        if crumb:
+            first_line = body.split("\n", 1)[0].strip()
+            last_crumb = crumb.split(BREADCRUMB_SEPARATOR)[-1]
+            if not (first_line == last_crumb and crumb == last_crumb):
+                prefix = f"{crumb}{_SEPARATOR}"
+        chunk_text = f"{prefix}{body}"
 
         # Hard guarantee: never emit a chunk the encoder would truncate, whatever
         # the upstream heuristics produced (wide table rows, dense formulas, ...).
-        for piece in self._enforce_limit(chunk_text, section if prepend_heading else None):
+        for piece in self._enforce_limit(chunk_text, prefix):
             # Pieces without a single word or number (table rules, stray glyphs)
             # carry no information and would only dilute the index.
             if not any(char.isalnum() for char in piece):
                 continue
-            metadata = self._build_metadata(blocks, section, sections)
+            metadata = self._build_metadata(blocks, section, sections, path)
             # Small-to-big retrieval: the piece is what gets embedded, the parent
             # passage is what the LLM reads (see qa.build_context_from_results).
-            if parent and len(parent) > len(piece):
+            body_only = piece[len(prefix) :] if prefix and piece.startswith(prefix) else piece
+            if parent and len(parent) > len(body_only) and parent != body_only:
                 metadata["context"] = parent
             self._chunks.append(
                 Chunk(
@@ -617,18 +888,13 @@ class _Chunker:
             )
             self._index += 1
 
-    def _enforce_limit(self, text: str, section: str | None = None) -> list[str]:
+    def _enforce_limit(self, text: str, prefix: str = "") -> list[str]:
         if self._budget.size(text) <= self._budget.limit:
             return [text]
 
         # Keep the breadcrumb on every window, not just the first one.
-        prefix = ""
-        body = text
-        marker = f"{section}{_SEPARATOR}" if section else ""
-        if marker and text.startswith(marker):
-            prefix, body = marker, text[len(marker) :]
-
-        return self._fit_windows(body, prefix)
+        body = text[len(prefix) :] if prefix and text.startswith(prefix) else text
+        return self._fit_windows(body, prefix if text.startswith(prefix) else "")
 
     def _fit_windows(self, text: str, prefix: str = "") -> list[str]:
         """Cut text into windows that provably fit the budget, prefix included."""
@@ -643,7 +909,11 @@ class _Chunker:
                 window = max(1, int(window * 0.8))
                 piece = text[start : start + window]
             pieces.append(prefix + piece)
-            start += max(1, window - self._char_overlap())
+            # Always advance by at least half a window: with a large overlap and
+            # a token-dense window (dot leaders, hashes) the naive step used to
+            # collapse to a single character and produce thousands of chunks.
+            step = max(window // 2, window - self._char_overlap(), 1)
+            start += step
         return pieces
 
     def _estimate_window(self, text: str) -> int:
@@ -659,6 +929,7 @@ class _Chunker:
         blocks: list[Block],
         section: str | None,
         sections: list[str],
+        path: list[str],
     ) -> dict[str, Any]:
         block_types: list[str] = []
         for block in blocks:
@@ -674,8 +945,9 @@ class _Chunker:
         metadata: dict[str, Any] = {}
         for block in blocks:
             for key, value in block.metadata.items():
-                if key not in _SKIP_BLOCK_METADATA:
-                    metadata.setdefault(key, value)
+                if key in _SKIP_BLOCK_METADATA or key.startswith("_"):
+                    continue
+                metadata.setdefault(key, value)
 
         metadata.update(
             {
@@ -686,6 +958,8 @@ class _Chunker:
                 "block_types": block_types,
             }
         )
+        if self._title:
+            metadata["doc_title"] = self._title
         if pages:
             metadata["page_number"] = pages[0]
             metadata["page_numbers"] = pages
@@ -693,9 +967,28 @@ class _Chunker:
             metadata["section"] = section
         if sections:
             metadata["sections"] = sections
+        full_path = list(path)
+        if section and (not full_path or full_path[-1] != section):
+            full_path.append(section)
+        if full_path:
+            metadata["heading_path"] = full_path
         if len(blocks) == 1 and blocks[0].bbox is not None:
             metadata["bbox"] = blocks[0].bbox
         if descriptions:
             metadata["vlm_description"] = " ".join(descriptions)
 
         return metadata
+
+
+def _document_title(document: Document) -> str | None:
+    title = document.title
+    if not title:
+        return None
+    return " ".join(title.split())
+
+
+def _shorten(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
