@@ -234,6 +234,7 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | v4, source footer stripped | 127 | 0 | 0.945 | 0.603 | 0.830 | 0.760 | 0.814 | — |
 | **v5 (default)** | 127 | 0 | **0.958** | 0.605 | 0.831 | 0.777 | **0.865** | **18.5** |
 | v5, judged a second time | 127 | 0 | 0.956 | 0.616 | 0.823 | 0.763 | 0.861 | — |
+| v5 + concise prompt (v4) | 127 | 0 | 0.941 | 0.554 | 0.823 | 0.772 | 0.854 | 10.8 |
 
 Means over successfully processed rows only differ for the baseline (0.715 /
 0.429 / 0.560 / 0.570 / 0.630 over 122 rows).
@@ -272,8 +273,17 @@ text:
   floor for those columns, so v5's +0.054 recall is a real effect of the
   ingestion changes, not measurement drift.
 - **The footer was not what produced the zero correctness scores**: they are
-  still there without it (0.601 → 0.603). Those come from the completeness of
-  the answers, which is what prompt v4 addresses.
+  still there without it (0.601 → 0.603).
+
+The zeros looked like a penalty for answering *too fully*, so prompt v4 was
+written to answer the question and nothing beside it, and measured
+(`pc-v6-concise-127`). It is a clear negative result: answers got 40 %
+shorter (667 → 398 characters on average) and twice as fast (18.5 → 10.8 s
+per question), and correctness **fell** by 0.05 (0.605 → 0.554) with
+faithfulness down 0.017. In recall mode the reference claims the answer
+*misses* cost more than the extra claims it volunteers, so completeness
+wins. The default stays `QA_PROMPT=v3`; v4 is worth choosing only when the
+halved latency matters more than 0.05 of correctness.
 
 Reading the table:
 

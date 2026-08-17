@@ -21,11 +21,13 @@ NO_CONTEXT_MESSAGE = "No relevant context was found in the document to answer th
 # zeros for answers that were otherwise word-perfect. The passage headers in
 # the prompt still carry the provenance, and the UI shows the source chunks,
 # so nothing is lost by keeping it out of the answer text.
-# ``v4`` additionally keeps the answer to the question that was asked: v3 lists
-# every related fact in the passages, which reads as thorough but is scored as
-# unsupported padding — a claim-level judge marks the extra facts as claims the
-# reference does not contain. ``v1`` is the original short prompt, kept so
-# earlier runs stay reproducible.
+# ``v4`` keeps the answer to the question that was asked and nothing beside
+# it. Measured against v3 on the 127-question set it is a trade, not a win:
+# answers are 40 % shorter and twice as fast (18.5 -> 10.8 s per question) but
+# correctness falls 0.605 -> 0.554, because a claim-level judge in recall mode
+# punishes the reference facts a short answer *misses* more than it rewards
+# dropping the extra ones it volunteers. Choose it for latency, not accuracy.
+# ``v1`` is the original short prompt, kept so earlier runs stay reproducible.
 DEFAULT_QA_PROMPT_VERSION = "v3"
 QA_PROMPT_VERSIONS = ("v1", "v2", "v3", "v4")
 
