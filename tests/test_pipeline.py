@@ -141,3 +141,32 @@ def test_parse_file_rejects_unsupported_extension(tmp_path):
 
     with pytest.raises(ValueError, match="Unsupported file type"):
         parse_file(file_path)
+
+
+def test_ocr_engine_defaults_to_auto_and_validates(monkeypatch):
+    from file_agent.pipeline import resolve_ocr_engine
+
+    monkeypatch.delenv("OCR_ENGINE", raising=False)
+    assert resolve_ocr_engine() == "auto"
+
+    monkeypatch.setenv("OCR_ENGINE", "EasyOCR")
+    assert resolve_ocr_engine() == "easyocr"
+
+    monkeypatch.setenv("OCR_ENGINE", "tesseract")
+    with pytest.raises(ValueError, match="OCR_ENGINE"):
+        resolve_ocr_engine()
+
+
+def test_auto_engine_arms_the_local_fallback_and_vlm_does_not(monkeypatch):
+    from file_agent import pipeline
+
+    monkeypatch.setattr(pipeline, "create_vlm_client", lambda: object())
+
+    monkeypatch.setenv("OCR_ENGINE", "auto")
+    assert pipeline._vlm_ocr_client().fallback is not None
+
+    monkeypatch.setenv("OCR_ENGINE", "vlm")
+    assert pipeline._vlm_ocr_client().fallback is None
+
+    monkeypatch.setenv("OCR_ENGINE", "easyocr")
+    assert pipeline._vlm_ocr_client() is None
