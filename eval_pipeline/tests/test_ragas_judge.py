@@ -330,7 +330,6 @@ def test_evaluate_appends_a_usage_log_entry(patched_metrics, tmp_path):
     assert entry["cached_tokens"] == 0
     assert entry["cost_rub"] == 0
     assert "timestamp" in entry
-import json
 
 
 def test_judge_extra_body_env_is_parsed(monkeypatch):
