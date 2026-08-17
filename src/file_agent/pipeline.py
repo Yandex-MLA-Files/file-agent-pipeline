@@ -6,7 +6,7 @@ from typing import Literal
 from dotenv import load_dotenv
 
 from file_agent.document import BlockType, Document
-from file_agent.parsers.docling_parser import DoclingParser
+from file_agent.parsers.docling_parser import DoclingParser, document_title
 from file_agent.parsers.docx_parser import DOCXParser
 from file_agent.parsers.enhancer import DocumentEnhancer
 from file_agent.parsers.html_parser import HTMLParser
@@ -215,6 +215,10 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
         document.metadata["vlm_ocr_pages"] = sorted(transcribed)
         if vlm_ocr is not None and vlm_ocr.stats:
             document.metadata["ocr_stats"] = dict(sorted(vlm_ocr.stats.items()))
+        # The title was chosen before OCR ran; a scanned first page usually
+        # carries the real one ("Клинические рекомендации" rather than the
+        # "Оглавление" heading Docling found on page 2).
+        document.metadata["title"] = document_title(document.blocks)
         document.build_table_of_contents()
 
     if analysis is not None:

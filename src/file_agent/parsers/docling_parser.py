@@ -237,7 +237,7 @@ class DoclingParser(BaseParser):
                     "pdf_backend": self._backend,
                     "ocr_engine": self.ocr_engine,
                     "docling_markdown": native_markdown,
-                    "title": _document_title(blocks),
+                    "title": document_title(blocks),
                 },
             )
             document.build_table_of_contents()
@@ -592,8 +592,41 @@ def _union_bbox(a, b):
     return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
 
 
-def _document_title(blocks: list[Block]) -> str | None:
-    for block in blocks[:5]:
-        if block.block_type == BlockType.HEADING and block.text.strip():
-            return block.text.strip()
-    return None
+# Structural headings that open a document but say nothing about it. Taking one
+# as the title puts "Оглавление" in front of every chunk of the document and in
+# every breadcrumb the retriever sees.
+_GENERIC_TITLES = frozenset(
+    {
+        "оглавление",
+        "содержание",
+        "введение",
+        "аннотация",
+        "приложение",
+        "список литературы",
+        "table of contents",
+        "contents",
+        "introduction",
+        "abstract",
+        "appendix",
+        "references",
+        "index",
+    }
+)
+
+
+def document_title(blocks: list[Block]) -> str | None:
+    """First heading that actually names the document."""
+    fallback: str | None = None
+    for block in blocks[:12]:
+        if block.block_type != BlockType.HEADING:
+            continue
+        text = " ".join(block.text.split())
+        if not text:
+            continue
+        if text.strip(" .:").lower() in _GENERIC_TITLES:
+            continue
+        if len(text) > 200:  # a paragraph mislabelled as a heading
+            fallback = fallback or text[:200]
+            continue
+        return text
+    return fallback

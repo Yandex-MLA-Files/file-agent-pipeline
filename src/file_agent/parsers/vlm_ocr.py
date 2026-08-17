@@ -207,9 +207,11 @@ class VLMPageOCR:
             fallback_blocks = self._fallback_blocks(image, path, page_number)
             if fallback_blocks:
                 return fallback_blocks
-            self._count("fallback_empty")
-
-        self._count("vlm_ok")
+            # No local engine, or it found nothing either: a suspect transcript
+            # is still better than dropping the page.
+            self._count("kept_suspect_transcript")
+        else:
+            self._count("vlm_ok")
         return self._to_blocks(markdown, path.name, page_number)
 
     def _describe(self, image: Image.Image, max_tokens: int) -> tuple[str, str | None]:
