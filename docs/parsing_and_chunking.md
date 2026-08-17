@@ -243,6 +243,7 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | `pc-v6-concise-127` | v5 + QA prompt v4 (answer the question and nothing beside it) and the late fixes: document title no longer taken from "Оглавление", VLM repair of degenerate PDF tables, automatic profiles for tables outside spreadsheets. |
 | `pc-v7-topk8-127` | v5 (default prompt) with `--top-k 8`: eight passages per question instead of five, for the multi-document questions whose context recall is the lowest of the set. |
 | `pc-v5-rejudge` | The v5 run judged a second time, unchanged, to measure how much of a difference between runs is the judge's own variance. |
+| `pc-v8-parsing3-127` | v5 defaults plus the third round of parsing work: formula/code enrichment for PDF, DOCX footnotes, text frames, nested tables and real list numbers, HTML merged cells, and the two-column reading-order repair. (Hyperlink targets landed after the run started and are the one item it does not cover.) |
 
 ### 3.2 Results (ragas, judge = Qwen3.5-27B without thinking; pipeline failures scored 0)
 
