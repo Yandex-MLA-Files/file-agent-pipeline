@@ -216,6 +216,9 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | `pc-structured-v4-127` (v4, **default configuration**) | v2 + Docling `docling-parse` backend with ACCURATE TableFormer (row labels of financial tables recovered) + cross-encoder reranking (`bge-reranker-v2-m3` over the top-20 hybrid hits) + document-diverse top-k + spreadsheet profile blocks + prompt rule for comparison/"does it mention" questions. |
 | `pc-structured-v4-norerank-127` | v4 without the reranker (ablation). Note: only one ingestion process fits next to vLLM on the shared A100 (~8 GB free); a second concurrent generation run fails with CUDA OOM. |
 | `pc-structured-v4-agent-127` | v4 ingestion with the multi-step agent (`--answer-mode agent`). |
+| `pc-v4-nocite-127` | The v4 answers with the `Источники: …` footer stripped by a regular expression — identical answers, identical contexts, so the difference isolates what the footer costs in the judge's eyes. |
+| `pc-v5-rag-127` (v5, **default configuration**) | v4 + OCR `auto` (validated VLM transcripts, concurrent, EasyOCR per-page fallback) + spreadsheet fragment merging and workbook overview + table row records + hyphenation repair + document-scaled figure budget + QA prompt v3 (no source footer). |
+| `pc-v6-topk8-127` | v5 + `--top-k 8` and the two late parsing fixes (document title no longer taken from "Оглавление"; VLM repair of degenerate PDF tables). |
 
 ### 3.2 Results (ragas, judge = Qwen3.5-27B without thinking; pipeline failures scored 0)
 

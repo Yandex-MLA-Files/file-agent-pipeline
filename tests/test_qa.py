@@ -190,3 +190,29 @@ def test_answer_question_with_context_skips_llm_when_results_empty():
 
     assert answer == NO_CONTEXT_MESSAGE
     assert llm_client.prompts == []
+
+
+def test_qa_prompt_v4_answers_only_the_question(monkeypatch):
+    """v4 keeps the answer to what was asked; v3 lists everything related."""
+    from file_agent.qa import build_qa_prompt
+
+    monkeypatch.setenv("QA_PROMPT", "v4")
+    v4 = build_qa_prompt("Вопрос?", "Контекст")
+    monkeypatch.setenv("QA_PROMPT", "v3")
+    v3 = build_qa_prompt("Вопрос?", "Контекст")
+
+    assert "строго на заданный вопрос" in v4
+    assert "ничего не пропуская" not in v4
+    assert "ничего не пропуская" in v3
+    # Neither variant asks for the source footer that v2 appends.
+    assert "В конце укажите источники" not in v4 + v3
+
+
+def test_qa_prompt_rejects_unknown_version(monkeypatch):
+    import pytest
+
+    from file_agent.qa import qa_prompt_version
+
+    monkeypatch.setenv("QA_PROMPT", "v9")
+    with pytest.raises(ValueError, match="QA_PROMPT"):
+        qa_prompt_version()

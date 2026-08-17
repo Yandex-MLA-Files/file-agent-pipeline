@@ -21,9 +21,13 @@ NO_CONTEXT_MESSAGE = "No relevant context was found in the document to answer th
 # zeros for answers that were otherwise word-perfect. The passage headers in
 # the prompt still carry the provenance, and the UI shows the source chunks,
 # so nothing is lost by keeping it out of the answer text.
-# ``v1`` is the original short prompt, kept so earlier runs stay reproducible.
+# ``v4`` additionally keeps the answer to the question that was asked: v3 lists
+# every related fact in the passages, which reads as thorough but is scored as
+# unsupported padding — a claim-level judge marks the extra facts as claims the
+# reference does not contain. ``v1`` is the original short prompt, kept so
+# earlier runs stay reproducible.
 DEFAULT_QA_PROMPT_VERSION = "v3"
-QA_PROMPT_VERSIONS = ("v1", "v2", "v3")
+QA_PROMPT_VERSIONS = ("v1", "v2", "v3", "v4")
 
 # Chunk metadata shown to the LLM as the passage header. Everything else
 # (block ids, bounding boxes, retrieval internals) is noise for answering.
@@ -128,7 +132,12 @@ def build_qa_prompt(question: str, context: str) -> str:
     version = qa_prompt_version()
     if version == "v1":
         return _build_qa_prompt_v1(question, context)
-    return _build_qa_prompt_v2(question, context, cite_sources=version == "v2")
+    return _build_qa_prompt_v2(
+        question,
+        context,
+        cite_sources=version == "v2",
+        on_question_only=version == "v4",
+    )
 
 
 def _build_qa_prompt_v1(question: str, context: str) -> str:
@@ -148,12 +157,27 @@ def _build_qa_prompt_v1(question: str, context: str) -> str:
     )
 
 
-def _build_qa_prompt_v2(question: str, context: str, cite_sources: bool = True) -> str:
+def _build_qa_prompt_v2(
+    question: str,
+    context: str,
+    cite_sources: bool = True,
+    on_question_only: bool = False,
+) -> str:
     citation_rule = (
         "5. В конце укажите источники: файл и страницу/раздел из заголовков фрагментов.\n"
         if cite_sources
         else "5. Не добавляйте перечень источников, ссылки на файлы и номера страниц — "
         "только сам ответ.\n"
+    )
+    completeness_rule = (
+        "2. Отвечайте строго на заданный вопрос: приведите все факты, числа, названия "
+        "и условия, которые нужны именно для ответа на него, и не добавляйте смежные "
+        "сведения, о которых не спрашивали. Числа, даты и единицы измерения приводите "
+        "точно как в источнике.\n"
+        if on_question_only
+        else "2. Ответ должен быть полным: перечислите все относящиеся к вопросу факты, "
+        "числа, названия, условия и определения из контекста, ничего не пропуская. "
+        "Числа, даты и единицы измерения приводите точно как в источнике.\n"
     )
     return (
         "Вы отвечаете на вопросы строго по фрагментам документов, приведённым ниже.\n"
@@ -165,9 +189,7 @@ def _build_qa_prompt_v2(question: str, context: str, cite_sources: bool = True) 
         "используются …». Только если контекст вообще не относится к вопросу, "
         "напишите, что в документах нет информации для ответа, и коротко укажите, "
         "что в них есть по теме.\n"
-        "2. Ответ должен быть полным: перечислите все относящиеся к вопросу факты, "
-        "числа, названия, условия и определения из контекста, ничего не пропуская. "
-        "Числа, даты и единицы измерения приводите точно как в источнике.\n"
+        f"{completeness_rule}"
         "3. При сравнениях и таблицах сохраняйте принадлежность фактов к каждой "
         "сущности и не меняйте отношения местами. Если в контексте есть таблица, "
         "берите значения из нужной строки и столбца.\n"
