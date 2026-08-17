@@ -146,7 +146,8 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | baseline (old code) | 127 | 5 | 0.686 | 0.412 | 0.538 | 0.548 | 0.605 | — |
 | structured v2 | 127 | 0 | 0.847 | 0.593 | 0.738 | 0.715 | 0.786 | 22.5 |
 | structured v4 (default) | 127 | 0 | 0.840 | 0.601 | 0.831 | 0.767 | 0.811 | 26.2 |
-ROWS_PLACEHOLDER
+| v4 + agent mode | 127 | 0 | 0.751 | 0.537 | 0.861 | 0.768 | 0.824 | 36.4 |
+NORERANK_PLACEHOLDER
 
 Means over successfully processed rows only differ for the baseline (0.715 /
 0.429 / 0.560 / 0.570 / 0.630 over 122 rows). Judge noise: three v4 rows
@@ -166,6 +167,13 @@ Reading the table:
   spreadsheet profiles made aggregate questions answerable ("регион с
   наибольшей выручкой" → Utah 9 925.63), and document-diverse retrieval
   helped two-file questions.
+- Agent mode on the same ingestion reaches the highest answer relevancy and
+  context recall (it can search twice and read whole sections), but the
+  judge scores its faithfulness lower: the agent also reads sections through
+  `read_section`, and that text is not part of the exported `contexts`
+  the judge checks the answer against, so grounded statements look
+  unsupported. Single-pass RAG remains the better default for the judge
+  protocol; the agent is the tool for multi-hop questions.
 - Remaining weak spots: questions that need cross-file joins over raw
   spreadsheet rows (e.g. the intersection of product names of two files),
   reference answers not grounded in the document (the tea question about
