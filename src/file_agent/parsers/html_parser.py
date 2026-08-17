@@ -176,10 +176,54 @@ def _list_items(list_tag: Tag, depth: int) -> list[tuple[int, str]]:
     return items
 
 
+# A page can declare colspan="1000"; expanding that literally would produce a
+# row of a thousand empty cells.
+_MAX_SPAN = 40
+
+
 def _table_markdown(table: Tag) -> str:
-    rows: list[list[str]] = []
-    for tr in table.find_all("tr"):
-        cells = [clean_text(cell.get_text(" ", strip=True)) for cell in tr.find_all(["th", "td"])]
-        if cells:
-            rows.append(cells)
+    """Render an HTML table, expanding merged cells into a real grid.
+
+    ``colspan``/``rowspan`` are not decoration: a header that spans two columns
+    shifts every cell after it, so reading rows as flat lists of ``<td>`` puts
+    the values under the wrong headers — silently, and in exactly the tables
+    (financial, comparison) whose numbers get asked about. Spanned cells are
+    therefore repeated across the positions they cover, the way the spreadsheet
+    parser fills merged ranges, so every row stays self-describing.
+    """
+    grid: list[list[str | None]] = []
+
+    def cell_at(row_index: int, column: int) -> None:
+        while len(grid) <= row_index:
+            grid.append([])
+        while len(grid[row_index]) <= column:
+            grid[row_index].append(None)
+
+    for row_index, tr in enumerate(table.find_all("tr")):
+        cells = tr.find_all(["th", "td"], recursive=False) or tr.find_all(["th", "td"])
+        cell_at(row_index, 0)
+        column = 0
+        for cell in cells:
+            row = grid[row_index]
+            while column < len(row) and row[column] is not None:
+                column += 1
+            text = clean_text(cell.get_text(" ", strip=True))
+            colspan = _span(cell, "colspan")
+            rowspan = _span(cell, "rowspan")
+            for row_offset in range(rowspan):
+                for column_offset in range(colspan):
+                    cell_at(row_index + row_offset, column + column_offset)
+                    grid[row_index + row_offset][column + column_offset] = text
+            column += colspan
+
+    rows = [["" if value is None else value for value in row] for row in grid]
+    rows = [row for row in rows if any(cell for cell in row)]
     return table_to_markdown(rows)
+
+
+def _span(cell: Tag, attribute: str) -> int:
+    try:
+        value = int(str(cell.get(attribute, 1)).strip())
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(value, _MAX_SPAN))

@@ -69,3 +69,40 @@ def test_legacy_html_parser_returns_one_text_block(tmp_path):
 
     assert len(document.blocks) == 1
     assert document.blocks[0].type == "html_text"
+
+
+def test_merged_table_cells_keep_values_under_their_own_headers(tmp_path):
+    """colspan/rowspan shift every following cell if they are ignored."""
+    html = """
+    <table>
+      <tr><th>Регион</th><th colspan="2">2026</th></tr>
+      <tr><th></th><th>План</th><th>Факт</th></tr>
+      <tr><td rowspan="2">Юг</td><td>100</td><td>90</td></tr>
+      <tr><td>200</td><td>210</td></tr>
+    </table>
+    """
+    path = tmp_path / "report.html"
+    path.write_text(html, encoding="utf-8")
+
+    document = HTMLParser().parse(path)
+    table = next(b for b in document.blocks if b.block_type == BlockType.TABLE)
+    rows = [line for line in table.text.splitlines() if "|" in line]
+
+    # The spanning header covers both of its columns ...
+    assert rows[0] == "| Регион | 2026 | 2026 |"
+    # ... and the row label spans down, so the second data row is not shifted
+    # left into the label column.
+    assert rows[-1] == "| Юг | 200 | 210 |"
+
+
+def test_absurd_spans_do_not_explode_the_grid(tmp_path):
+    path = tmp_path / "wide.html"
+    path.write_text(
+        '<table><tr><td colspan="9999">x</td></tr><tr><td>a</td><td>b</td></tr></table>',
+        encoding="utf-8",
+    )
+
+    document = HTMLParser().parse(path)
+    table = next(b for b in document.blocks if b.block_type == BlockType.TABLE)
+
+    assert max(len(line.split("|")) for line in table.text.splitlines()) <= 44
