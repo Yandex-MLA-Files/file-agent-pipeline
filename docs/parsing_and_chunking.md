@@ -120,7 +120,68 @@ temperature 0, top-k 5) both as the answering model and as the judge
 `sandrik1271/RAG-QA-Dataset` train split (127 rows), ragas metrics from
 `eval_pipeline`. Rows the pipeline could not process count as 0.
 
-RESULTS_TABLE_PLACEHOLDER
+### 3.1 Runs
+
+| Run | What it is |
+|---|---|
+| `pc-baseline-rag-127` | Code before this branch (`main` + agent branch): Docling for PDF/DOCX with the pypdfium backend, flat PPTX/XLSX/HTML/TXT parsers, original chunker, `paraphrase-multilingual-MiniLM-L12-v2` (128-token window), original prompt. 5 rows could not be processed (the original chunker never finishes on `Курс лекций Основы философии.docx`; recorded as failures after a 240 s timeout). |
+| `pc-structured-rag-127` (v2) | Structured parsers + structured chunker + `bge-m3` + VLM figure descriptions and VLM page OCR through the chat model + QA prompt v2. |
+| `pc-structured-v4-127` (v4, **default configuration**) | v2 + Docling `docling-parse` backend with ACCURATE TableFormer (row labels of financial tables recovered) + cross-encoder reranking (`bge-reranker-v2-m3` over the top-20 hybrid hits) + document-diverse top-k + spreadsheet profile blocks + prompt rule for comparison/"does it mention" questions. |
+| `pc-structured-v4-norerank-127` | v4 without the reranker (ablation). |
+| `pc-structured-v4-agent-127` | v4 ingestion with the multi-step agent (`--answer-mode agent`). |
+
+### 3.2 Results (ragas, judge = Qwen3.5-27B without thinking; pipeline failures scored 0)
+
+| Run | rows | failed | faithfulness | answer_correctness | answer_relevancy | context_precision | context_recall | avg s/question |
+|---|---|---|---|---|---|---|---|---|
+| baseline (old code) | 127 | 5 | 0.686 | 0.412 | 0.538 | 0.548 | 0.605 | — |
+| structured v2 | 127 | 0 | 0.847 | 0.593 | 0.738 | 0.715 | 0.786 | 22.5 |
+| structured v4 (default) | 127 | 0 | 0.840 | 0.601 | 0.831 | 0.767 | 0.811 | 26.2 |
+ROWS_PLACEHOLDER
+
+Means over successfully processed rows only differ for the baseline (0.715 /
+0.429 / 0.560 / 0.570 / 0.630 over 122 rows). Judge noise: three v4 rows
+timed out in the judge on `answer_correctness` (counted as 0 above; the
+mean over judged rows is 0.616).
+
+Reading the table:
+
+- Every metric improved from the baseline; the largest jumps are answer
+  relevancy (+0.29), context recall (+0.21) and context precision (+0.22),
+  i.e. retrieval now brings the right passages and the answers stay on the
+  question. Answer correctness (recall of the reference facts) went from
+  0.41 to 0.60.
+- v4 over v2: recovering table row labels fixed the financial-statement
+  questions (e.g. "доходы от пассажирских перевозок за 3 месяца 2026" — v2
+  answered "нет информации", v4 answers 96 083 млн руб. from page 5), the
+  spreadsheet profiles made aggregate questions answerable ("регион с
+  наибольшей выручкой" → Utah 9 925.63), and document-diverse retrieval
+  helped two-file questions.
+- Remaining weak spots: questions that need cross-file joins over raw
+  spreadsheet rows (e.g. the intersection of product names of two files),
+  reference answers not grounded in the document (the tea question about
+  cold-season drinking has no such passage in `Чай.md`), and multi-hop
+  questions that combine a fact from one document with a claim about the
+  other; the agent mode is the intended tool for the latter.
+
+### 3.3 Per-format observations
+
+- **PDF (Docling)**: `docling-parse` + ACCURATE TableFormer keeps row labels
+  that the pypdfium backend with cell matching dropped (`|  |  | 96 083 |`
+  became `| Доходы от пассажирских перевозок | 96 083 | 86 983 |`). On
+  Windows the parser falls back to pypdfium (with cell matching off, which
+  also keeps labels).
+- **DOCX**: python-docx keeps whole paragraphs; the philosophy course
+  (2465 Docling fragments) becomes 1127 blocks and chunks in under a second.
+- **XLSX**: Markdown tables per region plus a profile block; the chunker
+  repeats the header on every piece now that the budget is 384 tokens.
+- **PPTX**: slide titles become headings with slide numbers; deck-level
+  and figure names in any language are filtered.
+- **TXT**: the transcript loses ~40 % timestamp noise per chunk; the book
+  gets 37 chapter/story headings.
+- **Scanned pages**: 29 skewed pages of `AB_test.pdf` are transcribed by the
+  VLM (Markdown with headings/tables) instead of EasyOCR text; 1–3 s per
+  page on the shared A100.
 
 ## 4. Reproducing a run
 
