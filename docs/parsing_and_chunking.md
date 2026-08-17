@@ -136,7 +136,7 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | `pc-baseline-rag-127` | Code before this branch (`main` + agent branch): Docling for PDF/DOCX with the pypdfium backend, flat PPTX/XLSX/HTML/TXT parsers, original chunker, `paraphrase-multilingual-MiniLM-L12-v2` (128-token window), original prompt. 5 rows could not be processed (the original chunker never finishes on `Курс лекций Основы философии.docx`; recorded as failures after a 240 s timeout). |
 | `pc-structured-rag-127` (v2) | Structured parsers + structured chunker + `bge-m3` + VLM figure descriptions and VLM page OCR through the chat model + QA prompt v2. |
 | `pc-structured-v4-127` (v4, **default configuration**) | v2 + Docling `docling-parse` backend with ACCURATE TableFormer (row labels of financial tables recovered) + cross-encoder reranking (`bge-reranker-v2-m3` over the top-20 hybrid hits) + document-diverse top-k + spreadsheet profile blocks + prompt rule for comparison/"does it mention" questions. |
-| `pc-structured-v4-norerank-127` | v4 without the reranker (ablation). |
+| `pc-structured-v4-norerank-127` | v4 without the reranker (ablation). Note: only one ingestion process fits next to vLLM on the shared A100 (~8 GB free); a second concurrent generation run fails with CUDA OOM. |
 | `pc-structured-v4-agent-127` | v4 ingestion with the multi-step agent (`--answer-mode agent`). |
 
 ### 3.2 Results (ragas, judge = Qwen3.5-27B without thinking; pipeline failures scored 0)
@@ -147,7 +147,7 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | structured v2 | 127 | 0 | 0.847 | 0.593 | 0.738 | 0.715 | 0.786 | 22.5 |
 | structured v4 (default) | 127 | 0 | 0.840 | 0.601 | 0.831 | 0.767 | 0.811 | 26.2 |
 | v4 + agent mode | 127 | 0 | 0.751 | 0.537 | 0.861 | 0.768 | 0.824 | 36.4 |
-NORERANK_PLACEHOLDER
+| v4 without reranker | 127 | 0 | 0.837 | 0.604 | 0.855 | 0.705 | 0.827 | 25.0 |
 
 Means over successfully processed rows only differ for the baseline (0.715 /
 0.429 / 0.560 / 0.570 / 0.630 over 122 rows). Judge noise: three v4 rows
@@ -167,6 +167,10 @@ Reading the table:
   spreadsheet profiles made aggregate questions answerable ("регион с
   наибольшей выручкой" → Utah 9 925.63), and document-diverse retrieval
   helped two-file questions.
+- The reranker ablation shows its effect is concentrated in context
+  precision (+0.06); the other metrics move within judge noise (±0.02), so
+  the reranker is a recommended but optional setting (`RERANKER_MODEL`),
+  costing ~1 s per question on the GPU.
 - Agent mode on the same ingestion reaches the highest answer relevancy and
   context recall (it can search twice and read whole sections), but the
   judge scores its faithfulness lower: the agent also reads sections through
