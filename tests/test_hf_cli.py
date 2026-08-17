@@ -142,7 +142,9 @@ def test_run_hf_dataset_generation_orchestrates_limited_run_and_writes_manifest(
     }
     assert len(manifest["dataset"]["records_sha256"]) == 64
     assert manifest["generation"]["model_id"] == "fake/model"
-    assert manifest["generation"]["rag_pipeline_version"] == "structured-parsers-breadcrumb-chunks-v2"
+    assert (
+        manifest["generation"]["rag_pipeline_version"] == "structured-parsers-breadcrumb-chunks-v2"
+    )
     assert manifest["generation"]["top_k"] == 3
     assert manifest["generation"]["prompt_sha256"]
     assert manifest["generation"]["resume_requested"] is True

@@ -150,7 +150,7 @@ class _Budget:
                 size = len(self._tokenizer.encode(text, add_special_tokens=False))
             except TypeError:
                 size = len(self._tokenizer.encode(text))
-        except Exception:  # pragma: no cover - never fail chunking on tokenizer issues
+        except (ValueError, RuntimeError, OSError):  # pragma: no cover - tokenizer issues
             size = len(text)
         if len(self._cache) > 4096:
             self._cache.clear()

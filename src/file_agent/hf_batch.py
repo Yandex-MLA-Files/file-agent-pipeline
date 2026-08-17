@@ -32,8 +32,13 @@ PIPELINE_ERROR_MARKER = "[PIPELINE_ERROR]"
 LOGGER = logging.getLogger(__name__)
 
 
-class RecordTimeoutError(TimeoutError):
-    """Raised when a single dataset row exceeds ``record_timeout`` seconds."""
+class RecordTimeoutError(BaseException):
+    """Raised when a single dataset row exceeds ``record_timeout`` seconds.
+
+    Derives from ``BaseException`` (like ``KeyboardInterrupt``) on purpose: the
+    alarm may fire inside library code guarded by ``except Exception`` blocks
+    (tokenizers, parsers) that would otherwise swallow it and keep running.
+    """
 
 
 @contextmanager
@@ -153,7 +158,7 @@ def generate_hf_qa_records(
                         document_loader=document_loader,
                         answer_mode=answer_mode,
                     )
-            except Exception as exc:  # noqa: BLE001 - failure is recorded per row
+            except (Exception, RecordTimeoutError) as exc:  # noqa: BLE001 - recorded per row
                 if not continue_on_error:
                     raise
                 failed_count += 1
