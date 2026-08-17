@@ -330,3 +330,15 @@ def test_evaluate_appends_a_usage_log_entry(patched_metrics, tmp_path):
     assert entry["cached_tokens"] == 0
     assert entry["cost_rub"] == 0
     assert "timestamp" in entry
+import json
+
+
+def test_judge_extra_body_env_is_parsed(monkeypatch):
+    from eval.judge.ragas_judge import _judge_extra_body
+
+    monkeypatch.delenv("JUDGE_EXTRA_BODY", raising=False)
+    assert _judge_extra_body() is None
+    monkeypatch.setenv(
+        "JUDGE_EXTRA_BODY", json.dumps({"chat_template_kwargs": {"enable_thinking": False}})
+    )
+    assert _judge_extra_body() == {"chat_template_kwargs": {"enable_thinking": False}}

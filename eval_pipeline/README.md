@@ -34,6 +34,12 @@ read directly from the environment; `.env` is not auto-loaded, export the
 values yourself, `source` the file, or run with
 `uv run --env-file .env ...`.
 
+`JUDGE_EXTRA_BODY` (optional JSON object) is forwarded verbatim with every
+judge request — for a reasoning model served by vLLM set
+`JUDGE_EXTRA_BODY={"chat_template_kwargs": {"enable_thinking": false}}`
+so the judge answers directly instead of thinking (many times faster,
+same verdicts on the structured prompts ragas uses).
+
 `answer_relevancy` additionally needs an embeddings model -- this runs
 **locally** (`JUDGE_EMBEDDING_MODEL`, sentence-transformers, default
 `intfloat/multilingual-e5-small`), not through the judge API, so it's free

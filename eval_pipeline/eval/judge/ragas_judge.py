@@ -211,12 +211,30 @@ def _log_judge_trace(
             f.write(json.dumps(entry, ensure_ascii=False, default=_json_default_trace) + "\n")
 
 
+def _judge_extra_body() -> dict[str, Any] | None:
+    """Provider-specific request options for the judge LLM (``JUDGE_EXTRA_BODY``).
+
+    A JSON object forwarded verbatim in every chat completion request. The
+    typical use is switching a reasoning model served by vLLM into direct
+    answering, e.g. ``{"chat_template_kwargs": {"enable_thinking": false}}`` —
+    judging does not need chain-of-thought and it is several times slower.
+    """
+    raw = os.environ.get("JUDGE_EXTRA_BODY", "").strip()
+    if not raw:
+        return None
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("JUDGE_EXTRA_BODY must be a JSON object")
+    return parsed
+
+
 def _build_default_llm(model: str) -> BaseRagasLLM:
     chat = ChatOpenAI(
         base_url=os.environ.get("JUDGE_BASE_URL"),
         api_key=os.environ.get("JUDGE_API_KEY", "not-needed"),
         model=model,
         temperature=0,
+        extra_body=_judge_extra_body(),
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
