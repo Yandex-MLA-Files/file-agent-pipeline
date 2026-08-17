@@ -91,8 +91,15 @@ def test_parse_file_uses_xlsx_parser(tmp_path):
 
     assert document.file_name == "example.xlsx"
     assert document.file_type == "xlsx"
-    assert [b.block_type for b in document.blocks] == [BlockType.HEADING, BlockType.TABLE]
-    assert "| Alice | 20 |" in document.blocks[1].text
+    # A workbook overview opens the document, then the sheet and its table.
+    assert [b.block_type for b in document.blocks] == [
+        BlockType.TEXT,
+        BlockType.HEADING,
+        BlockType.TABLE,
+    ]
+    assert document.blocks[0].metadata["workbook_overview"] is True
+    assert "листов — 1" in document.blocks[0].text
+    assert "| Alice | 20 |" in document.blocks[2].text
 
 
 def test_parse_file_uses_pptx_parser(tmp_path):

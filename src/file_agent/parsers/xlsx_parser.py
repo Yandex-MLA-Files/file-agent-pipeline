@@ -55,59 +55,75 @@ class XLSXParser(BaseParser):
             factory = BlockFactory(source_file=path.name)
             workbook = load_workbook(str(path), read_only=False, data_only=True)
             table_count = 0
+            overview: list[tuple[str, int, list[str]]] = []
             try:
                 sheets = workbook.worksheets
+                sheet_grids = []
                 for sheet_index, sheet in enumerate(sheets, start=1):
                     grid, truncated = _read_grid(sheet)
                     if not grid:
                         continue
+                    items = _sheet_items(grid)
+                    sheet_grids.append((sheet_index, sheet.title, items, truncated))
+                    for kind, payload in items:
+                        if kind == "table":
+                            header, body = payload
+                            overview.append((sheet.title, len(body), header or []))
+                            break
+
+                # A workbook-level overview answers the questions that no single
+                # table can ("how many sheets are there, what is each about") and
+                # gives retrieval a passage that names every sheet and column.
+                summary = _workbook_overview(path.name, len(sheets), overview)
+                if summary:
+                    factory.add(
+                        summary,
+                        BlockType.TEXT,
+                        {"workbook_overview": True},
+                        page_number=1,
+                    )
+
+                for sheet_index, title, items, truncated in sheet_grids:
                     factory.heading(
-                        f"Sheet: {sheet.title}",
+                        f"Sheet: {title}",
                         1,
                         page_number=sheet_index,
-                        metadata={"sheet_name": sheet.title, "sheet_index": sheet_index},
+                        metadata={"sheet_name": title, "sheet_index": sheet_index},
                     )
-                    last_header: list[str] | None = None
-                    for region in _split_regions(grid):
-                        if _is_note(region):
-                            text = "\n".join(_note_line(row) for row in region)
+                    for kind, payload in items:
+                        if kind == "note":
                             factory.add(
-                                text,
+                                payload,
                                 BlockType.TEXT,
-                                {"sheet_name": sheet.title},
+                                {"sheet_name": title},
                                 page_number=sheet_index,
                             )
                             continue
-                        header, body = _split_header(region)
-                        if header is None and last_header and _same_width(last_header, body):
-                            # A block of rows below a blank line continues the
-                            # previous table; reuse its header instead of col1..colN.
-                            header = last_header
+                        header, body = payload
                         rows = [header, *body] if header else body
                         markdown = table_to_markdown(rows, header=header is not None)
                         if not markdown:
                             continue
-                        if header:
-                            last_header = header
                         table_count += 1
                         factory.add(
                             markdown,
                             BlockType.TABLE,
                             {
-                                "sheet_name": sheet.title,
+                                "sheet_name": title,
                                 "table_index": table_count,
                                 "row_count": len(body),
                                 "truncated": truncated,
+                                "table_header": list(header) if header else None,
                             },
                             page_number=sheet_index,
                         )
                         profile = _profile_table(header, body) if header else ""
                         if profile:
                             factory.add(
-                                f"Сводка по таблице «{sheet.title}» "
+                                f"Сводка по таблице «{title}» "
                                 f"(вычислена автоматически):\n{profile}",
                                 BlockType.TEXT,
-                                {"sheet_name": sheet.title, "table_profile": True},
+                                {"sheet_name": title, "table_profile": True},
                                 page_number=sheet_index,
                             )
             finally:
@@ -175,6 +191,65 @@ def _read_grid(sheet: Any) -> tuple[list[list[str]], bool]:
     while grid and not any(grid[-1]):
         grid.pop()
     return grid, truncated
+
+
+def _sheet_items(grid: list[list[str]]) -> list[tuple[str, Any]]:
+    """Split a sheet into notes and tables, rejoining continuations.
+
+    Blank rows separate independent tables *and* occur inside a single long
+    table (a page break in an export, a visual gap between groups of rows).
+    Treating every gap as a new table was actively harmful: one sheet became
+    ten fragments, each with its own automatic summary, so "the maximum rating
+    in the table" had ten different wrong answers competing in retrieval. A
+    region whose columns match the previous table and that has no header of
+    its own is therefore appended to that table instead.
+    """
+    items: list[tuple[str, Any]] = []
+    last_table: list[list[str]] | None = None  # body rows of the open table
+    last_header: list[str] | None = None
+
+    for region in _split_regions(grid):
+        if _is_note(region):
+            items.append(("note", "\n".join(_note_line(row) for row in region)))
+            last_table = None
+            continue
+
+        header, body = _split_header(region)
+        continues = (
+            header is None
+            and last_table is not None
+            and last_header is not None
+            and _same_width(last_header, body)
+        )
+        if continues and last_table is not None:
+            last_table.extend(body)
+            continue
+
+        if header is None and last_header is not None and _same_width(last_header, body):
+            header = last_header
+        rows = list(body)
+        items.append(("table", (header, rows)))
+        last_table, last_header = rows, header
+
+    return items
+
+
+def _workbook_overview(
+    file_name: str, sheet_count: int, sheets: list[tuple[str, int, list[str]]]
+) -> str:
+    if not sheets:
+        return ""
+    lines = [
+        f"Обзор файла {file_name}: листов — {sheet_count}, "
+        f"названия листов: {', '.join(f'«{name}»' for name, _, _ in sheets)}."
+    ]
+    for name, row_count, header in sheets:
+        columns = ", ".join(column for column in header if column)
+        detail = f"«{name}»: строк с данными — {row_count}"
+        if columns:
+            detail += f"; столбцы: {columns}"
+        lines.append(detail)
+    return "\n".join(lines)
 
 
 def _split_regions(grid: list[list[str]]) -> list[list[list[str]]]:
