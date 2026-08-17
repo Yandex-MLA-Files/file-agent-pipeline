@@ -218,7 +218,9 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | `pc-structured-v4-agent-127` | v4 ingestion with the multi-step agent (`--answer-mode agent`). |
 | `pc-v4-nocite-127` | The v4 answers with the `Источники: …` footer stripped by a regular expression — identical answers, identical contexts, so the difference isolates what the footer costs in the judge's eyes. |
 | `pc-v5-rag-127` (v5, **default configuration**) | v4 + OCR `auto` (validated VLM transcripts, concurrent, EasyOCR per-page fallback) + spreadsheet fragment merging and workbook overview + table row records + hyphenation repair + document-scaled figure budget + QA prompt v3 (no source footer). |
-| `pc-v6-topk8-127` | v5 + `--top-k 8` and the two late parsing fixes (document title no longer taken from "Оглавление"; VLM repair of degenerate PDF tables). |
+| `pc-v6-concise-127` | v5 + QA prompt v4 (answer the question and nothing beside it) + the late fixes: document title no longer taken from "Оглавление", VLM repair of degenerate PDF tables, automatic profiles for tables outside spreadsheets. |
+| `pc-v7-topk8-127` | v6 with `--top-k 8`: eight passages per question instead of five, for the multi-document questions whose context recall is the lowest of the set. |
+| `pc-v5-rejudge` | The v5 run judged a second time, unchanged, to measure how much of a difference between runs is the judge's own variance. |
 
 ### 3.2 Results (ragas, judge = Qwen3.5-27B without thinking; pipeline failures scored 0)
 
