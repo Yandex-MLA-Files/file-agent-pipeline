@@ -9,7 +9,11 @@ W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 
 def _numbering(levels: str, nums: str = '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'):
-    xml = f'<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0">{levels}</w:abstractNum>{nums}</w:numbering>'
+    xml = (
+        f'<w:numbering xmlns:w="{W}">'
+        f'<w:abstractNum w:abstractNumId="0">{levels}</w:abstractNum>'
+        f"{nums}</w:numbering>"
+    )
     return DocxNumbering(etree.fromstring(xml))
 
 

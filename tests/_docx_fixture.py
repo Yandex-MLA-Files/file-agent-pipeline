@@ -77,14 +77,17 @@ STYLES = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style>
 </w:styles>"""
 
+OOXML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
+PKG = "application/vnd.openxmlformats-package"
+
 CONTENT_TYPES = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="{CT}">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="rels" ContentType="{PKG}.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
-  <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
-  <Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>
+  <Override PartName="/word/document.xml" ContentType="{OOXML}.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="{OOXML}.styles+xml"/>
+  <Override PartName="/word/numbering.xml" ContentType="{OOXML}.numbering+xml"/>
+  <Override PartName="/word/footnotes.xml" ContentType="{OOXML}.footnotes+xml"/>
 </Types>"""
 
 ROOT_RELS = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
