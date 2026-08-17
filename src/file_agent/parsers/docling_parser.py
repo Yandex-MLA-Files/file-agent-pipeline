@@ -30,6 +30,18 @@ def _silence_ocr_backend_noise() -> None:
 
 _silence_ocr_backend_noise()
 
+# Formula and code enrichment re-read the regions the layout model classified
+# as such with a dedicated model (CodeFormula). It downloads once (~400 MB) and
+# costs time per formula, so it can be turned off for a fast bulk conversion.
+DEFAULT_ENRICHMENT = True
+
+
+def resolve_enrichment() -> bool:
+    raw = os.getenv("PDF_ENRICHMENT")
+    if raw is None:
+        return DEFAULT_ENRICHMENT
+    return raw.strip().lower() in {"1", "true", "yes", "on", "auto"}
+
 
 class DoclingParser(BaseParser):
     """Structured parser for PDF and DOCX built on Docling.
@@ -49,11 +61,16 @@ class DoclingParser(BaseParser):
     #: "pypdfium"); set once the first conversion succeeds or fails.
     resolved_pdf_backend: str | None = None
 
+    #: Set once enrichment turns out to be unavailable in this process, so the
+    #: model download is not retried for every document of a run.
+    enrichment_available: bool = True
+
     def __init__(self, do_ocr: bool = False, ocr_full_page: bool = False) -> None:
         self.do_ocr = do_ocr
         self.ocr_full_page = ocr_full_page
         type(self).active_ocr_engine = None
         self._backend = self._preferred_backend()
+        self._enrich = resolve_enrichment() and type(self).enrichment_available
         self._converter = self._build_converter(do_ocr, ocr_full_page, self._backend)
         self.ocr_engine = type(self).active_ocr_engine if do_ocr else None
 
@@ -77,6 +94,14 @@ class DoclingParser(BaseParser):
             # ACCURATE TableFormer recovers row/column structure of financial and
             # scientific tables far better than FAST for a ~2x model cost.
             pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
+            # A formula in a PDF's text layer extracts as broken glyph soup
+            # ("P(A | B)=P(A)" becomes "PA B PA" or worse), and a code listing
+            # loses its line breaks. Docling's enrichment models re-read those
+            # regions and return LaTeX and code, which is what makes a lecture
+            # with formulas answerable at all.
+            if self._enrich:
+                pipeline_options.do_formula_enrichment = True
+                pipeline_options.do_code_enrichment = True
             if do_ocr:
                 self._configure_ocr(pipeline_options, ocr_full_page)
 
@@ -106,6 +131,21 @@ class DoclingParser(BaseParser):
         try:
             result = self._converter.convert(path)
         except Exception as exc:
+            if self._enrich:
+                # The enrichment models are downloaded on first use; without
+                # them (offline machine, missing extra) the conversion must
+                # still produce a document.
+                logger.warning(
+                    "Docling enrichment unavailable (%s); converting %s without it.",
+                    str(exc).splitlines()[0][:160],
+                    path.name,
+                )
+                type(self).enrichment_available = False
+                self._enrich = False
+                self._converter = self._build_converter(
+                    self.do_ocr, self.ocr_full_page, self._backend
+                )
+                return self._converter.convert(path)
             if self._backend != "docling" or path.suffix.lower() != ".pdf":
                 raise
             logger.warning(
@@ -209,6 +249,8 @@ class DoclingParser(BaseParser):
                 block = self._item_to_block(item, level, docling_doc, page_heights, path)
                 if block is not None:
                     raw_blocks.append(block)
+            if path.suffix.lower() == ".pdf":
+                raw_blocks = repair_column_order(raw_blocks)
             blocks = _postprocess_blocks(raw_blocks)
 
             if not blocks:
@@ -497,6 +539,88 @@ def repair_hyphenation(text: str) -> str:
     repaired = _HYPHEN_BREAK.sub(lambda m: m.group(1) + m.group(2), text)
     # A second pass catches chains ("при- виле- гированных").
     return _HYPHEN_BREAK.sub(lambda m: m.group(1) + m.group(2), repaired)
+
+
+# Column repair. A page is treated as two-column only when the evidence is
+# unambiguous: enough blocks, none of them spanning the middle, and the reading
+# order actually jumping between the sides more than a heading or two would.
+COLUMN_MIN_BLOCKS = 6
+COLUMN_MIN_ALTERNATIONS = 4
+# A block is "full width" when it covers this share of the page width; a page
+# with several of those is a single-column page with wide figures.
+FULL_WIDTH_RATIO = 0.65
+
+
+def repair_column_order(blocks: list[Block]) -> list[Block]:
+    """Re-order the blocks of a two-column page that were read across the gutter.
+
+    The layout model normally recovers columns, but when it does not, the
+    result is text that alternates between the left and the right column
+    sentence by sentence — unreadable for a human and, worse, silently wrong
+    for a chunker that will pack the two halves of two different arguments into
+    one passage. Pages that show that pattern are re-sorted column by column;
+    every other page is left exactly as the model produced it.
+    """
+    by_page: dict[int, list[Block]] = {}
+    for block in blocks:
+        if block.page_number is None or block.bbox is None:
+            return blocks  # a stream without geometry: nothing to reason about
+        by_page.setdefault(block.page_number, []).append(block)
+
+    repaired: dict[int, list[Block]] = {}
+    for page, page_blocks in by_page.items():
+        ordered = _repair_page(page_blocks)
+        if ordered is not None:
+            repaired[page] = ordered
+    if not repaired:
+        return blocks
+
+    result: list[Block] = []
+    emitted: set[int] = set()
+    for block in blocks:
+        page = block.page_number
+        if page in repaired:
+            if page not in emitted:
+                emitted.add(page)
+                result.extend(repaired[page])
+            continue
+        result.append(block)
+    return result
+
+
+def _repair_page(page_blocks: list[Block]) -> list[Block] | None:
+    if len(page_blocks) < COLUMN_MIN_BLOCKS:
+        return None
+
+    left_edge = min(b.bbox[0] for b in page_blocks)
+    right_edge = max(b.bbox[2] for b in page_blocks)
+    width = right_edge - left_edge
+    if width <= 0:
+        return None
+    middle = left_edge + width / 2
+
+    sides: list[int] = []
+    for block in page_blocks:
+        x0, _, x1, _ = block.bbox
+        if (x1 - x0) >= width * FULL_WIDTH_RATIO:
+            # A full-width element (title, wide table) means the page is not a
+            # clean two-column layout, or it separates two column groups.
+            return None
+        sides.append(0 if x1 <= middle + width * 0.05 else 1)
+
+    if len(set(sides)) < 2:
+        return None
+    alternations = sum(1 for a, b in zip(sides, sides[1:], strict=False) if a != b)
+    if alternations < COLUMN_MIN_ALTERNATIONS:
+        return None  # a couple of crossings is normal reading order, not damage
+
+    return [
+        block
+        for _, block in sorted(
+            zip(sides, page_blocks, strict=True),
+            key=lambda pair: (pair[0], pair[1].bbox[1], pair[1].bbox[0]),
+        )
+    ]
 
 
 def _postprocess_blocks(blocks: list[Block]) -> list[Block]:

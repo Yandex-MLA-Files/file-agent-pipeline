@@ -222,7 +222,13 @@ class BlockFactory:
         return self.add(text.strip(), BlockType.HEADING, meta, page_number=page_number)
 
 
-_VISIBLE_MARKER = re.compile(r"^(\d+[.)]|[a-zа-я][.)]|[ivx]+[.)])\s+", re.IGNORECASE)
+# A marker the source already shows: "1.", "2)", "a)", "IV.", and the
+# multi-level forms Word composes from numbering.xml ("1.2.", "3.4.1)").
+# A single number counts only with its dot or bracket, otherwise a line that
+# opens with a year ("2026 год …") would be read as an item marker.
+_VISIBLE_MARKER = re.compile(
+    r"^(\d+(\.\d+)*[.)]|\d+(\.\d+)+|[a-zа-я][.)]|[ivx]+[.)])\s+", re.IGNORECASE
+)
 
 
 def list_to_markdown(items: list[tuple[int, str]], ordered: bool = False) -> str:

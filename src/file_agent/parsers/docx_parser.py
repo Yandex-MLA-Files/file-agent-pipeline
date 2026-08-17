@@ -24,9 +24,11 @@ from pathlib import Path
 from typing import Any
 
 from docx import Document as load_docx
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
+from lxml import etree
 
 from file_agent.document import BlockType, Document
 from file_agent.parsers.base import BaseParser
@@ -39,6 +41,7 @@ from file_agent.parsers.common import (
     strip_bullet,
     table_to_markdown,
 )
+from file_agent.parsers.docx_numbering import DocxNumbering
 from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
@@ -55,6 +58,29 @@ _CODE_FONTS = ("courier", "consolas", "mono", "menlo", "lucida console", "source
 # Legacy VML images (``<v:imagedata r:id=...>``); python-docx does not register
 # the VML namespace, so it is spelled out here.
 _VML_IMAGEDATA = "{urn:schemas-microsoft-com:vml}imagedata"
+# Text frames: a shape's text lives in ``w:txbxContent``, which sits *inside* a
+# paragraph of the body. Its runs must be pulled out of the host paragraph
+# (they belong to a different reading order) and emitted as their own blocks.
+_TEXTBOX_CONTENT = qn("w:txbxContent")
+
+# Titles left in the document properties by Word, its templates and common
+# converters; they name the file format, not the document.
+_PLACEHOLDER_TITLES = frozenset(
+    {
+        "word document",
+        "microsoft word document",
+        "документ microsoft word",
+        "документ",
+        "document",
+        "untitled",
+        "без имени",
+        "новый документ",
+        "normal",
+        "normal.dotm",
+        "заголовок",
+        "title",
+    }
+)
 
 # A heading found by the formatting heuristic (no explicit style) is trusted
 # only when the paragraph is short and visibly larger/bolder than body text.
@@ -90,6 +116,8 @@ class DOCXParser(BaseParser):
                     "title": walker.title,
                     "figure_count": walker.figure_count,
                     "table_count": walker.table_count,
+                    "footnote_count": walker.footnote_count,
+                    "text_box_count": walker.text_box_count,
                 },
             )
             document.build_table_of_contents()
@@ -105,17 +133,25 @@ class _BodyWalker:
         self.title: str | None = None
         self.figure_count = 0
         self.table_count = 0
+        self.footnote_count = 0
+        self.text_box_count = 0
         self._body_size = self._estimate_body_font_size()
         self._pending_list: list[tuple[int, str]] = []
         self._pending_list_ordered = False
         self._last_figure = None
+        self._numbering = DocxNumbering.from_document(docx)
+        self._notes = _collect_notes(docx)
 
     # -- driver ---------------------------------------------------------------
 
     def run(self) -> None:
         core = getattr(self.docx, "core_properties", None)
-        if core is not None and isinstance(core.title, str) and core.title.strip():
-            self.title = core.title.strip()
+        if core is not None and isinstance(core.title, str):
+            title = core.title.strip()
+            # Word and its templates leave placeholder titles behind; taking one
+            # would put "Word Document" in front of every chunk's breadcrumb.
+            if title and title.strip(" .").lower() not in _PLACEHOLDER_TITLES:
+                self.title = title
 
         for element in self.docx.element.body.iterchildren():
             tag = element.tag
@@ -140,6 +176,8 @@ class _BodyWalker:
     def _handle_paragraph(self, paragraph: Paragraph) -> None:
         images = self._paragraph_images(paragraph)
         text = clean_text(self._paragraph_text(paragraph))
+        text = self._append_note_markers(paragraph, text)
+        text_boxes = self._text_boxes(paragraph)
 
         if images:
             self._flush_list()
@@ -154,11 +192,15 @@ class _BodyWalker:
                 )
             if text and not _CAPTION_TEXT.match(text):
                 self.factory.add(text, BlockType.TEXT)
+            self._emit_text_boxes(text_boxes)
+            self._emit_notes(paragraph)
             return
 
         if not text:
-            # Blank paragraphs terminate lists but carry nothing themselves.
+            # Blank paragraphs terminate lists but carry nothing themselves —
+            # except when the shape anchored to them holds the text.
             self._flush_list()
+            self._emit_text_boxes(text_boxes)
             return
 
         style_name = self._style_name(paragraph)
@@ -169,19 +211,31 @@ class _BodyWalker:
             if self.title is None and level == 1:
                 self.title = text
             self.factory.heading(text, level, metadata={"style": style_name})
+            self._emit_text_boxes(text_boxes)
+            self._emit_notes(paragraph)
             return
 
         if self._is_caption(paragraph, style_name, text):
             self._flush_list()
             self._attach_caption(text)
+            self._emit_text_boxes(text_boxes)
             return
 
         list_indent = self._list_indent(paragraph, style_name)
         if list_indent is not None:
-            ordered = self._list_is_ordered(paragraph)
-            if not self._pending_list:
-                self._pending_list_ordered = ordered
-            self._pending_list.append((list_indent, strip_bullet(text)))
+            marker = self._list_marker(paragraph, list_indent)
+            item = strip_bullet(text)
+            if marker:
+                # Word computes "8." from numbering.xml and never stores it in
+                # the text; without it the item reads as an anonymous bullet.
+                item = f"{marker} {item}".strip()
+                if not self._pending_list:
+                    self._pending_list_ordered = False
+            elif not self._pending_list:
+                self._pending_list_ordered = self._list_is_ordered(paragraph)
+            self._pending_list.append((list_indent, item))
+            self._emit_text_boxes(text_boxes)
+            self._emit_notes(paragraph)
             return
 
         self._flush_list()
@@ -190,6 +244,8 @@ class _BodyWalker:
             self.factory.add(text, BlockType.CODE)
         else:
             self.factory.add(text, BlockType.TEXT)
+        self._emit_text_boxes(text_boxes)
+        self._emit_notes(paragraph)
 
     def _flush_list(self) -> None:
         if not self._pending_list:
@@ -213,8 +269,14 @@ class _BodyWalker:
     def _paragraph_text(paragraph: Paragraph) -> str:
         # ``paragraph.text`` skips text inside hyperlinks/fields in older
         # python-docx builds; walk every text run in document order instead.
+        # Text frames are anchored *inside* a paragraph but belong to a
+        # different reading order, so their runs are excluded here and emitted
+        # as their own blocks (see :meth:`_text_boxes`).
+        framed = {node for box in paragraph._p.iter(_TEXTBOX_CONTENT) for node in box.iter()}
         parts: list[str] = []
         for node in paragraph._p.iter():
+            if node in framed:
+                continue
             tag = node.tag
             if tag == qn("w:t"):
                 parts.append(node.text or "")
@@ -223,7 +285,79 @@ class _BodyWalker:
             elif tag in (qn("w:br"), qn("w:cr")):
                 parts.append("\n")
         text = "".join(parts)
-        return text if text.strip() else paragraph.text
+        if text.strip():
+            return text
+        return "" if framed else paragraph.text
+
+    # -- text frames, footnotes, endnotes ----------------------------------------
+
+    @staticmethod
+    def _text_boxes(paragraph: Paragraph) -> list[list[str]]:
+        """Paragraphs of every text frame anchored to this paragraph.
+
+        Word writes a shape twice: the DrawingML version and a VML fallback
+        wrapped in ``mc:AlternateContent``. Both carry the same text, so
+        identical frames are reported once.
+        """
+        boxes: list[list[str]] = []
+        seen: set[tuple[str, ...]] = set()
+        for box in paragraph._p.iter(_TEXTBOX_CONTENT):
+            lines: list[str] = []
+            for inner in box.iter(qn("w:p")):
+                text = clean_text("".join(node.text or "" for node in inner.iter(qn("w:t"))))
+                if text:
+                    lines.append(text)
+            key = tuple(lines)
+            if lines and key not in seen:
+                seen.add(key)
+                boxes.append(lines)
+        return boxes
+
+    def _emit_text_boxes(self, boxes: list[list[str]]) -> None:
+        for lines in boxes:
+            self._flush_list()
+            self.text_box_count += 1
+            self.factory.add(
+                "\n".join(lines),
+                BlockType.TEXT,
+                {"text_box": True, "text_box_index": self.text_box_count},
+            )
+
+    def _note_references(self, paragraph: Paragraph) -> list[tuple[str, str]]:
+        references: list[tuple[str, str]] = []
+        for kind, tag in (("footnote", "w:footnoteReference"), ("endnote", "w:endnoteReference")):
+            for node in paragraph._p.iter(qn(tag)):
+                note_id = node.get(qn("w:id"))
+                if note_id and (kind, note_id) in self._notes:
+                    references.append((kind, note_id))
+        return references
+
+    def _append_note_markers(self, paragraph: Paragraph, text: str) -> str:
+        """Mark the places a footnote was attached, the way a reader sees them."""
+        if not text or not self._notes:
+            return text
+        markers = "".join(f" [{note_id}]" for _, note_id in self._note_references(paragraph))
+        return f"{text}{markers}" if markers else text
+
+    def _emit_notes(self, paragraph: Paragraph) -> None:
+        """Emit the text of the footnotes this paragraph refers to.
+
+        Footnotes live in a separate part of the package and are invisible to a
+        parser that only walks the body — yet they carry definitions, sources
+        and caveats that questions are asked about. They are emitted right
+        after the paragraph that references them, so retrieval keeps them
+        together with the sentence they belong to.
+        """
+        for kind, note_id in self._note_references(paragraph):
+            text = self._notes.get((kind, note_id))
+            if not text:
+                continue
+            self.footnote_count += 1
+            self.factory.add(
+                f"[{note_id}] {text}",
+                BlockType.TEXT,
+                {"note_type": kind, "note_id": note_id},
+            )
 
     def _paragraph_images(self, paragraph: Paragraph) -> list[bytes]:
         blobs: list[bytes] = []
@@ -310,10 +444,19 @@ class _BodyWalker:
             return 0
         return None
 
+    def _list_marker(self, paragraph: Paragraph, ilvl: int) -> str:
+        """The number Word would render for this list paragraph ("8.", "1.2.")."""
+        if not self._numbering.available:
+            return ""
+        num_pr = paragraph._p.pPr.numPr if paragraph._p.pPr is not None else None
+        if num_pr is None or num_pr.numId is None or num_pr.numId.val is None:
+            return ""
+        return self._numbering.marker(str(num_pr.numId.val), ilvl)
+
     @staticmethod
     def _list_is_ordered(paragraph: Paragraph) -> bool:
-        # Without resolving numbering.xml we cannot know the list format; visible
-        # numbering in the text is the practical signal.
+        # Fallback for documents whose numbering.xml is missing or unreadable:
+        # visible numbering in the text is the only remaining signal.
         return bool(re.match(r"^\s*\d+[.)]", paragraph.text))
 
     @staticmethod
@@ -370,7 +513,7 @@ class _BodyWalker:
 
     # -- tables -------------------------------------------------------------------
 
-    def _handle_table(self, table: Table) -> None:
+    def _handle_table(self, table: Table, nested_in: int | None = None) -> None:
         rows: list[list[str]] = []
         for row in table.rows[:_MAX_TABLE_ROWS]:
             cells: list[str] = []
@@ -385,12 +528,56 @@ class _BodyWalker:
                 cells.append(clean_text(cell.text).replace("\n", " "))
             rows.append(cells)
         markdown = table_to_markdown(rows)
-        if not markdown:
-            return
-        self.table_count += 1
-        self.factory.add(
-            markdown,
-            BlockType.TABLE,
-            {"table_index": self.table_count, "row_count": len(rows)},
-        )
-        self._last_figure = None
+        if markdown:
+            self.table_count += 1
+            metadata: dict[str, Any] = {
+                "table_index": self.table_count,
+                "row_count": len(rows),
+            }
+            if nested_in is not None:
+                metadata["nested_in_table"] = nested_in
+            self.factory.add(markdown, BlockType.TABLE, metadata)
+            self._last_figure = None
+            parent_index = self.table_count
+        else:
+            parent_index = nested_in
+
+        # A table inside a cell is invisible in the parent grid (``cell.text``
+        # only reads the cell's own paragraphs), so its rows would be lost.
+        # Each one is emitted as its own table right after its parent.
+        for nested in self._nested_tables(table):
+            self._handle_table(nested, nested_in=parent_index)
+
+    def _nested_tables(self, table: Table) -> list[Table]:
+        nested: list[Table] = []
+        for cell in table._tbl.iter(qn("w:tc")):
+            for child in cell.iterchildren(qn("w:tbl")):
+                nested.append(Table(child, self.docx))
+        return nested
+
+
+def _collect_notes(docx: Any) -> dict[tuple[str, str], str]:
+    """Text of every footnote and endnote in the package, keyed by kind and id.
+
+    Both live in their own parts (``footnotes.xml`` / ``endnotes.xml``) that a
+    body walk never reaches. Word's own bookkeeping notes (the separator and
+    continuation marks) carry no content and are skipped.
+    """
+    notes: dict[tuple[str, str], str] = {}
+    for kind, relationship, container in (
+        ("footnote", RT.FOOTNOTES, "w:footnote"),
+        ("endnote", RT.ENDNOTES, "w:endnote"),
+    ):
+        try:
+            part = docx.part.part_related_by(relationship)
+            root = etree.fromstring(part.blob)
+        except Exception:  # noqa: BLE001 - no such part, or unreadable XML
+            continue
+        for node in root.iter(qn(container)):
+            note_id = node.get(qn("w:id"))
+            if note_id is None or node.get(qn("w:type")) in ("separator", "continuationSeparator"):
+                continue
+            text = clean_text(" ".join(t.text or "" for t in node.iter(qn("w:t"))))
+            if text:
+                notes[(kind, note_id)] = text
+    return notes

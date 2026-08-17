@@ -89,3 +89,62 @@ def test_pipeline_routes_docx_to_python_docx_parser(tmp_path, monkeypatch):
 
     assert document.metadata["parsing_method"] == "python-docx"
     assert document.blocks[0].block_type == BlockType.HEADING
+
+
+def _rich_document(tmp_path):
+    from tests._docx_fixture import write_fixture
+
+    return DOCXParser().parse(write_fixture(tmp_path / "rich.docx"))
+
+
+def test_footnotes_are_marked_in_place_and_emitted_as_their_own_block(tmp_path):
+    document = _rich_document(tmp_path)
+    texts = [b.text for b in document.blocks]
+
+    # The reader sees where the note was attached ...
+    assert "Основной абзац со сноской. [2]" in texts
+    # ... and the note itself is indexed next to the sentence it belongs to.
+    note = next(b for b in document.blocks if b.metadata.get("note_type") == "footnote")
+    assert note.text == "[2] Утверждён приказом № 35 от 30.12.2025."
+    assert note.metadata["note_id"] == "2"
+    assert document.metadata["footnote_count"] == 1
+
+
+def test_list_items_carry_the_numbers_word_computes(tmp_path):
+    document = _rich_document(tmp_path)
+    listing = next(b for b in document.blocks if b.block_type == BlockType.LIST)
+
+    assert listing.text.splitlines() == [
+        "1. Первый пункт",
+        "  1.1. Подпункт один",
+        "  1.2. Подпункт два",
+        "2. Второй пункт",
+    ]
+
+
+def test_text_frame_becomes_its_own_block_and_leaves_the_host_paragraph_alone(tmp_path):
+    document = _rich_document(tmp_path)
+    frame = next(b for b in document.blocks if b.metadata.get("text_box"))
+
+    assert frame.text == "Важно: срок хранения — 5 лет"
+    assert document.metadata["text_box_count"] == 1
+    # The frame's text must not have leaked into any other block.
+    assert sum("срок хранения" in b.text for b in document.blocks) == 1
+
+
+def test_nested_table_is_emitted_after_its_parent(tmp_path):
+    document = _rich_document(tmp_path)
+    tables = [b for b in document.blocks if b.block_type == BlockType.TABLE]
+
+    assert len(tables) == 2
+    assert "Раздел" in tables[0].text and "А-1" not in tables[0].text
+    assert "| А-1 | 3 года |" in tables[1].text
+    assert tables[1].metadata["nested_in_table"] == tables[0].metadata["table_index"]
+
+
+def test_placeholder_document_properties_do_not_become_the_title(tmp_path):
+    document = _rich_document(tmp_path)
+
+    # python-docx stamps "Word Document" into core properties; the real title
+    # is the first heading of the body.
+    assert document.metadata["title"] == "Регламент"

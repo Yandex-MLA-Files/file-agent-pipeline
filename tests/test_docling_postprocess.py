@@ -1,5 +1,9 @@
 from file_agent.document import Block, BlockType
-from file_agent.parsers.docling_parser import DoclingParser, _postprocess_blocks
+from file_agent.parsers.docling_parser import (
+    DoclingParser,
+    _postprocess_blocks,
+    repair_column_order,
+)
 
 
 def _block(id_, text, block_type, parent="", parent_label="", page=1, level=1):
@@ -85,3 +89,75 @@ def test_map_label_covers_new_block_types():
     assert DoclingParser._map_label("code") == BlockType.CODE
     assert DoclingParser._map_label("section_header") == BlockType.HEADING
     assert DoclingParser._map_label("picture") == BlockType.FIGURE
+
+
+def _positioned(block_id: str, x0: float, y0: float, x1: float, y1: float, page: int = 1):
+    return Block(
+        id=block_id,
+        text=block_id,
+        type="text",
+        block_type=BlockType.TEXT,
+        page_number=page,
+        bbox=(x0, y0, x1, y1),
+    )
+
+
+def test_interleaved_columns_are_re_sorted_column_by_column():
+    """Left/right/left/right reading order is damage, not a layout."""
+    interleaved = [
+        _positioned("L1", 50, 100, 290, 140),
+        _positioned("R1", 320, 100, 560, 140),
+        _positioned("L2", 50, 150, 290, 190),
+        _positioned("R2", 320, 150, 560, 190),
+        _positioned("L3", 50, 200, 290, 240),
+        _positioned("R3", 320, 200, 560, 240),
+    ]
+
+    assert [b.id for b in repair_column_order(interleaved)] == [
+        "L1",
+        "L2",
+        "L3",
+        "R1",
+        "R2",
+        "R3",
+    ]
+
+
+def test_correct_orders_are_left_untouched():
+    single_column = [_positioned(f"P{i}", 50, 100 + 30 * i, 560, 130 + 30 * i) for i in range(8)]
+    two_columns = [
+        _positioned("L1", 50, 100, 290, 140),
+        _positioned("L2", 50, 150, 290, 190),
+        _positioned("L3", 50, 200, 290, 240),
+        _positioned("R1", 320, 100, 560, 140),
+        _positioned("R2", 320, 150, 560, 190),
+        _positioned("R3", 320, 200, 560, 240),
+    ]
+
+    assert repair_column_order(single_column) == single_column
+    assert repair_column_order(two_columns) == two_columns
+
+
+def test_a_full_width_element_rules_out_the_column_repair():
+    # A page with a title spanning both columns is not a clean two-column page:
+    # re-sorting it would move the title away from the text it introduces.
+    with_title = [
+        _positioned("TITLE", 50, 60, 560, 90),
+        _positioned("L1", 50, 100, 290, 140),
+        _positioned("R1", 320, 100, 560, 140),
+        _positioned("L2", 50, 150, 290, 190),
+        _positioned("R2", 320, 150, 560, 190),
+        _positioned("L3", 50, 200, 290, 240),
+        _positioned("R3", 320, 200, 560, 240),
+    ]
+
+    assert repair_column_order(with_title) == with_title
+
+
+def test_blocks_without_geometry_are_never_reordered():
+    stream = [
+        Block(id="a", text="a", type="text", block_type=BlockType.TEXT, page_number=1),
+        Block(id="b", text="b", type="text", block_type=BlockType.TEXT, page_number=1),
+    ]
+
+    assert repair_column_order(stream) == stream
