@@ -13,18 +13,21 @@ from typing import Any
 
 from datasets import Dataset
 
+from file_agent.chunking import _row_records_enabled, _semantic_split_enabled
 from file_agent.document import Document
 from file_agent.hf_dataset import QADatasetRecord, validate_qa_dataset
 from file_agent.hf_rag import DocumentLoader, GeneratedQARecord, process_hf_qa_record
 from file_agent.lancedb_retriever import resolve_embedding_model_name, resolve_reranker_model_name
 from file_agent.llm.base import LLMClient
-from file_agent.qa import build_qa_prompt
+from file_agent.pipeline import resolve_ocr_engine
+from file_agent.qa import build_qa_prompt, qa_prompt_version
 from file_agent.rag import load_documents
 from file_agent.retrieval import Retriever
+from file_agent.vlm.factory import DEFAULT_VLM_BACKEND
 
 CHECKPOINT_SCHEMA_VERSION = 2
 CHECKPOINTS_DIRECTORY_NAME = "checkpoints"
-RAG_PIPELINE_VERSION = "structured-parsers-breadcrumb-chunks-v2"
+RAG_PIPELINE_VERSION = "structured-parsers-row-records-v3"
 # Marker that opens ``answer_model`` of a row the pipeline could not process
 # (parser crash, LLM outage, per-row timeout). Such rows are kept in the run so
 # the evaluation counts them as failures (score 0) instead of silently
@@ -267,15 +270,17 @@ def build_generation_parameters(
         "parser_profile": os.getenv("PARSER_PROFILE", "structured").strip().lower(),
         "chunking_strategy": os.getenv("CHUNKING_STRATEGY", "structured").strip().lower(),
         "chunk_target_tokens": os.getenv("CHUNK_TARGET_TOKENS") or None,
-        "ocr_engine": os.getenv("OCR_ENGINE", "easyocr").strip().lower(),
+        "table_row_records": _row_records_enabled(),
+        "semantic_split": _semantic_split_enabled(),
+        "ocr_engine": resolve_ocr_engine(),
         "ocr_langs": os.getenv("OCR_LANGS", "ru,en").strip(),
-        "vlm_backend": os.getenv("VLM_BACKEND", "off").strip().lower(),
+        "vlm_backend": os.getenv("VLM_BACKEND", DEFAULT_VLM_BACKEND).strip().lower(),
         "vlm_model": _vlm_model_identifier(),
         "top_k": top_k,
         "max_chars": max_chars,
         "overlap": overlap,
         "prompt_sha256": hashlib.sha256(prompt_template.encode("utf-8")).hexdigest(),
-        "qa_prompt": os.getenv("QA_PROMPT", "v2").strip().lower(),
+        "qa_prompt": qa_prompt_version(),
     }
 
 
