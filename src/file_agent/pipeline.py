@@ -15,6 +15,8 @@ from file_agent.parsers.md_parser import MarkdownParser
 from file_agent.parsers.pdf_parser import PDFParser
 from file_agent.parsers.pptx_parser import PPTXParser
 from file_agent.parsers.routing import analyze_pdf
+from file_agent.parsers.table_repair import repair_tables
+from file_agent.parsers.table_repair import resolve_mode as resolve_table_repair_mode
 from file_agent.parsers.txt_parser import TXTParser
 from file_agent.parsers.vlm_ocr import VLMPageOCR, merge_ocr_blocks
 from file_agent.parsers.xlsx_parser import XLSXParser
@@ -225,6 +227,7 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
         document.metadata["page_analysis"] = analysis.summary()
 
     if enable_vlm is not False:
+        _repair_tables_with_vlm(document, path)
         _enhance_with_vlm(document, path, forced=enable_vlm is True)
 
     return document
@@ -293,6 +296,18 @@ def _resolve_ocr_policy(path: Path, enable_ocr: OcrMode):
     if analysis is None:
         return False, False, None
     return analysis.needs_ocr, analysis.scanned_ratio >= FULL_SCAN_RATIO, analysis
+
+
+def _repair_tables_with_vlm(document: Document, path: Path) -> None:
+    """Ask the VLM to re-read PDF tables the layout model could not reconstruct."""
+    if path.suffix.lower() != ".pdf" or resolve_table_repair_mode() == "off":
+        return
+    if not any(block.block_type == BlockType.TABLE for block in document.blocks):
+        return
+    vlm_client = create_vlm_client()
+    if vlm_client is None:
+        return
+    repair_tables(document, path, vlm_client)
 
 
 def _enhance_with_vlm(document: Document, path: Path, forced: bool) -> None:
