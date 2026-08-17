@@ -33,17 +33,75 @@ def test_large_table_is_split_by_rows_with_header():
     )
 
     chunks = chunk_document(document, max_chars=200, overlap=20)
+    windows = [c for c in chunks if c.metadata.get("representation") != "row"]
 
     # A huge table is split so each piece fits an embedding window ...
-    assert len(chunks) > 1
-    assert all(len(chunk.text) <= 260 for chunk in chunks)
+    assert len(windows) > 1
+    assert all(len(chunk.text) <= 260 for chunk in windows)
     # ... every piece repeats the header row, and all rows are preserved.
-    assert all("| a | b |" in chunk.text for chunk in chunks)
-    joined = "\n".join(chunk.text for chunk in chunks)
+    assert all("| a | b |" in chunk.text for chunk in windows)
+    joined = "\n".join(chunk.text for chunk in windows)
     assert "| 0 | 0 |" in joined
     assert "| 499 | 249001 |" in joined
-    assert chunks[0].metadata["block_type"] == "table"
-    assert chunks[0].metadata["page_number"] == 3
+    assert windows[0].metadata["block_type"] == "table"
+    assert windows[0].metadata["page_number"] == 3
+
+
+def test_table_rows_are_also_indexed_as_records(monkeypatch):
+    """Every row is additionally indexed as "column: value" for lookup queries."""
+    header = "| Chess.com Bullet | FIDE Regular |\n| --- | --- |"
+    rows = [f"| {1000 + i * 10} | {1260 + i * 10} |" for i in range(20)]
+    document = Document(
+        file_name="ratings.xlsx",
+        file_type="xlsx",
+        blocks=[
+            Block(
+                id="t1",
+                text=header + "\n" + "\n".join(rows),
+                type="table",
+                block_type=BlockType.TABLE,
+                page_number=1,
+            )
+        ],
+    )
+
+    chunks = chunk_document(document, max_chars=400, overlap=40)
+    records = [c for c in chunks if c.metadata.get("representation") == "row"]
+
+    assert len(records) == 20
+    # The query words and the answer sit side by side in one short passage.
+    assert any("Chess.com Bullet: 1000; FIDE Regular: 1260" in c.text for c in records)
+    assert [c.metadata["row_index"] for c in records] == list(range(1, 21))
+    # ... and each record still hands the LLM the surrounding table.
+    for record in records:
+        assert "| Chess.com Bullet | FIDE Regular |" in record.metadata["context"]
+        assert record.metadata["block_type"] == "table"
+
+    monkeypatch.setenv("TABLE_ROW_RECORDS", "off")
+    assert not [
+        c
+        for c in chunk_document(document, max_chars=400, overlap=40)
+        if c.metadata.get("representation") == "row"
+    ]
+
+
+def test_row_records_skip_tiny_and_prose_tables():
+    prose = "| Термин | Определение |\n| --- | --- |\n" + "\n".join(
+        f"| термин {i} | {'очень длинное определение ' * 20} |" for i in range(6)
+    )
+    tiny = "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |"
+    document = Document(
+        file_name="doc.docx",
+        file_type="docx",
+        blocks=[
+            Block(id="t1", text=prose, type="table", block_type=BlockType.TABLE),
+            Block(id="t2", text=tiny, type="table", block_type=BlockType.TABLE),
+        ],
+    )
+
+    chunks = chunk_document(document, max_chars=1000, overlap=100)
+
+    assert not [c for c in chunks if c.metadata.get("representation") == "row"]
 
 
 def test_structural_metadata_is_propagated():

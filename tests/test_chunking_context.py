@@ -131,7 +131,11 @@ def test_huge_header_is_not_repeated_so_rows_survive():
         blocks=[Block(id="t1", text=table, type="table", block_type=BlockType.TABLE)],
     )
 
-    chunks = chunk_document(document, max_chars=300, overlap=30)
+    chunks = [
+        c
+        for c in chunk_document(document, max_chars=300, overlap=30)
+        if c.metadata.get("representation") != "row"
+    ]
 
     assert len(chunks) > 1
     # Every emitted piece must carry actual data, never just a header.

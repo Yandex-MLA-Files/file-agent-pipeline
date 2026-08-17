@@ -71,6 +71,23 @@ PARENT_CONTEXT_MAX_CHARS = 4000
 # share of the budget; a huge header would crowd out the actual data rows.
 HEADER_REPEAT_MAX_RATIO = 0.25
 
+# Row records (multi-representation indexing of tables). A table split into
+# row *windows* answers "show me this part of the table", but not "which row
+# has FIDE 1260" — the query words and the answer sit in different columns of
+# one row, and a window of fifteen rows dilutes them. Every row is therefore
+# indexed a second time as a self-describing record ("Column: value; ..."),
+# which is what BM25 and the encoder can actually match. The chunk still
+# carries the surrounding table as its parent passage, so the LLM reads the
+# table, not the record.
+DEFAULT_TABLE_ROW_RECORDS = True
+# Small tables already fit in one chunk; huge ones would flood the index.
+TABLE_ROW_RECORD_MIN_ROWS = 4
+TABLE_ROW_RECORD_MAX_ROWS = 600
+TABLE_ROW_RECORD_MAX_COLUMNS = 40
+# Rows of a table whose cells are prose (a two-column "term/definition" table)
+# are already good chunks; records would only duplicate them.
+TABLE_ROW_RECORD_MAX_CELL_CHARS = 300
+
 # The breadcrumb ("Doc title > Chapter > Section") prepended to chunk text may
 # use at most this share of the budget; deeper crumbs are dropped first.
 BREADCRUMB_MAX_RATIO = 0.2
@@ -316,9 +333,10 @@ def chunk_document(
 
         budget = _build_budget(max_chars, overlap, min_chars, max_tokens, tokenizer)
         chunker = _Chunker(document, budget)
-        for section in _group_sections(document.blocks):
+        sections = _group_sections(document.blocks)
+        for section in sections:
             chunker.add_section(section)
-        chunks = chunker.finish()
+        chunks = chunker.finish(sections)
 
         span.set_attribute("file_agent.chunk_count", len(chunks))
         logger.info("Chunked %d block(s) into %d chunk(s)", len(document.blocks), len(chunks))
@@ -423,8 +441,10 @@ class _Chunker:
         self._buffer.append(section)
         self._buffer_size += addition
 
-    def finish(self) -> list[Chunk]:
+    def finish(self, sections: list[_Section] | None = None) -> list[Chunk]:
         self._flush()
+        if sections and _row_records_enabled():
+            self._add_table_records(sections)
         return self._chunks
 
     # -- packing whole sections ------------------------------------------------------
@@ -817,6 +837,76 @@ class _Chunker:
         body = "\n".join(rows)
         return f"{header}\n{body}" if header else body
 
+    # -- table row records ----------------------------------------------------------
+
+    def _add_table_records(self, sections: list[_Section]) -> None:
+        for section in sections:
+            heading = section.heading
+            path = section.path + ([heading] if heading else [])
+            for block in section.blocks:
+                if block.block_type == BlockType.TABLE and block.text:
+                    self._emit_table_records(block, heading, path)
+
+    def _emit_table_records(self, block: Block, heading: str | None, path: list[str]) -> None:
+        caption, header, rows = self._table_parts(block.text)
+        if not header or not (TABLE_ROW_RECORD_MIN_ROWS <= len(rows) <= TABLE_ROW_RECORD_MAX_ROWS):
+            return
+        columns = _table_cells(header.split("\n")[0])
+        if not columns or len(columns) > TABLE_ROW_RECORD_MAX_COLUMNS:
+            return
+        title = " ".join(caption.split()) if caption else str(block.metadata.get("caption") or "")
+        title = _shorten(title, BREADCRUMB_MAX_CRUMB_CHARS * 2) if title else ""
+
+        for index, row in enumerate(rows):
+            cells = _table_cells(row)
+            if not cells or max((len(cell) for cell in cells), default=0) > (
+                TABLE_ROW_RECORD_MAX_CELL_CHARS
+            ):
+                continue
+            pairs = [
+                f"{column}: {value}"
+                for column, value in zip(columns, cells, strict=False)
+                if value.strip() and column.strip()
+            ]
+            # A record needs at least a key and a value to be worth indexing;
+            # a single-cell row carries no relation to retrieve.
+            if len(pairs) < 2:
+                continue
+            record = "; ".join(pairs)
+            text = f"{title}\n{record}" if title else record
+            self._emit(
+                [block],
+                section=heading,
+                sections=[heading] if heading else [],
+                path=path,
+                text=text,
+                parent=self._row_context(caption, header, rows, index),
+                extra={"representation": "row", "row_index": index + 1},
+            )
+
+    def _row_context(self, caption: str, header: str, rows: list[str], index: int) -> str:
+        """The table around one row: caption, header and as many neighbours as fit."""
+        head = "\n".join(line for line in (caption, header) if line)
+        budget = PARENT_CONTEXT_MAX_CHARS - len(head)
+        window = [rows[index]]
+        size = len(rows[index])
+        before, after = index - 1, index + 1
+        while before >= 0 or after < len(rows):
+            grew = False
+            if before >= 0 and size + len(rows[before]) + 1 <= budget:
+                window.insert(0, rows[before])
+                size += len(rows[before]) + 1
+                before -= 1
+                grew = True
+            if after < len(rows) and size + len(rows[after]) + 1 <= budget:
+                window.append(rows[after])
+                size += len(rows[after]) + 1
+                after += 1
+                grew = True
+            if not grew:
+                break
+        return self._join_table(head, window)
+
     # -- breadcrumbs ----------------------------------------------------------------
 
     def _breadcrumb(self, path: list[str]) -> str:
@@ -852,6 +942,7 @@ class _Chunker:
         path: list[str],
         text: str | None = None,
         parent: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         body = text if text is not None else _SEPARATOR.join(b.text for b in blocks if b.text)
         if not any(char.isalnum() for char in body):
@@ -877,6 +968,8 @@ class _Chunker:
             if not any(char.isalnum() for char in piece):
                 continue
             metadata = self._build_metadata(blocks, section, sections, path)
+            if extra:
+                metadata.update(extra)
             # Small-to-big retrieval: the piece is what gets embedded, the parent
             # passage is what the LLM reads (see qa.build_context_from_results).
             body_only = piece[len(prefix) :] if prefix and piece.startswith(prefix) else piece
@@ -981,6 +1074,25 @@ class _Chunker:
             metadata["vlm_description"] = " ".join(descriptions)
 
         return metadata
+
+
+def _row_records_enabled() -> bool:
+    raw = os.getenv("TABLE_ROW_RECORDS")
+    if raw is None:
+        return DEFAULT_TABLE_ROW_RECORDS
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _table_cells(row: str) -> list[str]:
+    """Cells of one Markdown table row, without the outer pipes."""
+    stripped = row.strip()
+    if "|" not in stripped:
+        return []
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
 
 
 def _document_title(document: Document) -> str | None:
