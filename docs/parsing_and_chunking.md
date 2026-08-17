@@ -30,10 +30,10 @@ coordinates and a document title.
 
 | Format | Implementation | Structure recovered |
 |---|---|---|
-| PDF | Docling (layout model, reading order, tables) + post-processing in `docling_parser.py` | heading levels inferred from numbering (`1.2.3` → level 3), consecutive list items grouped into one list block (bullet glyphs stripped), captions folded into figure/table blocks, headings split over two lines stitched, running headers/footers dropped |
+| PDF | Docling (layout model, reading order, tables) + post-processing in `docling_parser.py` | heading levels inferred from numbering (`1.2.3` → level 3), consecutive list items grouped into one list block (bullet glyphs stripped), captions folded into figure/table blocks, headings split over two lines stitched, running headers/footers dropped, words broken by justification rejoined (`обыкновен- ных` → `обыкновенных`: 26 such breaks in one financial report, each one a term the query could not match) |
 | DOCX | `python-docx` (`docx_parser.py`), Docling as fallback | whole paragraphs; heading levels from `Heading N`/`Заголовок N` styles, outline levels or bold-and-larger formatting; numbered/bulleted lists; tables with merged cells; embedded pictures with captions; monospace paragraphs as code |
 | PPTX | `python-pptx` (`pptx_parser.py`) | slide title → heading (level 1 for section dividers, else 2), body in visual reading order with grouped shapes flattened, bullet lists with indentation, tables and charts as Markdown, pictures with image bytes, speaker notes; slide number stored as `page_number` |
-| XLSX | `openpyxl` (`xlsx_parser.py`) | one heading per sheet, one Markdown table per data region (blank rows split regions), one- or two-row header detection, merged cells filled, note cells kept as text, `1100.0 → 1100`, ISO dates; a **profile block** per table (row count, column types, min/max with row label, sums/means, distinct values, sums grouped by every low-cardinality column) so aggregate questions are answerable from retrieval |
+| XLSX | `openpyxl` (`xlsx_parser.py`) | a **workbook overview** (sheet count, sheet names, rows and columns of each) so questions about the file itself are answerable; one heading per sheet, one Markdown table per data region, one- or two-row header detection, merged cells filled, note cells kept as text, `1100.0 → 1100`, ISO dates; a **profile block** per table (row count, column types, min/max with row label, sums/means, distinct values, sums grouped by every low-cardinality column) so aggregate questions are answerable from retrieval. A blank row inside a table no longer starts a new one: a 92-row sheet used to become ten fragments with ten contradictory automatic summaries, and "the maximum rating in the table" was answered from eleven rows |
 | HTML | BeautifulSoup walker (`html_parser.py`) | `h1–h6`, paragraphs, nested lists, tables, `pre` code, `img` alt text; nav/header/footer/script/style removed |
 | Markdown | `md_parser.py` | ATX/setext headings, fenced code, pipe tables, lists, images, YAML front matter |
 | TXT | `txt_parser.py` | encoding detection (UTF-8/16, cp1251, koi8-r, cp866); prose: paragraph reflow of hard-wrapped lines and title detection (`* CAPS *`, standalone short lines); transcripts: timestamps removed, captions re-flowed into ~140-word paragraphs with `time_start` metadata |
@@ -41,7 +41,7 @@ coordinates and a document title.
 The original parsers are kept unchanged in `parsers/legacy/` and selected
 with `PARSER_PROFILE=legacy` (for DOCX that means Docling).
 
-### 2.2 OCR and VLM through the chat model (`VLM_BACKEND=llm`, `OCR_ENGINE=vlm`)
+### 2.2 OCR and VLM through the chat model (`VLM_BACKEND=llm`, `OCR_ENGINE=auto`)
 
 The answering model served for the project (Qwen3.5-27B on vLLM) is
 multimodal, so by default the **same endpoint** is used for vision:
@@ -50,19 +50,70 @@ multimodal, so by default the **same endpoint** is used for vision:
   no network) whether a text layer is missing. Those pages are rendered at
   150 dpi and transcribed to Markdown by `parsers/vlm_ocr.py` with a strict
   "transcribe, do not interpret" prompt (headings, lists, tables, LaTeX
-  formulas kept; page furniture skipped). The transcript replaces Docling's
-  placeholder blocks for those pages, in reading order. Thinking is disabled
-  for vision calls (about 1–3 s per page on an A100). If no VLM endpoint is
-  configured, or the endpoint fails, the classic path runs (EasyOCR inside
-  Docling; `OCR_ENGINE=easyocr|rapidocr` forces it).
-- **Figures.** `parsers/enhancer.py` describes the largest figures
-  (`VLM_MAX_FIGURES`, default 8) of a document — PDF page crops as before,
-  and now the embedded images of DOCX/PPTX — and folds the description into
-  the block text so it is indexed. One failed call aborts the remaining
-  figures of that document instead of paying a timeout each.
+  formulas kept; hyphenated words rejoined; page furniture skipped). The
+  transcript replaces Docling's placeholder blocks for those pages, in
+  reading order. Pages are transcribed **concurrently**
+  (`VLM_OCR_CONCURRENCY`, default 4), blank pages never reach the model, and
+  a page the model reports as empty is left to Docling so its picture can
+  still be described.
+- **Validation and fallback (`OCR_ENGINE=auto`).** A generative transcriber
+  fails in ways a classic engine cannot, so every transcript is checked:
+  empty output on a page full of ink, a repetition loop, a refusal, foreign
+  script, and output far shorter than the page's text lines imply. A page
+  that fails is retried with double the token budget (also when the endpoint
+  reports `finish_reason=length`) and then handed to EasyOCR. The result is
+  therefore never worse than classic OCR. `OCR_ENGINE=vlm` is the same path
+  without the local safety net, `easyocr`/`rapidocr` force the classic
+  engines inside Docling, `off` disables OCR.
+- **Figures.** `parsers/enhancer.py` describes the largest figures of a
+  document — PDF page crops, and the embedded images of DOCX/PPTX — and folds
+  the description into the block text so it is indexed. The budget scales
+  with the document (a quarter of its page count, at least 8 and at most 32;
+  `VLM_MAX_FIGURES` pins a fixed number): eight descriptions cover a report
+  but only a tenth of an eighty-slide deck whose charts *are* the content.
+  One failed call aborts the remaining figures of that document instead of
+  paying a timeout each.
 
 `VLM_BACKEND=openai` (separate vision endpoint), `smolvlm` (local) and `off`
 remain available.
+
+#### Why the model reads scans better than an OCR engine
+
+The question "is a VLM really better than EasyOCR here, in quality *and*
+cost?" was measured rather than assumed (`ocr_bench.py`, reproduced in
+§3.4): pages that carry a real text layer are rendered to images, degraded
+to imitate scanning, transcribed by both engines and compared to the text
+layer, which is exact ground truth.
+
+| Condition | CER, VLM | CER, EasyOCR | WER, VLM | WER, EasyOCR | s/page, VLM | s/page, EasyOCR |
+|---|---|---|---|---|---|---|
+| clean render (150 dpi) | **0.122** | 0.285 | **0.175** | 0.479 | 33.0 | 2.0 |
+| scanner-like (0.6° skew, JPEG 55, blur, noise) | **0.107** | 0.305 | **0.178** | 0.520 | 32.7 | 1.9 |
+| photo-like (2° skew, ~100 dpi, JPEG 35, uneven light) | **0.113** | 0.562 | **0.181** | 0.829 | 32.9 | 1.9 |
+
+Read per page, the gap is wider than the averages suggest: on Russian prose
+0.08 against 0.54, on a financial table 0.06 against 0.32, on medical prose
+0.002 against 0.10. Two findings matter more than the averages:
+
+- **The model is stable under degradation and the engine is not.** EasyOCR
+  doubles its error rate between a clean render and a photo-like scan
+  (0.285 → 0.562); the VLM does not move (0.122 → 0.113). Skew and low
+  contrast are exactly what a real scan has.
+- **Only the VLM preserves structure.** EasyOCR returns lines of text; the
+  transcript keeps headings, lists and Markdown tables, which is what the
+  chunker and the answering prompt work with. On the two financial-table
+  pages the VLM's word error rate is 0.07 and 0.26 against 0.60 and 0.81.
+
+The one page where EasyOCR scores better (a lecture with probability
+formulas: CER 0.21 against 0.35) is a measurement artefact: the model writes
+formulas as LaTeX (`$\mathrm{P}(A \mid B)=\mathrm{P}(A)$`) while the text
+layer holds them as plain glyphs, so a *better* transcript scores as a worse
+one.
+
+The real cost is latency: ~33 s per page against ~2 s. That is why pages are
+transcribed concurrently (a 29-page deck takes ~2.5 min, not 16), why only
+pages without a text layer are sent at all, and why the classic engine
+remains the fallback rather than being removed.
 
 ### 2.3 Structured chunker (`CHUNKING_STRATEGY=structured`, default)
 
@@ -87,6 +138,21 @@ and adds:
   `CHUNK_TARGET_TOKENS` (384) capped by the encoder window; sizes are cached;
   the character-window fallback always advances by at least half a window
   (this removes the multi-hour pathological case above).
+- **Row records for tables (`TABLE_ROW_RECORDS`, on).** A table is indexed
+  twice: as row *windows* (what the table looks like) and as one record per
+  row, rendered `Column: value; Column: value`. A window answers "show me
+  this part of the table"; it does not answer "which row has FIDE 1260",
+  because the query value and the answer sit in different columns of one row
+  and fifteen rows of digits dilute both. The record puts them side by side,
+  which is what BM25 and the encoder can match, while `metadata["context"]`
+  still hands the LLM the surrounding table. Bounded to tables of 4…600 rows,
+  ≤40 columns and short cells, so prose tables and huge exports keep the
+  window representation only.
+- **Topic-boundary splitting (`CHUNK_SEMANTIC_SPLIT`, off).** For sections
+  three times over the budget with no internal headings (transcripts,
+  lecture notes), sentences are embedded and the cuts are placed where
+  neighbouring sentences are least similar instead of at the budget. Opt-in:
+  it costs an encoder pass over the section.
 
 `CHUNKING_STRATEGY=legacy` runs the original chunker (`chunking_legacy.py`).
 
@@ -103,11 +169,23 @@ and adds:
 - Document-diverse top-k (`RETRIEVAL_DIVERSIFY_DOCS`, on): with several
   indexed files, the best hit of every file is kept before the remaining
   slots are filled by score, so "compare A and B" questions see both files.
-- The QA prompt (`QA_PROMPT=v2`) shows every passage under a compact header
-  (`source_file`, pages, heading path) instead of raw retrieval metadata and
-  asks for a complete, grounded answer with sources, and for an explicit
-  conclusion on comparison / "does the document mention" questions; `v1` is
-  the original prompt.
+- The QA prompt (`QA_PROMPT=v3`, default) shows every passage under a compact
+  header (`source_file`, pages, heading path) instead of raw retrieval
+  metadata and asks for a complete, grounded answer, with an explicit
+  conclusion on comparison / "does the document mention" questions.
+  `v2` is the same prompt with a trailing `Источники: file, page` footer,
+  and `v1` is the original short prompt.
+
+  The footer was the default until it was measured. It is a claim about
+  document metadata, and no retrieved passage supports it, so the judge
+  counts it as unsupported: in the v4 run 126 of 127 answers carried it and
+  averaged 0.845 faithfulness, while the single answer without it scored
+  1.0. Worse, `answer_correctness` runs in recall mode over claims — an
+  answer that repeated the reference word for word still scored 0 when the
+  only claims it added (file name, page number) were absent from the
+  reference. All 28 zero scores in the run were answers with a footer.
+  Provenance did not need it: the passage headers carry file, page and
+  heading path into the prompt, and the UI shows the source chunks.
 
 ### 2.5 Evaluation harness changes
 
