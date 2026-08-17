@@ -103,3 +103,26 @@ def test_xlsx_parser_adds_table_profile_with_aggregates(tmp_path):
     assert "сумма amount по region (по убыванию): Utah: 300.50, Texas: 50, Ohio: 10" in text
     # id is an identifier, not a measure
     assert "id: минимум" not in text
+
+
+def test_profile_skips_prose_tables():
+    """A term/definition table has no aggregates; a summary would repeat it."""
+    from file_agent.parsers.table_profile import profile_table
+
+    header = ["Термин", "Определение"]
+    body = [[f"термин {i}", "очень длинное определение " * 5] for i in range(6)]
+
+    assert profile_table(header, body) == ""
+
+
+def test_profile_reports_extremes_with_their_row_label():
+    from file_agent.parsers.table_profile import profile_table
+
+    header = ["Регион", "Выручка"]
+    body = [["Юг", "100"], ["Север", "900"], ["Запад", "500"], ["Восток", "300"]]
+
+    profile = profile_table(header, body)
+
+    assert "максимум 900 (Север)" in profile
+    assert "минимум 100 (Юг)" in profile
+    assert "сумма 1 800" in profile

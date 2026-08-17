@@ -20,6 +20,8 @@ import re
 # not grouped; at most this many groups/values are listed per aggregate.
 PROFILE_MAX_CATEGORIES = 60
 PROFILE_TOP_N = 12
+# Values longer than this on average are prose, not categories.
+PROFILE_MAX_CATEGORY_CHARS = 60
 
 
 def _to_number(cell: str) -> float | None:
@@ -72,7 +74,13 @@ def profile_table(header: list[str], body: list[list[str]]) -> str:
             numeric[index] = numbers
         else:
             distinct = set(non_empty)
-            if len(distinct) <= PROFILE_MAX_CATEGORIES:
+            average_length = sum(len(v) for v in non_empty) / len(non_empty)
+            # A column of prose (a "term / definition" table) has no categories
+            # to count: listing its values would only repeat the table.
+            if (
+                len(distinct) <= PROFILE_MAX_CATEGORIES
+                and average_length <= PROFILE_MAX_CATEGORY_CHARS
+            ):
                 categorical[index] = column_values
 
     # An "id"-like numeric column (unique, monotonic) is an identifier, not a measure.
@@ -100,6 +108,9 @@ def profile_table(header: list[str], body: list[list[str]]) -> str:
         i for i in range(width) if i not in numeric and not _looks_like_dates(values[i])
     ]
     label_index = max(text_columns, key=lambda i: len(set(values[i])), default=None)
+
+    if not measures and not categorical:
+        return ""
 
     lines = [f"строк: {len(body)}; столбцы: {', '.join(columns)}"]
     for index, numbers in measures.items():
