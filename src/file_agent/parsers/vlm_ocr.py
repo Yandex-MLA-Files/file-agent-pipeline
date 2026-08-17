@@ -13,9 +13,9 @@ large — character error rate, VLM vs EasyOCR:
 ===============  ==============  ==============  ==============
 page             clean render    scanner-like    photo-like
 ===============  ==============  ==============  ==============
-Russian prose    0.08  / 0.54     0.07 / 0.54     0.08 / 0.69
-financial table  0.06  / 0.32     0.06 / 0.39     0.06 / 0.56
-medical prose    0.00  / 0.10     0.01 / 0.11     0.01 / 0.37
+Russian prose    0.08 / 0.54     0.07 / 0.54     0.08 / 0.69
+financial table  0.06 / 0.32     0.06 / 0.39     0.06 / 0.56
+medical prose    0.00 / 0.10     0.00 / 0.10     0.00 / 0.49
 ===============  ==============  ==============  ==============
 
 The VLM is also *stable* under degradation (skew, JPEG artefacts, uneven
