@@ -226,14 +226,32 @@ temperature 0, top-k 5) both as the answering model and as the judge
 |---|---|---|---|---|---|---|---|---|
 | baseline (old code) | 127 | 5 | 0.686 | 0.412 | 0.538 | 0.548 | 0.605 | — |
 | structured v2 | 127 | 0 | 0.847 | 0.593 | 0.738 | 0.715 | 0.786 | 22.5 |
-| structured v4 (default) | 127 | 0 | 0.840 | 0.601 | 0.831 | 0.767 | 0.811 | 26.2 |
+| structured v4 | 127 | 0 | 0.840 | 0.601 | 0.831 | 0.767 | 0.811 | 26.2 |
 | v4 + agent mode | 127 | 0 | 0.751 | 0.537 | 0.861 | 0.768 | 0.824 | 36.4 |
 | v4 without reranker | 127 | 0 | 0.837 | 0.604 | 0.855 | 0.705 | 0.827 | 25.0 |
+| **v5 (default)** | 127 | 0 | **0.958** | 0.605 | 0.831 | 0.777 | **0.865** | **18.5** |
 
 Means over successfully processed rows only differ for the baseline (0.715 /
-0.429 / 0.560 / 0.570 / 0.630 over 122 rows). Judge noise: three v4 rows
-timed out in the judge on `answer_correctness` (counted as 0 above; the
-mean over judged rows is 0.616).
+0.429 / 0.560 / 0.570 / 0.630 over 122 rows).
+
+**`answer_correctness` is the noisy column of this table and must not be read
+alone.** The judge measures it as ragas `FactualCorrectness` in recall mode:
+the answer is decomposed into claims and each is checked against the
+reference. Two properties of that protocol dominate the number:
+
+- A *more complete* answer scores lower. Of eight v5 rows scoring exactly 0,
+  six were factually right and matched the reference — they added a fact that
+  the terse reference does not mention (the segment breakdown next to the
+  total revenue, childhood incidence next to adult incidence), and every
+  added claim counts against the answer.
+- The same answer scores differently between runs. `q0064` is byte-identical
+  in v4 and v5 apart from the removed source footer, and scored 1.00 in one
+  run and 0.00 in the other. The distribution is bimodal (v5: 52 rows at 1.0,
+  30 at 0.0), so single rows flip and the mean moves without the pipeline
+  changing.
+
+Faithfulness, context precision and context recall are stable and are what
+the v4 → v5 comparison rests on.
 
 Reading the table:
 
