@@ -316,9 +316,19 @@ Reading the table:
   and figure names in any language are filtered.
 - **TXT**: the transcript loses ~40 % timestamp noise per chunk; the book
   gets 37 chapter/story headings.
-- **Scanned pages**: 29 skewed pages of `AB_test.pdf` are transcribed by the
-  VLM (Markdown with headings/tables) instead of EasyOCR text; 1–3 s per
-  page on the shared A100.
+- **Scanned pages**: the 29 image pages of `AB_test.pdf` are transcribed by
+  the VLM (Markdown with headings and tables) instead of EasyOCR text. In v5
+  the transcript validator accepted all 29 on the first attempt
+  (`ocr_stats: {'vlm_ok': 29}`); an earlier calibration that estimated the
+  expected length from raw ink flagged 27 of them and paid a second request
+  each, which is why the estimate now counts text lines instead.
+- **Table questions** (v4 → v5): the four chess-rating lookups that returned
+  "no information" are answered correctly ("FIDE 1260 → Chess.com Bullet
+  1000"), the maximum-rating question stopped being answered from an
+  eleven-row fragment, and the sheet inventory question is answered from the
+  workbook overview. Measured per document: `Chess_Rating_Comparison_2016`
+  +0.22 answer correctness, `sales-data.xlsx` +0.80, `inventory + sales`
+  +0.15, `AB_test.pdf` +0.30, `Сотрясение головного мозга.pdf` +0.30.
 
 ### 3.4 OCR engine benchmark (how the numbers in §2.2 were produced)
 
