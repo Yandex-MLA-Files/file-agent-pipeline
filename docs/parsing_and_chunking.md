@@ -235,6 +235,7 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | **v5 (default)** | 127 | 0 | **0.958** | 0.605 | 0.831 | 0.777 | **0.865** | **18.5** |
 | v5, judged a second time | 127 | 0 | 0.956 | 0.616 | 0.823 | 0.763 | 0.861 | — |
 | v5 + concise prompt (v4) | 127 | 0 | 0.941 | 0.554 | 0.823 | 0.772 | 0.854 | 10.8 |
+| v5 + top-k 8 | 127 | 0 | 0.962 | 0.598 | 0.846 | 0.744 | 0.875 | 14.1 |
 
 Means over successfully processed rows only differ for the baseline (0.715 /
 0.429 / 0.560 / 0.570 / 0.630 over 122 rows).
@@ -274,6 +275,15 @@ text:
   ingestion changes, not measurement drift.
 - **The footer was not what produced the zero correctness scores**: they are
   still there without it (0.601 → 0.603).
+
+Two settings were tried on top of v5 and neither is adopted:
+
+- **top-k 8 instead of 5** (`pc-v7-topk8-127`) buys 0.010 context recall for
+  0.033 context precision, and answer correctness does not move (0.598 against
+  0.605 and 0.616 in the two v5 judgings). The multi-document questions that
+  motivated it are not short of passages — they need the *right* passage, which
+  is a retrieval-quality problem, not a budget one. The default stays 5.
+- **the concise prompt** below.
 
 The zeros looked like a penalty for answering *too fully*, so prompt v4 was
 written to answer the question and nothing beside it, and measured
