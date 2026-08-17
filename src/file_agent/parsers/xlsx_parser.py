@@ -58,32 +58,22 @@ class XLSXParser(BaseParser):
             overview: list[tuple[str, int, list[str]]] = []
             try:
                 sheets = workbook.worksheets
-                sheet_grids = []
+                # One sheet is read, converted and released before the next is
+                # opened: holding every grid at once would cost hundreds of
+                # megabytes on a workbook of several full sheets.
                 for sheet_index, sheet in enumerate(sheets, start=1):
                     grid, truncated = _read_grid(sheet)
                     if not grid:
                         continue
                     items = _sheet_items(grid)
-                    sheet_grids.append((sheet_index, sheet.title, items, truncated))
+                    del grid
+                    title = sheet.title
                     for kind, payload in items:
                         if kind == "table":
                             header, body = payload
-                            overview.append((sheet.title, len(body), header or []))
+                            overview.append((title, len(body), header or []))
                             break
 
-                # A workbook-level overview answers the questions that no single
-                # table can ("how many sheets are there, what is each about") and
-                # gives retrieval a passage that names every sheet and column.
-                summary = _workbook_overview(path.name, len(sheets), overview)
-                if summary:
-                    factory.add(
-                        summary,
-                        BlockType.TEXT,
-                        {"workbook_overview": True},
-                        page_number=1,
-                    )
-
-                for sheet_index, title, items, truncated in sheet_grids:
                     factory.heading(
                         f"Sheet: {title}",
                         1,
@@ -126,6 +116,22 @@ class XLSXParser(BaseParser):
                                 {"sheet_name": title, "table_profile": True},
                                 page_number=sheet_index,
                             )
+
+                # A workbook-level overview answers the questions that no single
+                # table can ("how many sheets are there, what is the main one
+                # called") and gives retrieval one passage naming every sheet and
+                # column. It opens the document, so it is inserted in front.
+                summary = _workbook_overview(path.name, len(sheets), overview)
+                if summary:
+                    block = factory.add(
+                        summary,
+                        BlockType.TEXT,
+                        {"workbook_overview": True},
+                        page_number=1,
+                    )
+                    if block is not None:
+                        factory.blocks.remove(block)
+                        factory.blocks.insert(0, block)
             finally:
                 workbook.close()
 
