@@ -45,36 +45,53 @@ class DoclingParser(BaseParser):
 
     #: OCR engine selected by the most recent :meth:`_configure_ocr` call.
     active_ocr_engine: str | None = None
+    #: PDF backend that is known to work in this process ("docling" or
+    #: "pypdfium"); set once the first conversion succeeds or fails.
+    resolved_pdf_backend: str | None = None
 
     def __init__(self, do_ocr: bool = False, ocr_full_page: bool = False) -> None:
         self.do_ocr = do_ocr
         self.ocr_full_page = ocr_full_page
         type(self).active_ocr_engine = None
-        self._converter = self._build_converter(do_ocr, ocr_full_page)
+        self._backend = self._preferred_backend()
+        self._converter = self._build_converter(do_ocr, ocr_full_page, self._backend)
         self.ocr_engine = type(self).active_ocr_engine if do_ocr else None
 
-    def _build_converter(self, do_ocr: bool, ocr_full_page: bool) -> DocumentConverter:
+    @classmethod
+    def _preferred_backend(cls) -> str:
+        forced = (os.getenv("DOCLING_PDF_BACKEND") or "").strip().lower()
+        if forced in ("docling", "pypdfium"):
+            return forced
+        return cls.resolved_pdf_backend or "docling"
+
+    def _build_converter(
+        self, do_ocr: bool, ocr_full_page: bool, backend: str
+    ) -> DocumentConverter:
         try:
-            from docling.datamodel.pipeline_options import PdfPipelineOptions
+            from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
             from docling.document_converter import PdfFormatOption
 
             pipeline_options = PdfPipelineOptions()
             pipeline_options.do_ocr = do_ocr
             pipeline_options.do_table_structure = True
+            # ACCURATE TableFormer recovers row/column structure of financial and
+            # scientific tables far better than FAST for a ~2x model cost.
+            pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
             if do_ocr:
                 self._configure_ocr(pipeline_options, ocr_full_page)
 
             pdf_format_option = PdfFormatOption(pipeline_options=pipeline_options)
 
-            # Prefer the pypdfium backend: it is pure-Python and avoids the glyph
-            # resource lookup in the default docling-parse backend, which is broken
-            # on Windows in some docling-parse releases.
-            try:
+            # The default docling-parse backend gives the best text/table cells
+            # (row labels survive), but its glyph resources are broken on Windows
+            # in some releases; there the pure-Python pypdfium backend is used,
+            # with cell matching off because matching against pypdfium text drops
+            # the label column of financial tables.
+            if backend == "pypdfium":
                 from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 
                 pdf_format_option.backend = PyPdfiumDocumentBackend
-            except Exception:  # pragma: no cover - keep default backend if missing
-                logger.debug("pypdfium2 backend unavailable; using the default backend.")
+                pipeline_options.table_structure_options.do_cell_matching = False
 
             return DocumentConverter(format_options={InputFormat.PDF: pdf_format_option})
         except Exception:  # pragma: no cover - fall back to defaults on API drift
@@ -83,6 +100,26 @@ class DoclingParser(BaseParser):
                 exc_info=True,
             )
             return DocumentConverter(allowed_formats=[InputFormat.PDF, InputFormat.DOCX])
+
+    def _convert(self, path: Path):
+        """Convert with the preferred backend, falling back to pypdfium once."""
+        try:
+            result = self._converter.convert(path)
+        except Exception as exc:
+            if self._backend != "docling" or path.suffix.lower() != ".pdf":
+                raise
+            logger.warning(
+                "docling-parse backend failed for %s (%s); retrying with pypdfium.",
+                path.name,
+                str(exc).splitlines()[0][:200],
+            )
+            type(self).resolved_pdf_backend = "pypdfium"
+            self._backend = "pypdfium"
+            self._converter = self._build_converter(self.do_ocr, self.ocr_full_page, "pypdfium")
+            return self._converter.convert(path)
+        if path.suffix.lower() == ".pdf" and type(self).resolved_pdf_backend is None:
+            type(self).resolved_pdf_backend = self._backend
+        return result
 
     @staticmethod
     def _ocr_languages() -> list[str]:
@@ -162,7 +199,7 @@ class DoclingParser(BaseParser):
             if self.ocr_engine:
                 span.set_attribute("file_agent.ocr_engine", self.ocr_engine)
 
-            result = self._converter.convert(path)
+            result = self._convert(path)
             docling_doc = result.document
 
             page_heights = self._page_heights(docling_doc)
@@ -197,6 +234,7 @@ class DoclingParser(BaseParser):
                 blocks=blocks,
                 metadata={
                     "parsing_method": "docling_ocr" if self.do_ocr else "docling",
+                    "pdf_backend": self._backend,
                     "ocr_engine": self.ocr_engine,
                     "docling_markdown": native_markdown,
                     "title": _document_title(blocks),
