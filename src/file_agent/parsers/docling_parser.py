@@ -10,6 +10,7 @@ from docling.document_converter import DocumentConverter
 
 from file_agent.document import Block, BlockType, Document
 from file_agent.parsers.base import BaseParser
+from file_agent.parsers.common import infer_heading_level, list_to_markdown, strip_bullet
 from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
@@ -166,11 +167,12 @@ class DoclingParser(BaseParser):
 
             page_heights = self._page_heights(docling_doc)
 
-            blocks: list[Block] = []
+            raw_blocks: list[Block] = []
             for item, level in docling_doc.iterate_items():
                 block = self._item_to_block(item, level, docling_doc, page_heights, path)
                 if block is not None:
-                    blocks.append(block)
+                    raw_blocks.append(block)
+            blocks = _postprocess_blocks(raw_blocks)
 
             if not blocks:
                 blocks.append(
@@ -197,6 +199,7 @@ class DoclingParser(BaseParser):
                     "parsing_method": "docling_ocr" if self.do_ocr else "docling",
                     "ocr_engine": self.ocr_engine,
                     "docling_markdown": native_markdown,
+                    "title": _document_title(blocks),
                 },
             )
             document.build_table_of_contents()
@@ -215,26 +218,90 @@ class DoclingParser(BaseParser):
         if "page_header" in label_lower or "page_footer" in label_lower:
             return None
         block_type = self._map_label(str(label))
+        parent = getattr(item, "parent", None)
+        parent_ref = getattr(parent, "cref", None) or ""
+        # Captions are folded into their figure/table block (see below); a
+        # standalone caption item that belongs to one would only duplicate it.
+        if "caption" in label_lower and ("/pictures/" in parent_ref or "/tables/" in parent_ref):
+            return None
         content = self._extract_content(item, block_type, docling_doc)
         if content is None:
             # Structural containers (groups, lists wrappers) carry no own text.
             return None
 
         page_number, bbox = self._extract_prov(item, page_heights)
+        metadata = {
+            "source_file": path.name,
+            "docling_label": str(label),
+            "docling_parent": parent_ref,
+            "docling_parent_label": self._parent_label(parent, docling_doc),
+            "hierarchy_level": level,
+        }
+        if block_type == BlockType.HEADING:
+            metadata["hierarchy_level"] = infer_heading_level(
+                content, default=int(getattr(item, "level", 1) or 1)
+            )
+        if block_type in (BlockType.TABLE, BlockType.FIGURE, BlockType.IMAGE):
+            caption = self._caption_text(item, docling_doc)
+            if caption:
+                metadata["caption"] = caption
+                content = f"{caption}\n{content}".strip() if content else caption
+        image_bytes = None
+        if block_type in (BlockType.FIGURE, BlockType.IMAGE) and path.suffix.lower() != ".pdf":
+            image_bytes = self._embedded_image(item, docling_doc)
 
         return Block(
             id=f"block-{uuid.uuid4().hex[:8]}",
             text=content,
             type=block_type.value,
-            metadata={
-                "source_file": path.name,
-                "docling_label": str(label),
-                "hierarchy_level": level,
-            },
+            metadata=metadata,
             block_type=block_type,
             page_number=page_number,
             bbox=bbox,
+            image_bytes=image_bytes,
         )
+
+    @staticmethod
+    def _parent_label(parent, docling_doc) -> str:
+        resolver = getattr(parent, "resolve", None)
+        if not callable(resolver):
+            return ""
+        try:
+            node = resolver(docling_doc)
+        except Exception:  # pragma: no cover
+            return ""
+        return str(getattr(node, "label", "") or "")
+
+    @staticmethod
+    def _caption_text(item, docling_doc) -> str:
+        getter = getattr(item, "caption_text", None)
+        if not callable(getter):
+            return ""
+        try:
+            return " ".join(str(getter(docling_doc) or "").split())
+        except Exception:  # pragma: no cover - depends on Docling version
+            return ""
+
+    @staticmethod
+    def _embedded_image(item, docling_doc) -> bytes | None:
+        """Return PNG bytes of a picture embedded in DOCX/PPTX (no page to crop)."""
+        getter = getattr(item, "get_image", None)
+        if not callable(getter):
+            return None
+        try:
+            image = getter(docling_doc)
+        except Exception:  # pragma: no cover
+            return None
+        if image is None:
+            return None
+        try:
+            import io
+
+            buffer = io.BytesIO()
+            image.convert("RGB").save(buffer, format="PNG")
+            return buffer.getvalue()
+        except Exception:  # pragma: no cover
+            return None
 
     def _extract_content(self, item, block_type: BlockType, docling_doc) -> str | None:
         if block_type == BlockType.TABLE:
@@ -361,4 +428,108 @@ class DoclingParser(BaseParser):
             return BlockType.FIGURE
         if "formula" in label_lower or "equation" in label_lower:
             return BlockType.FORMULA
+        if "list_item" in label_lower:
+            return BlockType.LIST
+        if label_lower == "code":
+            return BlockType.CODE
         return BlockType.TEXT
+
+
+# -- post-processing -------------------------------------------------------------
+
+_HEADING_CONTINUES = re.compile(
+    r"[,(\-–—:;/]\s*$|\b(и|или|the|of|and|for|по|для|в|на|с)\s*$", re.IGNORECASE
+)
+
+
+def _postprocess_blocks(blocks: list[Block]) -> list[Block]:
+    """Turn Docling's flat item stream into retrieval-friendly blocks.
+
+    - consecutive ``list_item`` items of the same group become one ``LIST``
+      block (bullet glyphs stripped, nesting kept as indentation);
+    - text fragments Docling emits for one paragraph split by run formatting
+      (``inline`` groups in DOCX) are merged back into a single paragraph;
+    - a heading that the layout model cut across two lines ("… (группе" /
+      "состояний)") is stitched back together.
+    """
+    merged: list[Block] = []
+    for block in blocks:
+        previous = merged[-1] if merged else None
+        parent = block.metadata.get("docling_parent", "")
+
+        if block.block_type == BlockType.LIST:
+            if (
+                previous is not None
+                and previous.block_type == BlockType.LIST
+                and previous.metadata.get("docling_parent") == parent
+                and previous.page_number in (None, block.page_number)
+            ):
+                previous.metadata["_items"].append(_list_item_text(block))
+                previous.text = list_to_markdown([(0, t) for t in previous.metadata["_items"]])
+                previous.metadata["item_count"] = len(previous.metadata["_items"])
+                if block.bbox and previous.bbox:
+                    previous.bbox = _union_bbox(previous.bbox, block.bbox)
+                continue
+            block.metadata["_items"] = [_list_item_text(block)]
+            block.metadata["item_count"] = 1
+            block.text = list_to_markdown([(0, block.metadata["_items"][0])])
+            merged.append(block)
+            continue
+
+        if (
+            block.block_type == BlockType.TEXT
+            and previous is not None
+            and previous.block_type == BlockType.TEXT
+            and parent
+            and block.metadata.get("docling_parent_label") == "inline"
+            and previous.metadata.get("docling_parent") == parent
+            and previous.page_number in (None, block.page_number)
+        ):
+            opens = previous.text.endswith(("(", "«"))
+            closes = block.text[:1] in ",.;:)»"
+            joiner = "" if opens or closes else " "
+            previous.text = f"{previous.text}{joiner}{block.text}"
+            if block.bbox and previous.bbox:
+                previous.bbox = _union_bbox(previous.bbox, block.bbox)
+            continue
+
+        if (
+            block.block_type == BlockType.HEADING
+            and previous is not None
+            and previous.block_type == BlockType.HEADING
+            and previous.page_number == block.page_number
+            and _looks_like_split_heading(previous.text, block.text)
+        ):
+            previous.text = f"{previous.text} {block.text}".strip()
+            if block.bbox and previous.bbox:
+                previous.bbox = _union_bbox(previous.bbox, block.bbox)
+            continue
+
+        merged.append(block)
+
+    for block in merged:
+        block.metadata.pop("_items", None)
+    return merged
+
+
+def _list_item_text(block: Block) -> str:
+    return strip_bullet(" ".join(block.text.split()))
+
+
+def _looks_like_split_heading(first: str, second: str) -> bool:
+    if not first or not second:
+        return False
+    if _HEADING_CONTINUES.search(first):
+        return True
+    return second[:1].islower() or second[:1] in ")»,;"
+
+
+def _union_bbox(a, b):
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
+def _document_title(blocks: list[Block]) -> str | None:
+    for block in blocks[:5]:
+        if block.block_type == BlockType.HEADING and block.text.strip():
+            return block.text.strip()
+    return None

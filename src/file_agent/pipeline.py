@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -6,6 +7,7 @@ from dotenv import load_dotenv
 
 from file_agent.document import BlockType, Document
 from file_agent.parsers.docling_parser import DoclingParser
+from file_agent.parsers.docx_parser import DOCXParser
 from file_agent.parsers.enhancer import DocumentEnhancer
 from file_agent.parsers.html_parser import HTMLParser
 from file_agent.parsers.md_parser import MarkdownParser
@@ -13,6 +15,7 @@ from file_agent.parsers.pdf_parser import PDFParser
 from file_agent.parsers.pptx_parser import PPTXParser
 from file_agent.parsers.routing import analyze_pdf
 from file_agent.parsers.txt_parser import TXTParser
+from file_agent.parsers.vlm_ocr import VLMPageOCR, merge_ocr_blocks
 from file_agent.parsers.xlsx_parser import XLSXParser
 from file_agent.telemetry import tracer
 from file_agent.vlm.factory import create_vlm_client
@@ -27,35 +30,62 @@ FULL_SCAN_RATIO = 0.6
 
 OcrMode = Literal["auto", "on", "off"]
 
+# OCR engine for pages without a text layer. ``vlm`` (default) transcribes the
+# rendered page with the multimodal chat model (see parsers.vlm_ocr) and falls
+# back to EasyOCR when no VLM endpoint is configured; ``easyocr`` / ``rapidocr``
+# run the classic engines inside Docling.
+DEFAULT_OCR_ENGINE = "vlm"
+
+# ``structured`` (default) uses the format-aware parsers that emit headings,
+# lists, tables and figures for every format; ``legacy`` keeps the original
+# one-block-per-slide/sheet/file parsers as a fallback implementation.
+ParserProfile = Literal["structured", "legacy"]
+DEFAULT_PARSER_PROFILE: ParserProfile = "structured"
+
 
 def parse_file(
     file_path: str | Path,
     enable_vlm: bool | None = None,
     enable_ocr: OcrMode = "auto",
+    parser_profile: ParserProfile | None = None,
 ) -> Document:
     """Parse any supported file into a structured :class:`Document`.
 
-    :param enable_vlm: when True, figures/diagrams in PDFs are described by a VLM.
+    :param enable_vlm: when True, figures/diagrams are described by a VLM.
         The default (None) defers to configuration: the ``VLM_BACKEND`` env var
-        selects a backend (``off`` / ``smolvlm`` / ``openai``), so the whole app
-        gains figure understanding without any code changes.
+        selects a backend (``llm`` / ``openai`` / ``smolvlm`` / ``off``), so the
+        whole app gains figure understanding without any code changes.
     :param enable_ocr: OCR policy for PDFs — ``"auto"`` lets the pipeline decide
         per page (see :mod:`file_agent.parsers.routing`), ``"on"`` forces OCR,
         ``"off"`` disables it. Ignored for formats that carry their own text.
+    :param parser_profile: ``"structured"`` (default, or ``PARSER_PROFILE`` env)
+        or ``"legacy"`` to fall back to the original flat parsers.
     """
     path = Path(file_path)
     suffix = path.suffix.lower()
+    profile = resolve_parser_profile(parser_profile)
 
     with tracer.start_as_current_span("file_agent.parse_file") as span:
         span.set_attribute("file_agent.file_name", path.name)
         span.set_attribute("file_agent.file_suffix", suffix)
-        logger.info("Parsing file %s", path.name)
+        span.set_attribute("file_agent.parser_profile", profile)
+        logger.info("Parsing file %s (profile=%s)", path.name, profile)
 
-        document = _parse_by_suffix(path, suffix, enable_vlm=enable_vlm, enable_ocr=enable_ocr)
+        document = _parse_by_suffix(
+            path, suffix, enable_vlm=enable_vlm, enable_ocr=enable_ocr, profile=profile
+        )
+        document.metadata.setdefault("parser_profile", profile)
 
         span.set_attribute("file_agent.block_count", len(document.blocks))
         logger.info("Parsed %s into %d block(s)", path.name, len(document.blocks))
         return document
+
+
+def resolve_parser_profile(explicit: str | None = None) -> ParserProfile:
+    value = (explicit or os.getenv("PARSER_PROFILE") or DEFAULT_PARSER_PROFILE).strip().lower()
+    if value not in ("structured", "legacy"):
+        raise ValueError(f"PARSER_PROFILE must be 'structured' or 'legacy', got {value!r}")
+    return value  # type: ignore[return-value]
 
 
 def _parse_by_suffix(
@@ -63,42 +93,97 @@ def _parse_by_suffix(
     suffix: str,
     enable_vlm: bool | None,
     enable_ocr: OcrMode,
+    profile: ParserProfile,
 ) -> Document:
-    if suffix in {".pdf", ".docx"}:
+    if suffix == ".pdf":
         return _parse_structured(path, enable_vlm=enable_vlm, enable_ocr=enable_ocr)
-    if suffix == ".md":
-        return MarkdownParser().parse(path)
-    if suffix == ".txt":
-        return TXTParser().parse(path)
-    if suffix in {".html", ".htm"}:
-        return HTMLParser().parse(path)
-    if suffix == ".xlsx":
-        return XLSXParser().parse(path)
-    if suffix == ".pptx":
-        return PPTXParser().parse(path)
+    if suffix == ".docx":
+        if profile == "legacy":
+            return _parse_structured(path, enable_vlm=enable_vlm, enable_ocr=enable_ocr)
+        return _parse_docx(path, enable_vlm=enable_vlm, enable_ocr=enable_ocr)
 
-    raise ValueError(f"Unsupported file type: {suffix or '<no extension>'}")
+    if profile == "legacy":
+        from file_agent.parsers import legacy
+
+        parsers = {
+            ".md": legacy.MarkdownParser,
+            ".txt": legacy.TXTParser,
+            ".html": legacy.HTMLParser,
+            ".htm": legacy.HTMLParser,
+            ".xlsx": legacy.XLSXParser,
+            ".pptx": legacy.PPTXParser,
+        }
+    else:
+        parsers = {
+            ".md": MarkdownParser,
+            ".txt": TXTParser,
+            ".html": HTMLParser,
+            ".htm": HTMLParser,
+            ".xlsx": XLSXParser,
+            ".xlsm": XLSXParser,
+            ".pptx": PPTXParser,
+        }
+
+    parser_class = parsers.get(suffix)
+    if parser_class is None:
+        raise ValueError(f"Unsupported file type: {suffix or '<no extension>'}")
+    document = parser_class().parse(path)
+    if enable_vlm is not False:
+        _enhance_with_vlm(document, path, forced=enable_vlm is True)
+    return document
+
+
+def _parse_docx(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) -> Document:
+    """DOCX via python-docx (paragraph-faithful); Docling remains the fallback."""
+    try:
+        document = DOCXParser().parse(path)
+    except Exception:
+        logger.warning(
+            "python-docx failed to parse %s; falling back to Docling.", path.name, exc_info=True
+        )
+        return _parse_structured(path, enable_vlm=enable_vlm, enable_ocr=enable_ocr)
+    if enable_vlm is not False:
+        _enhance_with_vlm(document, path, forced=enable_vlm is True)
+    return document
 
 
 def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) -> Document:
     do_ocr, ocr_full_page, analysis = _resolve_ocr_policy(path, enable_ocr)
+    ocr_pages = _pages_to_ocr(path, analysis, enable_ocr) if do_ocr else []
+    vlm_ocr = _vlm_ocr_client() if do_ocr and ocr_pages else None
 
     # Make the decision observable: without this there is no way to tell whether
     # OCR ran, since a document with a full text layer never starts an engine.
     if do_ocr:
-        pages = analysis.ocr_page_numbers if analysis else []
         logger.info(
-            "Parsing %s with OCR (%s of %s pages need it: %s)",
+            "Parsing %s with OCR via %s (%s of %s pages need it: %s)",
             path.name,
-            len(pages),
+            "vlm" if vlm_ocr else resolve_ocr_engine(),
+            len(ocr_pages),
             len(analysis.pages) if analysis else "?",
-            pages or "forced",
+            ocr_pages or "forced",
         )
     else:
         logger.info("Parsing %s without OCR (text layer present on every page)", path.name)
 
+    transcribed = {}
+    if vlm_ocr is not None:
+        try:
+            transcribed = vlm_ocr.transcribe(path, ocr_pages)
+        except Exception:
+            logger.warning(
+                "VLM OCR unavailable for %s; falling back to the classic OCR engine.",
+                path.name,
+                exc_info=True,
+            )
+            transcribed = {}
+
+    # With a VLM transcript in hand Docling only needs the text layer; without
+    # one it runs the classic OCR engine on the bitmap pages as before.
+    docling_ocr = do_ocr and not transcribed
     try:
-        document = DoclingParser(do_ocr=do_ocr, ocr_full_page=ocr_full_page).parse(path)
+        parser = DoclingParser(do_ocr=docling_ocr, ocr_full_page=ocr_full_page and docling_ocr)
+        document = parser.parse(path)
     except Exception:
         logger.warning(
             "Docling failed to parse %s; falling back to the PyMuPDF parser.",
@@ -106,8 +191,18 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
             exc_info=True,
         )
         if path.suffix.lower() == ".pdf":
-            return PDFParser().parse(path)
+            document = PDFParser().parse(path)
+            if transcribed:
+                document.blocks = merge_ocr_blocks(document.blocks, transcribed)
+            return document
         raise
+
+    if transcribed:
+        document.blocks = merge_ocr_blocks(document.blocks, transcribed)
+        document.metadata["parsing_method"] = "docling+vlm_ocr"
+        document.metadata["ocr_engine"] = "vlm"
+        document.metadata["vlm_ocr_pages"] = sorted(transcribed)
+        document.build_table_of_contents()
 
     if analysis is not None:
         document.metadata["page_analysis"] = analysis.summary()
@@ -116,6 +211,34 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
         _enhance_with_vlm(document, path, forced=enable_vlm is True)
 
     return document
+
+
+def resolve_ocr_engine() -> str:
+    return (os.getenv("OCR_ENGINE") or DEFAULT_OCR_ENGINE).strip().lower()
+
+
+def _vlm_ocr_client() -> VLMPageOCR | None:
+    if resolve_ocr_engine() != "vlm":
+        return None
+    client = create_vlm_client()
+    if client is None:
+        logger.info("OCR_ENGINE=vlm but no VLM endpoint is configured; using EasyOCR instead.")
+        return None
+    return VLMPageOCR(client)
+
+
+def _pages_to_ocr(path: Path, analysis, enable_ocr: OcrMode) -> list[int]:
+    if path.suffix.lower() != ".pdf":
+        return []
+    if enable_ocr == "on" or analysis is None:
+        try:
+            import fitz
+
+            with fitz.open(str(path)) as pdf:
+                return list(range(1, len(pdf) + 1))
+        except Exception:  # pragma: no cover
+            return []
+    return list(analysis.ocr_page_numbers)
 
 
 def _resolve_ocr_policy(path: Path, enable_ocr: OcrMode):
@@ -142,11 +265,9 @@ def _resolve_ocr_policy(path: Path, enable_ocr: OcrMode):
 
 
 def _enhance_with_vlm(document: Document, path: Path, forced: bool) -> None:
-    if path.suffix.lower() != ".pdf":
-        return
-
     has_figures = any(
-        block.block_type in (BlockType.FIGURE, BlockType.IMAGE) and block.bbox
+        block.block_type in (BlockType.FIGURE, BlockType.IMAGE)
+        and (block.image_bytes is not None or (block.bbox and path.suffix.lower() == ".pdf"))
         for block in document.blocks
     )
     if not has_figures:
@@ -157,7 +278,7 @@ def _enhance_with_vlm(document: Document, path: Path, forced: bool) -> None:
         if forced:
             logger.warning(
                 "VLM requested but no backend configured; set VLM_BACKEND to "
-                "'smolvlm' (local, free) or 'openai' (endpoint via VLM_BASE_URL)."
+                "'llm' (the chat model endpoint), 'openai' (VLM_BASE_URL) or 'smolvlm'."
             )
         return
 

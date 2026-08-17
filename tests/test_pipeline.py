@@ -3,6 +3,7 @@ import pytest
 from openpyxl import Workbook
 from pptx import Presentation
 
+from file_agent.document import BlockType
 from file_agent.pipeline import parse_file
 
 
@@ -77,8 +78,9 @@ def test_parse_file_uses_html_parser(tmp_path):
     assert document.file_name == "example.html"
     assert document.file_type == "html"
     assert len(document.blocks) == 1
-    assert document.blocks[0].type == "html_text"
+    assert document.blocks[0].block_type == BlockType.TEXT
     assert document.blocks[0].text == "Hello from HTML"
+    assert document.metadata["parser_profile"] == "structured"
 
 
 def test_parse_file_uses_xlsx_parser(tmp_path):
@@ -89,9 +91,8 @@ def test_parse_file_uses_xlsx_parser(tmp_path):
 
     assert document.file_name == "example.xlsx"
     assert document.file_type == "xlsx"
-    assert len(document.blocks) == 1
-    assert document.blocks[0].type == "xlsx_sheet"
-    assert "Alice\t20" in document.blocks[0].text
+    assert [b.block_type for b in document.blocks] == [BlockType.HEADING, BlockType.TABLE]
+    assert "| Alice | 20 |" in document.blocks[1].text
 
 
 def test_parse_file_uses_pptx_parser(tmp_path):
@@ -102,10 +103,29 @@ def test_parse_file_uses_pptx_parser(tmp_path):
 
     assert document.file_name == "example.pptx"
     assert document.file_type == "pptx"
+    assert document.blocks[0].block_type == BlockType.HEADING
+    assert document.blocks[0].text == "Project Overview"
+    assert any("PowerPoint content" in b.text for b in document.blocks)
+
+
+def test_parse_file_legacy_profile_uses_flat_parsers(tmp_path, monkeypatch):
+    file_path = tmp_path / "example.pptx"
+    create_pptx(file_path)
+    monkeypatch.setenv("PARSER_PROFILE", "legacy")
+
+    document = parse_file(file_path)
+
     assert len(document.blocks) == 1
     assert document.blocks[0].type == "pptx_slide"
-    assert "Project Overview" in document.blocks[0].text
-    assert "PowerPoint content" in document.blocks[0].text
+    assert document.metadata["parser_profile"] == "legacy"
+
+
+def test_parse_file_rejects_unknown_profile(tmp_path):
+    file_path = tmp_path / "example.md"
+    file_path.write_text("# hi", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="PARSER_PROFILE"):
+        parse_file(file_path, parser_profile="fancy")
 
 
 def test_parse_file_rejects_unsupported_extension(tmp_path):

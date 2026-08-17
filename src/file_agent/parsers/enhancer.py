@@ -1,6 +1,9 @@
+import io
 import logging
 import os
 from pathlib import Path
+
+from PIL import Image
 
 from file_agent.document import Block, BlockType, Document
 from file_agent.telemetry import tracer
@@ -15,15 +18,20 @@ logger = logging.getLogger(__name__)
 FIGURE_PROMPT = (
     "Describe only what is actually visible in this image. State its type "
     "(chart, diagram, screenshot, table, photo) and transcribe the text you can "
-    "read: title, axis labels, legend entries, series and node names. Do not "
-    "guess the subject, and do not invent numbers, names, dates or context that "
-    "are not shown. If the image is decorative or unreadable, say exactly that "
-    "in one short sentence."
+    "read: title, axis labels, legend entries, series and node names, and the "
+    "values shown. If it is a diagram or flowchart, list the nodes and the "
+    "connections between them. Do not guess the subject, and do not invent "
+    "numbers, names, dates or context that are not shown. If the image is "
+    "decorative or unreadable, say exactly that in one short sentence. "
+    "Answer in the language of the text in the image (Russian if the image "
+    "contains Russian text)."
 )
 
 # Figures smaller than this (in PDF points squared, ~1 pt = 1/72") are almost
 # always icons, logos or bullets — not worth a VLM call.
 DEFAULT_MIN_FIGURE_AREA = 5000.0
+# Embedded images (DOCX/PPTX) have no page geometry; use pixel area instead.
+DEFAULT_MIN_IMAGE_PIXELS = 120 * 120
 # Upper bound on VLM calls per document, so a 100-figure deck cannot silently
 # turn into a 100-request bill. The largest figures are described first.
 DEFAULT_MAX_FIGURES = 8
@@ -32,11 +40,12 @@ DEFAULT_MAX_FIGURES = 8
 class DocumentEnhancer:
     """Enriches figure/image blocks with a VLM-generated textual description.
 
-    Only blocks that a parser classified as figures and located with a bounding
-    box on a PDF page can be cropped and sent to the VLM. To keep the cost
-    predictable, tiny decorative images are skipped and at most
-    ``max_figures`` figures per document are described (largest first —
-    the big diagram matters more than a footer icon).
+    Figures come from two sources: PDF pages (cropped by bounding box) and
+    container formats whose parsers attach the embedded image bytes to the
+    block (DOCX, PPTX, Docling pictures). To keep the cost predictable, tiny
+    decorative images are skipped and at most ``max_figures`` figures per
+    document are described (largest first — the big diagram matters more than
+    a footer icon).
     """
 
     def __init__(
@@ -58,13 +67,9 @@ class DocumentEnhancer:
         )
 
     def enhance(self, doc: Document, file_path: Path) -> Document:
-        if Path(file_path).suffix.lower() != ".pdf":
-            # Cropping figures requires rendering PDF page regions; other formats
-            # are not supported by the VLM enhancer yet.
-            return doc
-
-        candidates = [block for block in doc.blocks if self._should_describe(block)]
-        candidates.sort(key=self._bbox_area, reverse=True)
+        is_pdf = Path(file_path).suffix.lower() == ".pdf"
+        candidates = [block for block in doc.blocks if self._should_describe(block, is_pdf)]
+        candidates.sort(key=self._figure_area, reverse=True)
         selected = candidates[: self.max_figures]
         skipped = len(candidates) - len(selected)
         if skipped > 0:
@@ -82,7 +87,7 @@ class DocumentEnhancer:
             described = 0
             for block in selected:
                 try:
-                    image = extract_image_from_pdf(file_path, block.page_number, block.bbox)
+                    image = self._load_image(block, file_path, is_pdf)
                     if image is None:
                         continue
 
@@ -97,8 +102,16 @@ class DocumentEnhancer:
                     described += 1
                     logger.debug("Described block %s on page %s", block.id, block.page_number)
                 except Exception as exc:
-                    logger.warning("VLM description failed for block %s: %s", block.id, exc)
+                    # One failure almost always means every call will fail (endpoint
+                    # down, text-only model): stop instead of paying a timeout per figure.
+                    logger.warning(
+                        "VLM description failed for block %s: %s; skipping the remaining figures",
+                        block.id,
+                        exc,
+                    )
                     block.metadata["vlm_error"] = str(exc)
+                    doc.metadata["vlm_error"] = str(exc)
+                    break
 
             span.set_attribute("file_agent.described_count", described)
 
@@ -106,13 +119,51 @@ class DocumentEnhancer:
             doc.metadata["vlm_described_figures"] = described
         return doc
 
-    def _should_describe(self, block: Block) -> bool:
+    def _should_describe(self, block: Block, is_pdf: bool) -> bool:
+        if block.block_type not in (BlockType.FIGURE, BlockType.IMAGE):
+            return False
+        if block.vlm_description:
+            return False
+        if block.image_bytes is not None:
+            return self._image_pixels(block) >= DEFAULT_MIN_IMAGE_PIXELS
         return (
-            block.block_type in (BlockType.FIGURE, BlockType.IMAGE)
+            is_pdf
             and block.bbox is not None
             and block.page_number is not None
             and self._bbox_area(block) >= self.min_figure_area
         )
+
+    def _figure_area(self, block: Block) -> float:
+        if block.image_bytes is not None:
+            return float(self._image_pixels(block))
+        return self._bbox_area(block)
+
+    @staticmethod
+    def _load_image(block: Block, file_path: Path, is_pdf: bool) -> Image.Image | None:
+        if block.image_bytes is not None:
+            try:
+                image = Image.open(io.BytesIO(block.image_bytes))
+                image.load()
+                return image.convert("RGB")
+            except Exception as exc:
+                logger.debug("Unreadable embedded image in block %s: %s", block.id, exc)
+                return None
+        if is_pdf and block.bbox is not None and block.page_number is not None:
+            return extract_image_from_pdf(file_path, block.page_number, block.bbox)
+        return None
+
+    @staticmethod
+    def _image_pixels(block: Block) -> int:
+        cached = block.metadata.get("_image_pixels")
+        if isinstance(cached, int):
+            return cached
+        try:
+            with Image.open(io.BytesIO(block.image_bytes or b"")) as image:
+                pixels = image.width * image.height
+        except Exception:
+            pixels = 0
+        block.metadata["_image_pixels"] = pixels
+        return pixels
 
     @staticmethod
     def _bbox_area(block: Block) -> float:
