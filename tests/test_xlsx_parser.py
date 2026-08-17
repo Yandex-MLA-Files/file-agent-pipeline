@@ -73,3 +73,33 @@ def test_legacy_xlsx_parser_still_returns_one_block_per_sheet(tmp_path):
     assert [b.type for b in document.blocks] == ["xlsx_sheet", "xlsx_sheet"]
     assert "Name\tAge\tCity" in document.blocks[0].text
     assert document.blocks[0].metadata["sheet_name"] == "People"
+
+
+def test_xlsx_parser_adds_table_profile_with_aggregates(tmp_path):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sales"
+    sheet.append(["id", "date", "product", "amount", "region"])
+    rows = [
+        (1, "2026-01-01", "Bike", 100.5, "Utah"),
+        (2, "2026-01-02", "Shoes", 50.0, "Texas"),
+        (3, "2026-01-03", "Bike", 200.0, "Utah"),
+        (4, "2026-01-04", "Hat", 10.0, "Ohio"),
+    ]
+    for row in rows:
+        sheet.append(list(row))
+    file_path = tmp_path / "sales.xlsx"
+    workbook.save(file_path)
+    workbook.close()
+
+    document = XLSXParser().parse(file_path)
+
+    profiles = [b for b in document.blocks if b.metadata.get("table_profile")]
+    assert len(profiles) == 1
+    text = profiles[0].text
+    assert "строк: 4" in text
+    assert "amount: минимум 10 (Hat), максимум 200 (Bike), сумма 360.50" in text
+    assert "region: уникальных значений 3: Utah (2), Ohio (1), Texas (1)" in text
+    assert "сумма amount по region (по убыванию): Utah: 300.50, Texas: 50, Ohio: 10" in text
+    # id is an identifier, not a measure
+    assert "id: минимум" not in text

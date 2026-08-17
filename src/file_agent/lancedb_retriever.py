@@ -30,6 +30,12 @@ DEFAULT_TABLE_NAME = "chunks"
 # hybrid hits are re-scored (default 4x top_k, at least 20).
 DEFAULT_RERANKER_CANDIDATES_FACTOR = 4
 DEFAULT_RERANKER_MIN_CANDIDATES = 20
+# With several indexed documents, one document can monopolise the top-k for a
+# question that spans two files ("compare A and B"). Diversification keeps the
+# best hit of every document that appears among the candidates before filling
+# the remaining slots by score. ``RETRIEVAL_DIVERSIFY_DOCS=false`` disables it.
+DEFAULT_DIVERSIFY_DOCS = True
+DEFAULT_DIVERSIFY_CANDIDATES = 20
 
 
 class EmbeddingModel(Protocol):
@@ -116,6 +122,7 @@ class LanceDBRetriever:
                 return []
 
             reranker = self._reranker or _load_default_reranker()
+            diversify = _bool_env("RETRIEVAL_DIVERSIFY_DOCS", DEFAULT_DIVERSIFY_DOCS)
             candidate_count = top_k
             if reranker is not None:
                 candidate_count = max(
@@ -123,6 +130,8 @@ class LanceDBRetriever:
                     DEFAULT_RERANKER_MIN_CANDIDATES,
                     _int_env("RERANKER_CANDIDATES", 0),
                 )
+            if diversify:
+                candidate_count = max(candidate_count, DEFAULT_DIVERSIFY_CANDIDATES, top_k)
 
             query_vector = self._encode([query])[0].tolist()
             rows = (
@@ -143,11 +152,39 @@ class LanceDBRetriever:
             results = [self._to_search_result(row) for row in rows]
             if reranker is not None and len(results) > 1:
                 results = self._rerank(reranker, query, results)
+            if diversify:
+                results = self._diversify_by_document(results, top_k)
             results = results[:top_k]
             span.set_attribute("file_agent.result_count", len(results))
             span.set_attribute("file_agent.reranked", reranker is not None)
             logger.info("Query %r returned %d result(s)", query, len(results))
             return results
+
+    @staticmethod
+    def _diversify_by_document(results: list[SearchResult], top_k: int) -> list[SearchResult]:
+        """Guarantee the best hit of each document a slot, then fill by score.
+
+        Results are already sorted by relevance. When candidates come from
+        several files, the first pass takes the top hit of each file in score
+        order (bounded by ``top_k``); the second pass appends the remaining
+        results in their original order. With a single document this is the
+        identity.
+        """
+        seen_docs: set[str] = set()
+        head: list[SearchResult] = []
+        for result in results:
+            doc = str(result.chunk.metadata.get("source_file") or "")
+            if doc in seen_docs:
+                continue
+            seen_docs.add(doc)
+            head.append(result)
+            if len(head) >= top_k:
+                break
+        if len(seen_docs) <= 1:
+            return results
+        chosen = {id(result) for result in head}
+        tail = [result for result in results if id(result) not in chosen]
+        return head + tail
 
     @staticmethod
     def _rerank(reranker: Reranker, query: str, results: list[SearchResult]) -> list[SearchResult]:
@@ -248,6 +285,13 @@ def _load_reranker(name: str) -> Reranker:
 def _load_default_reranker() -> Reranker | None:
     name = resolve_reranker_model_name()
     return _load_reranker(name) if name else None
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _int_env(name: str, default: int) -> int:

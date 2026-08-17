@@ -174,3 +174,51 @@ def test_optional_reranker_reorders_hybrid_candidates():
     assert results[0].score == 0.9
     # All hybrid candidates were offered to the reranker, then cut to top_k.
     assert len(reranker.calls[0]) == 3
+
+
+def test_multi_document_results_include_each_documents_best_hit():
+    chunks = [
+        Chunk(id="a1", text="python code one", metadata={"source_file": "a.md"}),
+        Chunk(id="a2", text="python code two", metadata={"source_file": "a.md"}),
+        Chunk(id="a3", text="python code three", metadata={"source_file": "a.md"}),
+        Chunk(id="b1", text="python notes", metadata={"source_file": "b.md"}),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "python code one": [1.0, 0.0],
+            "python code two": [1.0, 0.0],
+            "python code three": [1.0, 0.0],
+            "python notes": [0.7, 0.7],
+            "python": [1.0, 0.0],
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+    results = retriever.search("python", top_k=2)
+
+    files = {result.chunk.metadata["source_file"] for result in results}
+    assert files == {"a.md", "b.md"}
+
+
+def test_document_diversification_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("RETRIEVAL_DIVERSIFY_DOCS", "false")
+    chunks = [
+        Chunk(id="a1", text="python code one", metadata={"source_file": "a.md"}),
+        Chunk(id="a2", text="python code two", metadata={"source_file": "a.md"}),
+        Chunk(id="b1", text="python notes", metadata={"source_file": "b.md"}),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "python code one": [1.0, 0.0],
+            "python code two": [1.0, 0.0],
+            "python notes": [0.0, 1.0],
+            "python code": [1.0, 0.0],
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+    results = retriever.search("python code", top_k=2)
+
+    assert {result.chunk.metadata["source_file"] for result in results} == {"a.md"}
