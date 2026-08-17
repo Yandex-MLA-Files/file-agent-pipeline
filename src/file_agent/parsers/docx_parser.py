@@ -176,6 +176,7 @@ class _BodyWalker:
     def _handle_paragraph(self, paragraph: Paragraph) -> None:
         images = self._paragraph_images(paragraph)
         text = clean_text(self._paragraph_text(paragraph))
+        text = self._append_link_targets(paragraph, text)
         text = self._append_note_markers(paragraph, text)
         text_boxes = self._text_boxes(paragraph)
 
@@ -322,6 +323,34 @@ class _BodyWalker:
                 BlockType.TEXT,
                 {"text_box": True, "text_box_index": self.text_box_count},
             )
+
+    def _append_link_targets(self, paragraph: Paragraph, text: str) -> str:
+        """Keep the address of a hyperlink, not only the words it hides behind.
+
+        A manual reads "скачайте установщик" with the URL only in the
+        relationship; asked where to download from, the pipeline had nothing to
+        answer with. External targets are appended once, and only when the text
+        does not already spell them out.
+        """
+        if not text:
+            return text
+        targets: list[str] = []
+        for link in paragraph._p.iter(qn("w:hyperlink")):
+            rid = link.get(qn("r:id"))
+            if not rid:
+                continue
+            try:
+                relationship = self.docx.part.rels[rid]
+            except (KeyError, AttributeError):
+                continue
+            if not getattr(relationship, "is_external", False):
+                continue
+            target = str(getattr(relationship, "target_ref", "") or "").strip()
+            if target and target not in text and target not in targets:
+                targets.append(target)
+        if not targets:
+            return text
+        return f"{text} ({', '.join(targets)})"
 
     def _note_references(self, paragraph: Paragraph) -> list[tuple[str, str]]:
         references: list[tuple[str, str]] = []

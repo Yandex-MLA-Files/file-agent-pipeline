@@ -148,3 +148,30 @@ def test_placeholder_document_properties_do_not_become_the_title(tmp_path):
     # python-docx stamps "Word Document" into core properties; the real title
     # is the first heading of the body.
     assert document.metadata["title"] == "Регламент"
+
+
+def test_hyperlink_target_is_kept_next_to_its_text(tmp_path):
+    """The words hide the address; a question about "where to download" needs it."""
+    import docx as python_docx
+
+    path = tmp_path / "manual.docx"
+    document = python_docx.Document()
+    paragraph = document.add_paragraph()
+    run = paragraph.add_run("скачайте установщик")
+    link = paragraph._p.makeelement(
+        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}hyperlink", {}
+    )
+    rid = document.part.relate_to(
+        "https://www.mongodb.com/try/download/compass",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    link.set("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", rid)
+    paragraph._p.replace(run._r, link)
+    link.append(run._r)
+    document.save(path)
+
+    parsed = DOCXParser().parse(path)
+    body = next(b for b in parsed.blocks if "установщик" in b.text)
+
+    assert body.text == ("скачайте установщик (https://www.mongodb.com/try/download/compass)")
