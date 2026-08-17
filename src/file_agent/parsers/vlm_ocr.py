@@ -269,10 +269,14 @@ class VLMPageOCR:
 BLANK_INK_RATIO = 0.00005
 # Ink coverage above which a page is considered to carry text (not just a logo).
 TEXT_INK_RATIO = 0.015
-# Ink-to-character ratio of a typical 150 dpi text page is ~40 px per character;
-# a transcript far below what the ink implies means the model skipped content.
-INK_PIXELS_PER_CHAR = 40.0
-SHORT_TRANSCRIPT_RATIO = 0.35
+# Expected content is estimated from the number of *text lines* on the page,
+# not from raw ink: a slide with one chart covers a third of the page in ink
+# while carrying three lines of text, and an ink-based estimate flagged almost
+# every such page as truncated. A conservative characters-per-line figure and a
+# low ratio keep this check aimed at gross omissions only.
+CHARS_PER_TEXT_LINE = 30
+SHORT_TRANSCRIPT_RATIO = 0.3
+MIN_LINES_FOR_LENGTH_CHECK = 8
 # A line repeated this many times in a row is a decoding loop, not a document.
 MAX_REPEATED_LINES = 4
 _CJK = re.compile(r"[぀-ヿ一-鿿]")
@@ -314,8 +318,9 @@ def validate_transcript(
         return TranscriptCheck(False, "foreign_script")
 
     if image is not None:
-        expected = ink * image.width * image.height / INK_PIXELS_PER_CHAR
-        if expected > 200 and len(text) < SHORT_TRANSCRIPT_RATIO * expected:
+        lines = text_line_count(image)
+        expected = lines * CHARS_PER_TEXT_LINE
+        if lines >= MIN_LINES_FOR_LENGTH_CHECK and len(text) < SHORT_TRANSCRIPT_RATIO * expected:
             # Either the model stopped early (retry with a bigger budget helps)
             # or it summarized instead of transcribing (the local engine wins).
             return TranscriptCheck(False, "short_transcript", retryable=True)
@@ -336,6 +341,27 @@ def ink_ratio(image: Image.Image) -> float:
         return float((grayscale < 160).mean())
     except Exception:  # pragma: no cover - numpy always available in practice
         return 1.0
+
+
+def text_line_count(image: Image.Image) -> int:
+    """Number of text lines on the page, from the horizontal ink profile.
+
+    Rows of a rendered page that are partly inked are text; rows that are
+    almost fully inked belong to a figure, a photo or a filled table header and
+    are ignored. Counting the groups of consecutive text rows gives a estimate
+    of how much writing the page holds that a chart cannot inflate.
+    """
+    try:
+        import numpy as np
+
+        dark = np.asarray(image.convert("L").resize((256, 360))) < 160
+        row_ink = dark.mean(axis=1)
+        is_text_row = (row_ink > 0.02) & (row_ink < 0.6)
+        # Count rising edges: each group of consecutive text rows is one line.
+        padded = np.concatenate(([False], is_text_row))
+        return int(np.sum(padded[1:] & ~padded[:-1]))
+    except Exception:  # pragma: no cover - numpy always available in practice
+        return 0
 
 
 def _max_consecutive_repeats(lines: list[str]) -> int:

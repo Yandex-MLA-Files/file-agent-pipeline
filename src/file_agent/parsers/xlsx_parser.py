@@ -146,6 +146,11 @@ class XLSXParser(BaseParser):
                     "parsing_method": "openpyxl",
                     "sheet_count": len(workbook.worksheets),
                     "table_count": table_count,
+                    # A workbook has no title of its own, and the first sheet
+                    # name is a poor stand-in ("Sheet: Comparisons" as the title
+                    # of every chunk of every other sheet). The file name is what
+                    # questions actually refer to.
+                    "title": path.name,
                 },
             )
             document.build_table_of_contents()
