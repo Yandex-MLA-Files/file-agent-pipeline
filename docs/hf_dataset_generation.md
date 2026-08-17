@@ -158,6 +158,19 @@ tmux attach -t hf-generation
 To continue an interrupted run, repeat the same command with the same
 `RUN_DIR` and `--resume`. The generation parameters must remain unchanged.
 
+Add `--continue-on-error` so a row whose document cannot be parsed, whose LLM
+call fails, or which exceeds `--record-timeout SECONDS` (Linux/macOS) is
+recorded as `[PIPELINE_ERROR] <reason>` with empty contexts instead of
+aborting the whole run. The judge then scores such rows as failures (0), which
+is the team convention; `failed_count` in `run_manifest.json` says how many.
+Each checkpoint also records `timing.elapsed_seconds` for the row.
+
+The parsing/chunking configuration is recorded in the manifest and in every
+checkpoint (`parser_profile`, `chunking_strategy`, `embedding_model`,
+`reranker_model`, `qa_prompt`, ...); runs with different settings must use
+different `RUN_DIR`s. See `docs/parsing_and_chunking.md` for the settings and
+measured results.
+
 ## 4. Output files
 
 A completed run is stored in:
