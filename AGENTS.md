@@ -68,14 +68,7 @@ Users can upload one or more documents, preview extracted text, find relevant ch
 - A QA prompt layer (grounded, complete answers with compact source headers;
   `QA_PROMPT=v2` appends a source footer to the answer, `v1` is the original
   prompt) and end-to-end RAG orchestration.
-- A multi-step document agent (`src/file_agent/agent/`): a think-act-observe
-  loop where the LLM plans tool calls (`search_documents`, `list_documents`,
-  `read_section`) over the indexed documents; tool calls are JSON parsed
-  client-side, so any OpenAI-compatible backend works without server-side
-  tool-call support. Bounded session memory (`AgentSession`) enables
-  follow-up questions (see `docs/agent.md`).
-- An `LLMClient` adapter built on the official OpenAI Python SDK, plus a
-  `chat(messages)` method for multi-turn conversations.
+- An `LLMClient` adapter built on the official OpenAI Python SDK.
 - Yandex AI Studio and local OpenAI-compatible LLM backends.
 - A Streamlit UI for multi-file upload, preview, search, and answer generation.
 - Pytest coverage for the main layers.
@@ -111,7 +104,6 @@ src/file_agent/
   llm/                        # LLM interface, adapter, and factory
 tests/                        # Pytest suite
 docs/local_inference.md       # Local LLM endpoint setup
-docs/agent.md                 # Document agent design and serving notes
 docs/parsing_and_chunking.md  # Parsing/chunking design and evaluation results
 ```
 
@@ -157,7 +149,9 @@ docs/parsing_and_chunking.md  # Parsing/chunking design and evaluation results
 Do not add the following without a separate task:
 
 - LangChain or LangGraph;
-- complex agent architecture;
+- an agent loop or agent tooling in this branch: the baseline stays
+  agent-free on purpose, because every teammate builds their own agent on
+  top of it and a shared `src/file_agent/agent/` would collide;
 - a standalone vector database or FAISS;
 - Excel formula evaluation.
 

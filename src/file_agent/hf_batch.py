@@ -97,7 +97,6 @@ def generate_hf_qa_records(
     overlap: int = 100,
     retriever: Retriever | None = None,
     resume: bool = False,
-    answer_mode: str = "rag",
     continue_on_error: bool = False,
     record_timeout: float | None = None,
 ) -> BatchGenerationResult:
@@ -161,7 +160,6 @@ def generate_hf_qa_records(
                         overlap=overlap,
                         retriever=retriever,
                         document_loader=document_loader,
-                        answer_mode=answer_mode,
                     )
             except (Exception, RecordTimeoutError) as exc:  # noqa: BLE001 - recorded per row
                 if not continue_on_error:

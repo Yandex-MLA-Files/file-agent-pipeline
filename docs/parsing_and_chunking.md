@@ -211,11 +211,11 @@ temperature 0, top-k 5) both as the answering model and as the judge
 
 | Run | What it is |
 |---|---|
-| `pc-baseline-rag-127` | Code before this branch (`main` + agent branch): Docling for PDF/DOCX with the pypdfium backend, flat PPTX/XLSX/HTML/TXT parsers, original chunker, `paraphrase-multilingual-MiniLM-L12-v2` (128-token window), original prompt. 5 rows could not be processed (the original chunker never finishes on `Курс лекций Основы философии.docx`; recorded as failures after a 240 s timeout). |
+| `pc-baseline-rag-127` | Code before this branch: Docling for PDF/DOCX with the pypdfium backend, flat PPTX/XLSX/HTML/TXT parsers, original chunker, `paraphrase-multilingual-MiniLM-L12-v2` (128-token window), original prompt. 5 rows could not be processed (the original chunker never finishes on `Курс лекций Основы философии.docx`; recorded as failures after a 240 s timeout). |
 | `pc-structured-rag-127` (v2) | Structured parsers + structured chunker + `bge-m3` + VLM figure descriptions and VLM page OCR through the chat model + QA prompt v2. |
 | `pc-structured-v4-127` (v4) | v2 + Docling `docling-parse` backend with ACCURATE TableFormer (row labels of financial tables recovered) + cross-encoder reranking (`bge-reranker-v2-m3` over the top-20 hybrid hits) + document-diverse top-k + spreadsheet profile blocks + prompt rule for comparison/"does it mention" questions. |
 | `pc-structured-v4-norerank-127` | v4 without the reranker (ablation). Note: only one ingestion process fits next to vLLM on the shared A100 (~8 GB free); a second concurrent generation run fails with CUDA OOM. |
-| `pc-structured-v4-agent-127` | v4 ingestion with the multi-step agent (`--answer-mode agent`). |
+| `pc-structured-v4-agent-127` | v4 ingestion answered by the multi-step agent. Measured from the separate `feat/agent` branch: this branch is the shared baseline and carries no agent, so the row is kept as evidence about the ingestion, not as a feature of it. |
 | `pc-v4-nocite-127` | The v4 answers with the `Источники: …` footer stripped by a regular expression — identical answers, identical contexts, so the difference isolates what the footer costs in the judge's eyes. |
 | `pc-v5-rag-127` (v5, **default configuration**) | v4 + OCR `auto` (validated VLM transcripts, concurrent, EasyOCR per-page fallback) + spreadsheet fragment merging and workbook overview + table row records + hyphenation repair + document-scaled figure budget + QA prompt v3 (no source footer). |
 | `pc-v6-concise-127` | v5 + QA prompt v4 (answer the question and nothing beside it) and the late fixes: document title no longer taken from "Оглавление", VLM repair of degenerate PDF tables, automatic profiles for tables outside spreadsheets. |
@@ -229,7 +229,7 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | baseline (old code) | 127 | 5 | 0.686 | 0.412 | 0.538 | 0.548 | 0.605 | — |
 | structured v2 | 127 | 0 | 0.847 | 0.593 | 0.738 | 0.715 | 0.786 | 22.5 |
 | structured v4 | 127 | 0 | 0.840 | 0.601 | 0.831 | 0.767 | 0.811 | 26.2 |
-| v4 + agent mode | 127 | 0 | 0.751 | 0.537 | 0.861 | 0.768 | 0.824 | 36.4 |
+| v4 + agent mode (from `feat/agent`) | 127 | 0 | 0.751 | 0.537 | 0.861 | 0.768 | 0.824 | 36.4 |
 | v4 without reranker | 127 | 0 | 0.837 | 0.604 | 0.855 | 0.705 | 0.827 | 25.0 |
 | v4, source footer stripped | 127 | 0 | 0.945 | 0.603 | 0.830 | 0.760 | 0.814 | — |
 | **v5 (default)** | 127 | 0 | **0.958** | 0.605 | 0.831 | 0.777 | **0.865** | **18.5** |
@@ -312,19 +312,21 @@ Reading the table:
   precision (+0.06); the other metrics move within judge noise (±0.02), so
   the reranker is a recommended but optional setting (`RERANKER_MODEL`),
   costing ~1 s per question on the GPU.
-- Agent mode on the same ingestion reaches the highest answer relevancy and
+- Agent mode (run from `feat/agent`) on the same ingestion reaches the
+  highest answer relevancy and
   context recall (it can search twice and read whole sections), but the
   judge scores its faithfulness lower: the agent also reads sections through
   `read_section`, and that text is not part of the exported `contexts`
   the judge checks the answer against, so grounded statements look
   unsupported. Single-pass RAG remains the better default for the judge
-  protocol; the agent is the tool for multi-hop questions.
+  protocol; an agent built on this baseline is the tool for multi-hop
+  questions.
 - Remaining weak spots: questions that need cross-file joins over raw
   spreadsheet rows (e.g. the intersection of product names of two files),
   reference answers not grounded in the document (the tea question about
   cold-season drinking has no such passage in `Чай.md`), and multi-hop
   questions that combine a fact from one document with a claim about the
-  other; the agent mode is the intended tool for the latter.
+  other; an agent built on this baseline is the intended tool for the latter.
 
 ### 3.3 Per-format observations
 

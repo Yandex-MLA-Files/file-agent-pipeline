@@ -7,11 +7,6 @@ RAG pipeline for answering questions about documents:
 - retrieve relevant chunks with LanceDB;
 - generate an answer with an OpenAI-compatible LLM.
 
-Two answer modes are available: single-pass RAG (one retrieval, one LLM
-call) and a multi-step agent that plans its own tool calls — search,
-document overview, reading whole sections — before answering. See
-[docs/agent.md](docs/agent.md).
-
 Every format is parsed into typed blocks (headings with levels, paragraphs,
 lists, Markdown tables, figures, code): PDF via Docling, DOCX via python-docx,
 PPTX/XLSX/HTML/Markdown/TXT with dedicated structure-aware parsers. Chunks are
