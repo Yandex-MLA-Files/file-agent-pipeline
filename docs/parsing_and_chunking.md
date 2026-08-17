@@ -231,6 +231,7 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | structured v4 | 127 | 0 | 0.840 | 0.601 | 0.831 | 0.767 | 0.811 | 26.2 |
 | v4 + agent mode | 127 | 0 | 0.751 | 0.537 | 0.861 | 0.768 | 0.824 | 36.4 |
 | v4 without reranker | 127 | 0 | 0.837 | 0.604 | 0.855 | 0.705 | 0.827 | 25.0 |
+| v4, source footer stripped | 127 | 0 | 0.945 | 0.603 | 0.830 | 0.760 | 0.814 | — |
 | **v5 (default)** | 127 | 0 | **0.958** | 0.605 | 0.831 | 0.777 | **0.865** | **18.5** |
 
 Means over successfully processed rows only differ for the baseline (0.715 /
@@ -254,6 +255,20 @@ reference. Two properties of that protocol dominate the number:
 
 Faithfulness, context precision and context recall are stable and are what
 the v4 → v5 comparison rests on.
+
+The `pc-v4-nocite-127` row is a controlled experiment that separates the two
+kinds of change, because it holds the pipeline fixed and edits only the answer
+text:
+
+- **The source footer alone cost 0.105 faithfulness** (0.840 → 0.945 with the
+  same answers, same retrieval, same contexts).
+- **The judge is stable on the context metrics**: with byte-identical
+  contexts, precision and recall moved by 0.007 and 0.003 — that is the noise
+  floor for those columns, so v5's +0.054 recall is a real effect of the
+  ingestion changes, not measurement drift.
+- **The footer was not what produced the zero correctness scores**: they are
+  still there without it (0.601 → 0.603). Those come from the completeness of
+  the answers, which is what prompt v4 addresses.
 
 Reading the table:
 
