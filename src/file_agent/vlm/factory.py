@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 # no second model to deploy, no extra GPU memory.
 DEFAULT_VLM_BACKEND = "llm"
 DEFAULT_VLM_TIMEOUT_SECONDS = 180.0
-DEFAULT_VLM_MAX_TOKENS = 1200
+# Figure descriptions are short; page transcription passes its own budget.
+DEFAULT_VLM_MAX_TOKENS = 400
 
 
 def create_vlm_client() -> VLMClient | None:

@@ -41,7 +41,7 @@ class OpenAICompatibleVLMClient(VLMClient):
         self.enable_thinking = enable_thinking
         self.temperature = temperature
 
-    def describe_image(self, image: Image.Image, prompt: str) -> str:
+    def describe_image(self, image: Image.Image, prompt: str, max_tokens: int | None = None) -> str:
         with tracer.start_as_current_span("file_agent.vlm_describe_image") as span:
             span.set_attribute("file_agent.model", self.model)
 
@@ -66,7 +66,7 @@ class OpenAICompatibleVLMClient(VLMClient):
                             ],
                         }
                     ],
-                    max_tokens=self.max_tokens,
+                    max_tokens=max_tokens or self.max_tokens,
                     temperature=self.temperature,
                     **extra,
                 )

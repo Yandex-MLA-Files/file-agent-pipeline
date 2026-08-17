@@ -16,7 +16,7 @@ class ScriptedVLM(VLMClient):
         self.replies = list(replies)
         self.calls = []
 
-    def describe_image(self, image: Image.Image, prompt: str) -> str:
+    def describe_image(self, image: Image.Image, prompt: str, max_tokens=None) -> str:
         self.calls.append((image.size, prompt))
         return self.replies.pop(0)
 

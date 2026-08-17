@@ -1,6 +1,7 @@
 import io
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PIL import Image
@@ -35,6 +36,9 @@ DEFAULT_MIN_IMAGE_PIXELS = 120 * 120
 # Upper bound on VLM calls per document, so a 100-figure deck cannot silently
 # turn into a 100-request bill. The largest figures are described first.
 DEFAULT_MAX_FIGURES = 8
+# Figures of one document are described concurrently: vLLM batches the
+# requests, so wall-clock time is close to that of a single call.
+DEFAULT_VLM_CONCURRENCY = 4
 
 
 class DocumentEnhancer:
@@ -85,39 +89,58 @@ class DocumentEnhancer:
             span.set_attribute("file_agent.figure_candidates", len(candidates))
 
             described = 0
-            for block in selected:
-                try:
-                    image = self._load_image(block, file_path, is_pdf)
-                    if image is None:
-                        continue
-
-                    description = self.vlm_client.describe_image(image, FIGURE_PROMPT)
-                    if not description:
-                        continue
-                    block.vlm_description = description
-                    # Fold the description into the block text so it becomes part of
-                    # the indexed/searchable content and the Markdown export.
-                    addition = f"[Image description]: {description}"
-                    block.text = f"{block.text}\n\n{addition}".strip() if block.text else addition
-                    described += 1
-                    logger.debug("Described block %s on page %s", block.id, block.page_number)
-                except Exception as exc:
-                    # One failure almost always means every call will fail (endpoint
-                    # down, text-only model): stop instead of paying a timeout per figure.
-                    logger.warning(
-                        "VLM description failed for block %s: %s; skipping the remaining figures",
-                        block.id,
-                        exc,
-                    )
-                    block.metadata["vlm_error"] = str(exc)
-                    doc.metadata["vlm_error"] = str(exc)
-                    break
+            if selected:
+                # The first figure runs alone: if the endpoint is down or the model
+                # is text-only it fails fast and the rest is skipped instead of
+                # paying a timeout per figure. The remaining figures run concurrently.
+                first, rest = selected[0], selected[1:]
+                outcome = self._describe(first, file_path, is_pdf)
+                if isinstance(outcome, Exception):
+                    self._record_failure(doc, first, outcome)
+                    rest = []
+                else:
+                    described += int(outcome)
+                if rest:
+                    workers = max(1, int(os.getenv("VLM_CONCURRENCY", DEFAULT_VLM_CONCURRENCY)))
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        outcomes = list(
+                            pool.map(lambda b: self._describe(b, file_path, is_pdf), rest)
+                        )
+                    for block, outcome in zip(rest, outcomes, strict=True):
+                        if isinstance(outcome, Exception):
+                            self._record_failure(doc, block, outcome)
+                        else:
+                            described += int(outcome)
 
             span.set_attribute("file_agent.described_count", described)
 
         if described:
             doc.metadata["vlm_described_figures"] = described
         return doc
+
+    def _describe(self, block: Block, file_path: Path, is_pdf: bool) -> bool | Exception:
+        try:
+            image = self._load_image(block, file_path, is_pdf)
+            if image is None:
+                return False
+            description = self.vlm_client.describe_image(image, FIGURE_PROMPT)
+            if not description:
+                return False
+            block.vlm_description = description
+            # Fold the description into the block text so it becomes part of
+            # the indexed/searchable content and the Markdown export.
+            addition = f"[Image description]: {description}"
+            block.text = f"{block.text}\n\n{addition}".strip() if block.text else addition
+            logger.debug("Described block %s on page %s", block.id, block.page_number)
+            return True
+        except Exception as exc:  # noqa: BLE001 - reported per figure by the caller
+            return exc
+
+    @staticmethod
+    def _record_failure(doc: Document, block: Block, exc: Exception) -> None:
+        logger.warning("VLM description failed for block %s: %s", block.id, exc)
+        block.metadata["vlm_error"] = str(exc)
+        doc.metadata["vlm_error"] = str(exc)
 
     def _should_describe(self, block: Block, is_pdf: bool) -> bool:
         if block.block_type not in (BlockType.FIGURE, BlockType.IMAGE):

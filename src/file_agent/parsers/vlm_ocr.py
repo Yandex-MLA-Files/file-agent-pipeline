@@ -14,6 +14,7 @@ the returned Markdown is parsed into typed blocks with the page number attached.
 
 import io
 import logging
+import os
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -28,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 PAGE_RENDER_DPI = 150
 NO_TEXT_MARKER = "[no text]"
+# A dense A4 page is ~1000-1500 tokens of Markdown; leave headroom for tables.
+DEFAULT_PAGE_MAX_TOKENS = 2500
 
 PAGE_TRANSCRIPTION_PROMPT = (
     "Transcribe this scanned document page into Markdown.\n"
@@ -46,9 +49,17 @@ PAGE_TRANSCRIPTION_PROMPT = (
 class VLMPageOCR:
     """Transcribes selected PDF pages with a VLM and returns typed blocks."""
 
-    def __init__(self, vlm_client: VLMClient, dpi: int = PAGE_RENDER_DPI) -> None:
+    def __init__(
+        self,
+        vlm_client: VLMClient,
+        dpi: int = PAGE_RENDER_DPI,
+        max_tokens: int | None = None,
+    ) -> None:
         self.vlm_client = vlm_client
         self.dpi = dpi
+        self.max_tokens = max_tokens or int(
+            os.getenv("VLM_OCR_MAX_TOKENS", DEFAULT_PAGE_MAX_TOKENS)
+        )
 
     def transcribe(self, pdf_path: Path, page_numbers: list[int]) -> dict[int, list[Block]]:
         results: dict[int, list[Block]] = {}
@@ -65,7 +76,9 @@ class VLMPageOCR:
                         continue
                     image = self._render(pdf[page_number - 1])
                     try:
-                        markdown = self.vlm_client.describe_image(image, PAGE_TRANSCRIPTION_PROMPT)
+                        markdown = self.vlm_client.describe_image(
+                            image, PAGE_TRANSCRIPTION_PROMPT, max_tokens=self.max_tokens
+                        )
                     except Exception:
                         logger.warning(
                             "VLM OCR failed on page %s of %s; aborting VLM OCR for this file",

@@ -41,7 +41,7 @@ class SmolVLMClient(VLMClient):
         )
         self._model.eval()
 
-    def describe_image(self, image: Image.Image, prompt: str) -> str:
+    def describe_image(self, image: Image.Image, prompt: str, max_tokens: int | None = None) -> str:
         import torch
 
         self._load()
@@ -63,7 +63,7 @@ class SmolVLMClient(VLMClient):
         with torch.inference_mode():
             generated = self._model.generate(
                 **inputs,
-                max_new_tokens=self.max_new_tokens,
+                max_new_tokens=max_tokens or self.max_new_tokens,
                 do_sample=False,
             )
 
