@@ -21,6 +21,16 @@ class FakeOpenAI:
 @pytest.fixture(autouse=True)
 def fake_openai(monkeypatch):
     monkeypatch.setattr("file_agent.llm.factory.OpenAI", FakeOpenAI)
+    # A developer .env loaded by another module must not leak generation
+    # overrides into these default-value assertions.
+    for name in (
+        "LLM_TEMPERATURE",
+        "LLM_MAX_TOKENS",
+        "LLM_TIMEOUT_SECONDS",
+        "LLM_MAX_RETRIES",
+        "LLM_ENABLE_THINKING",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_factory_creates_yandex_client(monkeypatch):
