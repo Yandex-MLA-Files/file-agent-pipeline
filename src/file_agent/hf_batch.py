@@ -15,7 +15,7 @@ from datasets import Dataset
 from file_agent.document import Document
 from file_agent.hf_dataset import QADatasetRecord, validate_qa_dataset
 from file_agent.hf_rag import DocumentLoader, GeneratedQARecord, process_hf_qa_record
-from file_agent.lancedb_retriever import DEFAULT_SEMANTIC_MODEL_NAME
+from file_agent.lancedb_retriever import resolve_embedding_model_name
 from file_agent.llm.base import LLMClient
 from file_agent.qa import build_qa_prompt
 from file_agent.rag import load_documents
@@ -23,7 +23,7 @@ from file_agent.retrieval import Retriever
 
 CHECKPOINT_SCHEMA_VERSION = 2
 CHECKPOINTS_DIRECTORY_NAME = "checkpoints"
-RAG_PIPELINE_VERSION = "section-token-small-to-big-v1"
+RAG_PIPELINE_VERSION = "structured-parsers-breadcrumb-chunks-v2"
 # Marker that opens ``answer_model`` of a row the pipeline could not process
 # (parser crash, LLM outage, per-row timeout). Such rows are kept in the run so
 # the evaluation counts them as failures (score 0) instead of silently
@@ -254,7 +254,10 @@ def build_generation_parameters(
         "enable_thinking": _optional_scalar_attribute(llm_client, "enable_thinking"),
         "retriever": _component_identifier(retriever) if retriever is not None else "default",
         "rag_pipeline_version": RAG_PIPELINE_VERSION,
-        "embedding_model": os.getenv("EMBEDDING_MODEL") or DEFAULT_SEMANTIC_MODEL_NAME,
+        "embedding_model": resolve_embedding_model_name(),
+        "parser_profile": os.getenv("PARSER_PROFILE", "structured").strip().lower(),
+        "chunking_strategy": os.getenv("CHUNKING_STRATEGY", "structured").strip().lower(),
+        "chunk_target_tokens": os.getenv("CHUNK_TARGET_TOKENS") or None,
         "ocr_engine": os.getenv("OCR_ENGINE", "easyocr").strip().lower(),
         "ocr_langs": os.getenv("OCR_LANGS", "ru,en").strip(),
         "vlm_backend": os.getenv("VLM_BACKEND", "off").strip().lower(),

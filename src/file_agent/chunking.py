@@ -211,11 +211,12 @@ def get_embedding_tokenizer(model_name: str | None = None) -> Tokenizer | None:
     its window is silently dropped at index time. Loading is lazy and failures
     (offline environment, missing extra) degrade to character budgeting.
     """
-    name = model_name or os.getenv("EMBEDDING_MODEL")
-    if not name:
-        from file_agent.lancedb_retriever import DEFAULT_SEMANTIC_MODEL_NAME
+    if model_name:
+        name = model_name
+    else:
+        from file_agent.lancedb_retriever import resolve_embedding_model_name
 
-        name = DEFAULT_SEMANTIC_MODEL_NAME
+        name = resolve_embedding_model_name()
     try:
         from transformers import AutoTokenizer
 

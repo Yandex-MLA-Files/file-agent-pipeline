@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from functools import lru_cache
 from typing import Protocol
 
@@ -14,7 +15,11 @@ from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SEMANTIC_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# BGE-M3: multilingual (strong on Russian), 8192-token window, dense retrieval
+# quality far above the 128-token MiniLM it replaces. The previous encoder
+# stays available with EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2.
+DEFAULT_SEMANTIC_MODEL_NAME = "BAAI/bge-m3"
+LEGACY_SEMANTIC_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DEFAULT_FTS_LANGUAGE = "Russian"
 DEFAULT_RRF_K = 60
 DEFAULT_SEMANTIC_MIN_SCORE = 0.25
@@ -153,8 +158,27 @@ class LanceDBRetriever:
         )
 
 
-@lru_cache(maxsize=1)
-def _load_default_embedding_model() -> EmbeddingModel:
+def resolve_embedding_model_name() -> str:
+    return (os.getenv("EMBEDDING_MODEL") or DEFAULT_SEMANTIC_MODEL_NAME).strip()
+
+
+@lru_cache(maxsize=2)
+def _load_embedding_model(name: str) -> EmbeddingModel:
     from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(DEFAULT_SEMANTIC_MODEL_NAME)
+    model = SentenceTransformer(name)
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            # Half precision halves GPU memory and doubles throughput with no
+            # measurable retrieval difference; the GPU is shared with the LLM.
+            model.half()
+    except Exception:  # pragma: no cover - torch missing or CPU-only build
+        pass
+    logger.info("Loaded embedding model %s", name)
+    return model
+
+
+def _load_default_embedding_model() -> EmbeddingModel:
+    return _load_embedding_model(resolve_embedding_model_name())

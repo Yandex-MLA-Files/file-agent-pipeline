@@ -106,7 +106,7 @@ def test_generate_hf_qa_records_processes_in_order_and_writes_checkpoints(
     assert first_checkpoint["parameters"]["dataset_id"] == "owner/rag-qa"
     assert first_checkpoint["parameters"]["revision"] == "commit-sha"
     assert first_checkpoint["parameters"]["model_id"] == "fake/model"
-    assert first_checkpoint["parameters"]["rag_pipeline_version"] == "section-token-small-to-big-v1"
+    assert first_checkpoint["parameters"]["rag_pipeline_version"] == "structured-parsers-breadcrumb-chunks-v2"
     assert first_checkpoint["parameters"]["embedding_model"]
     assert first_checkpoint["parameters"]["top_k"] == 3
     assert first_checkpoint["result"] == result.records[0].to_dict()
