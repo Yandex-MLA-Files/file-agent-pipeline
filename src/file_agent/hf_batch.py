@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import signal
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
@@ -142,6 +143,7 @@ def generate_hf_qa_records(
                 record.id,
             )
         else:
+            row_started = time.perf_counter()
             try:
                 with _record_deadline(record_timeout):
                     generated_record = process_hf_qa_record(
@@ -176,6 +178,7 @@ def generate_hf_qa_records(
                 checkpoint_path=checkpoint_path,
                 parameters=parameters,
                 generated_record=generated_record,
+                elapsed_seconds=time.perf_counter() - row_started,
             )
             processed_count += 1
             LOGGER.info(
@@ -338,12 +341,17 @@ def _write_checkpoint(
     checkpoint_path: Path,
     parameters: dict[str, Any],
     generated_record: GeneratedQARecord,
+    elapsed_seconds: float | None = None,
 ) -> None:
     payload = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "parameters": parameters,
         "result": generated_record.to_dict(),
     }
+    if elapsed_seconds is not None:
+        # Wall-clock time of the whole row (download, parse, index, answer);
+        # informational only, never part of the resume-compatibility check.
+        payload["timing"] = {"elapsed_seconds": round(elapsed_seconds, 3)}
     temporary_path = checkpoint_path.with_suffix(".json.tmp")
     temporary_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
