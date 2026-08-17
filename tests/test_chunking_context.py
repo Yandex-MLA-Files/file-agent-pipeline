@@ -134,7 +134,7 @@ def test_huge_header_is_not_repeated_so_rows_survive():
     chunks = [
         c
         for c in chunk_document(document, max_chars=300, overlap=30)
-        if c.metadata.get("representation") != "row"
+        if not c.metadata.get("representation")
     ]
 
     assert len(chunks) > 1

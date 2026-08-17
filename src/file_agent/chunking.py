@@ -24,6 +24,7 @@ from functools import lru_cache
 from typing import Any, Literal, Protocol
 
 from file_agent.document import Block, BlockType, Document, heading_level
+from file_agent.parsers.table_profile import profile_table
 from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,11 @@ TABLE_ROW_RECORD_MAX_COLUMNS = 40
 # Rows of a table whose cells are prose (a two-column "term/definition" table)
 # are already good chunks; records would only duplicate them.
 TABLE_ROW_RECORD_MAX_CELL_CHARS = 300
+# Tables outside spreadsheets are summarised too (min/max per column with the
+# row it belongs to, sums, groups) — the same aggregates the XLSX parser
+# emits, computed from the Markdown a PDF/DOCX/HTML table was rendered into.
+DEFAULT_TABLE_PROFILES = True
+TABLE_PROFILE_MIN_ROWS = 4
 
 # Semantic (topic-boundary) splitting of long unstructured prose. Structured
 # documents are already cut on their own headings, but a transcript or a
@@ -898,6 +904,41 @@ class _Chunker:
             for block in section.blocks:
                 if block.block_type == BlockType.TABLE and block.text:
                     self._emit_table_records(block, heading, path)
+                    self._emit_table_profile(block, heading, path)
+
+    def _emit_table_profile(self, block: Block, heading: str | None, path: list[str]) -> None:
+        """Index the aggregates of a table that no single chunk can answer.
+
+        Spreadsheets get this from their parser, where the values are still
+        typed. A table lifted out of a PDF or a DOCX has the same problem —
+        "which kind of revenue was the largest" needs every row at once — so it
+        is profiled here, from the Markdown the parser produced.
+        """
+        if block.metadata.get("sheet_name") or not _table_profiles_enabled():
+            return  # spreadsheets are profiled by the parser
+        _, header_block, rows = self._table_parts(block.text)
+        if not header_block or len(rows) < TABLE_PROFILE_MIN_ROWS:
+            return
+        header = _table_cells(header_block.split("\n")[0])
+        body = [_table_cells(row) for row in rows]
+        if len(header) < 2 or any(len(row) > len(header) for row in body):
+            return
+        profile = profile_table(header, body)
+        if not profile:
+            return
+        caption = str(block.metadata.get("caption") or "").strip()
+        title = _shorten(caption, BREADCRUMB_MAX_CRUMB_CHARS) if caption else (heading or "")
+        label = f"«{title}» " if title else ""
+        self._emit(
+            [block],
+            section=heading,
+            sections=[heading] if heading else [],
+            path=path,
+            text=f"Сводка по таблице {label}(вычислена автоматически):\n{profile}",
+            # A retrieved summary should still let the model check the table.
+            parent=self._bound_parent(block.text),
+            extra={"representation": "profile", "table_profile": True},
+        )
 
     def _emit_table_records(self, block: Block, heading: str | None, path: list[str]) -> None:
         caption, header, rows = self._table_parts(block.text)
@@ -1161,6 +1202,13 @@ def topic_boundaries(sentences: list[str]) -> set[int] | None:
     except Exception:  # pragma: no cover - encoder unavailable or OOM
         logger.debug("Semantic split unavailable; using sentence packing.", exc_info=True)
         return None
+
+
+def _table_profiles_enabled() -> bool:
+    raw = os.getenv("TABLE_PROFILES")
+    if raw is None:
+        return DEFAULT_TABLE_PROFILES
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _row_records_enabled() -> bool:

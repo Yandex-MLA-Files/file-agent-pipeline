@@ -33,7 +33,7 @@ def test_large_table_is_split_by_rows_with_header():
     )
 
     chunks = chunk_document(document, max_chars=200, overlap=20)
-    windows = [c for c in chunks if c.metadata.get("representation") != "row"]
+    windows = [c for c in chunks if not c.metadata.get("representation")]
 
     # A huge table is split so each piece fits an embedding window ...
     assert len(windows) > 1
@@ -203,3 +203,62 @@ def test_row_records_of_one_table_share_their_parent_passage():
     # The whole table fits the parent budget, so every record points at it once.
     assert len(contexts) == 1
     assert "| Регион 29 | 2900 |" in contexts.pop()
+
+
+def test_pdf_tables_get_an_automatic_profile(monkeypatch):
+    """ "Which revenue was the largest" needs every row at once, so it is precomputed."""
+    table = "| Вид выручки | 2026 | 2025 |\n| --- | --- | --- |\n" + "\n".join(
+        f"| Вид {i} | {i * 1000} | {i * 900} |" for i in range(1, 8)
+    )
+    document = Document(
+        file_name="report.pdf",
+        file_type="pdf",
+        blocks=[
+            Block(id="t1", text=table, type="table", block_type=BlockType.TABLE, page_number=4)
+        ],
+    )
+
+    profiles = [
+        c
+        for c in chunk_document(document, max_chars=800, overlap=80)
+        if c.metadata.get("representation") == "profile"
+    ]
+
+    assert len(profiles) == 1
+    text = profiles[0].text
+    assert "максимум 7 000 (Вид 7)" in text
+    assert "строк: 7" in text
+    assert profiles[0].metadata["page_number"] == 4
+
+    monkeypatch.setenv("TABLE_PROFILES", "off")
+    assert not [
+        c
+        for c in chunk_document(document, max_chars=800, overlap=80)
+        if c.metadata.get("representation") == "profile"
+    ]
+
+
+def test_spreadsheet_tables_are_not_profiled_twice():
+    """The XLSX parser already emits a profile block for its own tables."""
+    table = "| Регион | Выручка |\n| --- | --- |\n" + "\n".join(
+        f"| Регион {i} | {i * 100} |" for i in range(1, 9)
+    )
+    document = Document(
+        file_name="sales.xlsx",
+        file_type="xlsx",
+        blocks=[
+            Block(
+                id="t1",
+                text=table,
+                type="table",
+                block_type=BlockType.TABLE,
+                metadata={"sheet_name": "Sales"},
+            )
+        ],
+    )
+
+    assert not [
+        c
+        for c in chunk_document(document, max_chars=800, overlap=80)
+        if c.metadata.get("representation") == "profile"
+    ]
