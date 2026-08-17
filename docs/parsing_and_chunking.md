@@ -282,6 +282,28 @@ Reading the table:
   VLM (Markdown with headings/tables) instead of EasyOCR text; 1–3 s per
   page on the shared A100.
 
+### 3.4 OCR engine benchmark (how the numbers in §2.2 were produced)
+
+`ocr_bench.py` (kept with the operator scripts, not in the package) takes six
+pages of the corpus that carry a real text layer — Russian prose, a lecture
+with formulas, two financial tables, a medical guideline and a two-column
+English paper — renders each at 150 dpi, degrades it three ways, and asks both
+engines to transcribe the image. The text layer is the ground truth; the
+comparison normalises whitespace, quotes, `ё/е` and Markdown syntax, and
+rejoins hyphenated line breaks on both sides, so neither engine is penalised
+for formatting.
+
+Two caveats belong with the numbers. The degradations are synthetic (a real
+scanner adds artefacts this does not model), and character error rate
+undervalues the model on pages with formulas, where LaTeX is the better
+transcript but the further one from the text layer. Both were checked by
+reading the transcripts, not only the metric.
+
+The judge runs are the end-to-end check on the *real* scan of the corpus
+(`Документационное обеспечение…pdf`, eight scanned pages, seven questions):
+its answer correctness is 0.86 in the v4 run, the second-best document of the
+set.
+
 ## 4. Reproducing a run
 
 ```bash
