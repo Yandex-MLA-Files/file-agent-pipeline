@@ -44,6 +44,13 @@ Users can upload one or more documents, preview extracted text, find relevant ch
   no body) are re-read from the page image by the VLM and replaced only when
   the second reading has more structure (`parsers/table_repair.py`,
   `PDF_TABLE_VLM`).
+- Formula and code regions of a PDF are re-read by Docling's enrichment models
+  (`PDF_ENRICHMENT`, on by default; the conversion silently repeats without
+  them if they cannot be loaded), and a page whose reading order crosses
+  between two columns is re-sorted column by column.
+- DOCX carries content a body walk never reaches: footnotes/endnotes, text
+  frames, tables nested inside cells, and list numbers that Word computes from
+  `numbering.xml` (`parsers/docx_numbering.py`).
 - VLM description of figures in every format through a selectable backend
   (`VLM_BACKEND`: `llm` default — the answering model's own multimodal
   endpoint —, `openai`, `smolvlm`, `off`) with a bounded per-document cost;
