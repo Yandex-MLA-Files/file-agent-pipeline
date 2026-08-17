@@ -54,11 +54,10 @@ class XLSXParser(BaseParser):
                         page_number=sheet_index,
                         metadata={"sheet_name": sheet.title, "sheet_index": sheet_index},
                     )
+                    last_header: list[str] | None = None
                     for region in _split_regions(grid):
                         if _is_note(region):
-                            text = "\n".join(
-                                " ".join(cell for cell in row if cell) for row in region
-                            )
+                            text = "\n".join(_note_line(row) for row in region)
                             factory.add(
                                 text,
                                 BlockType.TEXT,
@@ -66,9 +65,17 @@ class XLSXParser(BaseParser):
                                 page_number=sheet_index,
                             )
                             continue
-                        markdown = table_to_markdown(region, header=_has_header(region))
+                        header, body = _split_header(region)
+                        if header is None and last_header and _same_width(last_header, body):
+                            # A block of rows below a blank line continues the
+                            # previous table; reuse its header instead of col1..colN.
+                            header = last_header
+                        rows = [header, *body] if header else body
+                        markdown = table_to_markdown(rows, header=header is not None)
                         if not markdown:
                             continue
+                        if header:
+                            last_header = header
                         table_count += 1
                         factory.add(
                             markdown,
@@ -76,7 +83,7 @@ class XLSXParser(BaseParser):
                             {
                                 "sheet_name": sheet.title,
                                 "table_index": table_count,
-                                "row_count": len(region) - (1 if _has_header(region) else 0),
+                                "row_count": len(body),
                                 "truncated": truncated,
                             },
                             page_number=sheet_index,
@@ -163,29 +170,70 @@ def _split_regions(grid: list[list[str]]) -> list[list[list[str]]]:
     return regions
 
 
+def _distinct_cells(row: list[str]) -> list[str]:
+    """Non-empty cells with merged-cell repeats collapsed."""
+    distinct: list[str] = []
+    for cell in row:
+        if cell and (not distinct or distinct[-1] != cell):
+            distinct.append(cell)
+    return distinct
+
+
+def _note_line(row: list[str]) -> str:
+    return " ".join(_distinct_cells(row))
+
+
 def _is_note(region: list[list[str]]) -> bool:
     if len(region) > 3:
         return False
     for row in region:
-        cells = [cell for cell in row if cell]
+        cells = _distinct_cells(row)
         if len(cells) != 1 or len(cells[0]) < _NOTE_MIN_CHARS:
             return False
     return True
 
 
-def _has_header(region: list[list[str]]) -> bool:
-    """A header row is mostly text while the following rows carry numbers."""
-    if len(region) < 2:
-        return True
-    first = [cell for cell in region[0] if cell]
-    second = [cell for cell in region[1] if cell]
-    if not first:
+def _split_header(region: list[list[str]]) -> tuple[list[str] | None, list[list[str]]]:
+    """Detect one- or two-row headers; return (header, data rows).
+
+    A header row is mostly text while the rows below carry numbers. Two
+    stacked text rows above numeric data (a group row over sub-columns, as
+    produced by merged cells) are combined into "Group Sub" column names.
+    """
+    if not region:
+        return None, region
+    if len(region) == 1:
+        return None, region
+
+    def numeric_share(row: list[str]) -> float:
+        cells = [cell for cell in row if cell]
+        if not cells:
+            return 0.0
+        return sum(1 for cell in cells if _is_number(cell)) / len(cells)
+
+    first_share = numeric_share(region[0])
+    if first_share >= 0.5:
+        return None, region
+    if len(region) >= 3 and numeric_share(region[1]) < 0.5 and numeric_share(region[2]) >= 0.5:
+        top, sub = region[0], region[1]
+        width = max(len(top), len(sub))
+        header = []
+        for index in range(width):
+            group = top[index] if index < len(top) else ""
+            leaf = sub[index] if index < len(sub) else ""
+            header.append(" ".join(part for part in (group, leaf) if part) or "")
+        return header, region[2:]
+    if numeric_share(region[1]) > first_share or first_share == 0.0:
+        return region[0], region[1:]
+    return None, region
+
+
+def _same_width(header: list[str], body: list[list[str]]) -> bool:
+    if not body:
         return False
-    first_numeric = sum(1 for cell in first if _is_number(cell))
-    second_numeric = sum(1 for cell in second if _is_number(cell))
-    if first_numeric == 0:
-        return True
-    return first_numeric / len(first) < 0.5 and second_numeric > first_numeric
+    header_width = len([cell for cell in header if cell])
+    widths = {len(row) for row in body}
+    return bool(widths) and max(widths) >= header_width and header_width > 0
 
 
 def _is_number(cell: str) -> bool:

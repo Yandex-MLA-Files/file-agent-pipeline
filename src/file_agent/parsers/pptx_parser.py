@@ -38,6 +38,14 @@ logger = logging.getLogger(__name__)
 # Text frames whose only content is a slide number / footer date add nothing.
 _SLIDE_NUMBER = re.compile(r"^\s*\d{1,3}\s*(/\s*\d{1,3})?\s*$")
 _MIN_IMAGE_BYTES = 2048
+# Auto-generated shape names in any language: "Picture 3", "Рисунок 2", "图片 8",
+# "Замещающая рамка рисунка 2" — a short non-numeric prefix and a counter.
+_GENERIC_SHAPE_NAME = re.compile(r"^[^\d]{0,40}\d+$")
+# Default presentation titles that Office writes into core properties.
+_DEFAULT_DECK_TITLE = re.compile(
+    r"^(powerpoint\s+(presentation|演示文稿)|презентация\s+powerpoint|presentation\d*|slide\s*1)$",
+    re.IGNORECASE,
+)
 
 
 class PPTXParser(BaseParser):
@@ -235,8 +243,8 @@ class _SlideEmitter:
             return
         self.figure_count += 1
         caption = clean_text(getattr(shape, "name", "") or "")
-        # Auto-generated shape names ("Picture 3", "Рисунок 2") carry no meaning.
-        if re.match(r"^(picture|image|рисунок|изображение|graphic)\s*\d*$", caption, re.I):
+        # Auto-generated shape names ("Picture 3", "Рисунок 2", "图片 8") carry no meaning.
+        if _GENERIC_SHAPE_NAME.match(caption):
             caption = ""
         alt_text = _alt_text(shape)
         text = alt_text or caption
@@ -256,7 +264,10 @@ class _SlideEmitter:
 def _presentation_title(presentation: Any) -> str | None:
     core = getattr(presentation, "core_properties", None)
     title = getattr(core, "title", None)
-    return title.strip() if isinstance(title, str) and title.strip() else None
+    if not isinstance(title, str) or not title.strip():
+        return None
+    title = " ".join(title.split())
+    return None if _DEFAULT_DECK_TITLE.match(title) else title
 
 
 def _layout_name(slide: Any) -> str:
@@ -275,23 +286,37 @@ def _slide_title(slide: Any, slide_height: int) -> str | None:
         text = clean_text(title_shape.text_frame.text)
         if text:
             return " ".join(text.split())
-    # Layouts without a title placeholder: the top-most text frame usually is
-    # the title if it is short and sits in the upper part of the slide.
+    # Layouts without a title placeholder: the title is the short text frame
+    # with the largest font in the upper part of the slide (top-most on ties).
     candidates = []
     for shape in slide.shapes:
         if not getattr(shape, "has_text_frame", False) or not shape.has_text_frame:
             continue
         text = clean_text(shape.text_frame.text)
-        if not text or len(text) > 140 or "\n" in text:
+        if not text or len(text) > 140 or "\n" in text or _SLIDE_NUMBER.match(text):
+            continue
+        if _is_footer_placeholder(shape):
             continue
         top = _emu(shape.top)
-        candidates.append((top, text))
+        if slide_height and top > slide_height * 0.45:
+            continue
+        candidates.append((-_max_font_size(shape), top, text))
     if candidates:
         candidates.sort()
-        top, text = candidates[0]
-        if slide_height and top <= slide_height * 0.3:
-            return text
+        return candidates[0][2]
     return None
+
+
+def _max_font_size(shape: Any) -> float:
+    sizes = []
+    try:
+        for paragraph in shape.text_frame.paragraphs:
+            for run in paragraph.runs:
+                if run.font.size is not None:
+                    sizes.append(run.font.size.pt)
+    except Exception:  # pragma: no cover
+        return 0.0
+    return max(sizes) if sizes else 0.0
 
 
 def _emu(value: Any) -> int:
