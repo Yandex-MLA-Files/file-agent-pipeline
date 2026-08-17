@@ -67,7 +67,10 @@ class DocxNumbering:
     def from_document(cls, docx: Any) -> "DocxNumbering":
         try:
             part = docx.part.numbering_part
-        except (KeyError, AttributeError, ValueError):
+        except Exception:
+            # A document with no numbered list has no numbering part at all,
+            # and python-docx answers that with NotImplementedError rather than
+            # a lookup error. Nothing here may ever break parsing.
             return cls(None)
         return cls(getattr(part, "element", None))
 

@@ -81,3 +81,24 @@ def test_malformed_numbering_is_ignored():
     assert broken.available is False
     assert broken.marker("1", 0) == ""
     assert qn("w:numbering")  # namespace helper still usable
+
+
+def test_document_without_a_numbering_part_is_handled():
+    """A document with no numbered list has no numbering part at all.
+
+    python-docx answers that with NotImplementedError rather than a lookup
+    error, which used to abort parsing of a real lecture in the corpus.
+    """
+
+    class _Part:
+        @property
+        def numbering_part(self):
+            raise NotImplementedError("default numbering part construction not yet supported")
+
+    class _Document:
+        part = _Part()
+
+    numbering = DocxNumbering.from_document(_Document())
+
+    assert numbering.available is False
+    assert numbering.marker("1", 0) == ""
