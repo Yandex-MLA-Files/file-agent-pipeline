@@ -10,6 +10,7 @@ from file_agent.parsers.docling_parser import DoclingParser
 from file_agent.parsers.docx_parser import DOCXParser
 from file_agent.parsers.enhancer import DocumentEnhancer
 from file_agent.parsers.html_parser import HTMLParser
+from file_agent.parsers.local_ocr import LocalPageOCR
 from file_agent.parsers.md_parser import MarkdownParser
 from file_agent.parsers.pdf_parser import PDFParser
 from file_agent.parsers.pptx_parser import PPTXParser
@@ -30,11 +31,17 @@ FULL_SCAN_RATIO = 0.6
 
 OcrMode = Literal["auto", "on", "off"]
 
-# OCR engine for pages without a text layer. ``vlm`` (default) transcribes the
-# rendered page with the multimodal chat model (see parsers.vlm_ocr) and falls
-# back to EasyOCR when no VLM endpoint is configured; ``easyocr`` / ``rapidocr``
-# run the classic engines inside Docling.
-DEFAULT_OCR_ENGINE = "vlm"
+# OCR engine for pages without a text layer.
+#
+# ``auto`` (default) is the measured best of both worlds: the multimodal chat
+# model transcribes the rendered page (far more accurate than a classic engine
+# on scans, and the only option that keeps tables and headings — see
+# parsers.vlm_ocr), every transcript is validated, and a page the model failed
+# on is re-read by the local engine. ``vlm`` is the same without the local
+# safety net, ``easyocr`` / ``rapidocr`` run the classic engines inside
+# Docling, ``off`` disables OCR entirely.
+DEFAULT_OCR_ENGINE = "auto"
+OCR_ENGINES = ("auto", "vlm", "easyocr", "rapidocr", "off")
 
 # ``structured`` (default) uses the format-aware parsers that emit headings,
 # lists, tables and figures for every format; ``legacy`` keeps the original
@@ -167,9 +174,11 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
         logger.info("Parsing %s without OCR (text layer present on every page)", path.name)
 
     transcribed = {}
+    vlm_ocr_ran = False
     if vlm_ocr is not None:
         try:
             transcribed = vlm_ocr.transcribe(path, ocr_pages)
+            vlm_ocr_ran = True
         except Exception:
             logger.warning(
                 "VLM OCR unavailable for %s; falling back to the classic OCR engine.",
@@ -179,8 +188,10 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
             transcribed = {}
 
     # With a VLM transcript in hand Docling only needs the text layer; without
-    # one it runs the classic OCR engine on the bitmap pages as before.
-    docling_ocr = do_ocr and not transcribed
+    # one it runs the classic OCR engine on the bitmap pages as before. An empty
+    # transcript from a *successful* VLM pass means the pages really are blank,
+    # so re-OCRing them with the classic engine would only cost time.
+    docling_ocr = do_ocr and not transcribed and not vlm_ocr_ran
     try:
         parser = DoclingParser(do_ocr=docling_ocr, ocr_full_page=ocr_full_page and docling_ocr)
         document = parser.parse(path)
@@ -200,8 +211,10 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
     if transcribed:
         document.blocks = merge_ocr_blocks(document.blocks, transcribed)
         document.metadata["parsing_method"] = "docling+vlm_ocr"
-        document.metadata["ocr_engine"] = "vlm"
+        document.metadata["ocr_engine"] = resolve_ocr_engine()
         document.metadata["vlm_ocr_pages"] = sorted(transcribed)
+        if vlm_ocr is not None and vlm_ocr.stats:
+            document.metadata["ocr_stats"] = dict(sorted(vlm_ocr.stats.items()))
         document.build_table_of_contents()
 
     if analysis is not None:
@@ -214,17 +227,31 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
 
 
 def resolve_ocr_engine() -> str:
-    return (os.getenv("OCR_ENGINE") or DEFAULT_OCR_ENGINE).strip().lower()
+    engine = (os.getenv("OCR_ENGINE") or DEFAULT_OCR_ENGINE).strip().lower()
+    if engine not in OCR_ENGINES:
+        raise ValueError(f"OCR_ENGINE must be one of {', '.join(OCR_ENGINES)}, got {engine!r}")
+    return engine
 
 
 def _vlm_ocr_client() -> VLMPageOCR | None:
-    if resolve_ocr_engine() != "vlm":
+    """Build the VLM page transcriber for the ``auto`` and ``vlm`` engines."""
+    engine = resolve_ocr_engine()
+    if engine not in ("auto", "vlm"):
         return None
     client = create_vlm_client()
     if client is None:
-        logger.info("OCR_ENGINE=vlm but no VLM endpoint is configured; using EasyOCR instead.")
+        logger.info(
+            "OCR_ENGINE=%s but no VLM endpoint is configured; using the classic engine instead.",
+            engine,
+        )
         return None
-    return VLMPageOCR(client)
+    # ``auto`` keeps a local engine ready for pages the model fails to read;
+    # ``vlm`` is the pure variant used to measure the model on its own.
+    fallback = LocalPageOCR() if engine == "auto" else None
+    if fallback is not None and not fallback.available:
+        logger.info("EasyOCR is not installed; VLM transcripts will be used without a fallback.")
+        fallback = None
+    return VLMPageOCR(client, fallback=fallback)
 
 
 def _pages_to_ocr(path: Path, analysis, enable_ocr: OcrMode) -> list[int]:

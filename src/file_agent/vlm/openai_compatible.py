@@ -42,11 +42,20 @@ class OpenAICompatibleVLMClient(VLMClient):
         self.temperature = temperature
 
     def describe_image(self, image: Image.Image, prompt: str, max_tokens: int | None = None) -> str:
+        return self.describe_image_verbose(image, prompt, max_tokens=max_tokens)[0]
+
+    def describe_image_verbose(
+        self,
+        image: Image.Image,
+        prompt: str,
+        max_tokens: int | None = None,
+        max_image_side: int | None = None,
+    ) -> tuple[str, str | None]:
         with tracer.start_as_current_span("file_agent.vlm_describe_image") as span:
             span.set_attribute("file_agent.model", self.model)
 
             try:
-                img_base64 = self._encode_image(image)
+                img_base64 = self._encode_image(image, max_image_side)
                 extra: dict[str, Any] = {}
                 if self.enable_thinking is not None:
                     extra["extra_body"] = {
@@ -70,25 +79,30 @@ class OpenAICompatibleVLMClient(VLMClient):
                     temperature=self.temperature,
                     **extra,
                 )
-                description = (response.choices[0].message.content or "").strip()
+                choice = response.choices[0]
+                description = (choice.message.content or "").strip()
+                finish_reason = getattr(choice, "finish_reason", None)
 
                 span.set_attribute("file_agent.response_length", len(description))
+                if finish_reason:
+                    span.set_attribute("file_agent.finish_reason", str(finish_reason))
                 usage = getattr(response, "usage", None)
                 if usage is not None:
                     span.set_attribute("file_agent.prompt_tokens", usage.prompt_tokens)
                     span.set_attribute("file_agent.completion_tokens", usage.completion_tokens)
 
-                return description
+                return description, finish_reason
             except Exception as exc:
                 logger.error("VLM request failed (%s): %s", self.model, exc)
                 raise
 
     @staticmethod
-    def _encode_image(image: Image.Image) -> str:
+    def _encode_image(image: Image.Image, max_side: int | None = None) -> str:
         image = image.convert("RGB")
+        limit = max_side or MAX_IMAGE_SIDE
         longest = max(image.width, image.height)
-        if longest > MAX_IMAGE_SIDE:
-            scale = MAX_IMAGE_SIDE / longest
+        if longest > limit:
+            scale = limit / longest
             image = image.resize(
                 (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
                 Image.LANCZOS,
