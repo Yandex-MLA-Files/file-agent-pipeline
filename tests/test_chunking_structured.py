@@ -262,3 +262,102 @@ def test_spreadsheet_tables_are_not_profiled_twice():
         for c in chunk_document(document, max_chars=800, overlap=80)
         if c.metadata.get("representation") == "profile"
     ]
+
+
+def _big_table(rows: int, columns: list[str]) -> str:
+    header = "| " + " | ".join(columns) + " |"
+    separator = "|" + "|".join(["---"] * len(columns)) + "|"
+    body = "\n".join(
+        "| " + " | ".join(f"{column[:4]}{index}" for column in columns) + " |"
+        for index in range(rows)
+    )
+    return f"{header}\n{separator}\n{body}"
+
+
+def test_a_header_too_wide_to_repeat_is_abbreviated_not_dropped():
+    """Continuation pieces of a wide table must still name their columns."""
+    columns = [
+        "Резерв переоценки инструментов хеджирования",
+        "Нераспределенная прибыль и прочие резервы",
+        "Неконтролирующие доли участия",
+        "Итого капитал по группе на конец периода",
+    ]
+    document = Document(
+        file_name="report.pdf",
+        file_type="pdf",
+        blocks=[
+            Block(
+                id="b1",
+                text=_big_table(40, columns),
+                type=BlockType.TABLE.value,
+                metadata={"source_file": "report.pdf"},
+                block_type=BlockType.TABLE,
+            )
+        ],
+        metadata={},
+    )
+
+    chunks = chunk_document(document=document, max_chars=400, overlap=0)
+    windows = [c for c in chunks if (c.metadata or {}).get("representation") != "row"]
+
+    assert len(windows) > 1
+    for chunk in windows:
+        assert "Резерв пере" in chunk.text
+        assert "---" in chunk.text
+    # Abbreviated, not verbatim: the full column name would not fit twice.
+    assert "Резерв переоценки инструментов хеджирования" not in windows[-1].text
+
+
+def test_a_heading_with_nothing_under_it_does_not_become_a_chunk():
+    """The running header of a financial report repeats on every page."""
+    blocks = []
+    for page in (1, 2, 3):
+        blocks.append(
+            Block(
+                id=f"h{page}",
+                text="ОАО «Российские железные дороги»",
+                type=BlockType.HEADING.value,
+                metadata={"source_file": "report.pdf", "hierarchy_level": 1},
+                block_type=BlockType.HEADING,
+                page_number=page,
+            )
+        )
+    blocks.append(
+        Block(
+            id="body",
+            text="Выручка за период составила 1 234 млн рублей.",
+            type=BlockType.TEXT.value,
+            metadata={"source_file": "report.pdf"},
+            block_type=BlockType.TEXT,
+            page_number=3,
+        )
+    )
+    document = Document(file_name="report.pdf", file_type="pdf", blocks=blocks, metadata={})
+
+    chunks = chunk_document(document=document, max_chars=200, overlap=0)
+
+    assert len(chunks) == 1
+    assert "Выручка за период" in chunks[0].text
+
+
+def test_a_document_of_headings_only_is_still_indexed():
+    document = Document(
+        file_name="outline.md",
+        file_type="md",
+        blocks=[
+            Block(
+                id=f"h{index}",
+                text=f"Глава {index}",
+                type=BlockType.HEADING.value,
+                metadata={"source_file": "outline.md", "hierarchy_level": 1},
+                block_type=BlockType.HEADING,
+            )
+            for index in range(1, 4)
+        ],
+        metadata={},
+    )
+
+    chunks = chunk_document(document=document, max_chars=200, overlap=0)
+
+    assert chunks
+    assert "Глава 1" in chunks[0].text

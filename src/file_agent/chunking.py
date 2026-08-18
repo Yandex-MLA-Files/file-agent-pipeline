@@ -71,6 +71,11 @@ PARENT_CONTEXT_MAX_CHARS = 4000
 # A table header is repeated on every piece only while it stays this small a
 # share of the budget; a huge header would crowd out the actual data rows.
 HEADER_REPEAT_MAX_RATIO = 0.25
+# When even that is too much, the column names are abbreviated: "Резерв
+# переоценки инструментов хеджирования" → "Резерв переоценки…", which still
+# tells the columns apart. The widths are tried in order, so a table with
+# fourteen columns gets shorter names than one with four.
+COMPACT_HEADER_CELL_CHARS = (18, 12, 8)
 
 # Row records (multi-representation indexing of tables). A table split into
 # row *windows* answers "show me this part of the table", but not "which row
@@ -351,15 +356,28 @@ def chunk_document(
         span.set_attribute("file_agent.strategy", active)
 
         budget = _build_budget(max_chars, overlap, min_chars, max_tokens, tokenizer)
-        chunker = _Chunker(document, budget)
         sections = _group_sections(document.blocks)
-        for section in sections:
-            chunker.add_section(section)
-        chunks = chunker.finish(sections)
+        chunks = _run_chunker(document, budget, sections, skip_bodyless=True)
+        if not chunks and document.blocks:
+            # A document that is nothing but headings (an outline, a contents
+            # page) would otherwise vanish from the index.
+            chunks = _run_chunker(document, budget, sections, skip_bodyless=False)
 
         span.set_attribute("file_agent.chunk_count", len(chunks))
         logger.info("Chunked %d block(s) into %d chunk(s)", len(document.blocks), len(chunks))
         return chunks
+
+
+def _run_chunker(
+    document: Document,
+    budget: "_Budget",
+    sections: list["_Section"],
+    skip_bodyless: bool,
+) -> list[Chunk]:
+    chunker = _Chunker(document, budget, skip_bodyless=skip_bodyless)
+    for section in sections:
+        chunker.add_section(section)
+    return chunker.finish(sections)
 
 
 # -- sections ------------------------------------------------------------------------
@@ -421,9 +439,10 @@ def _split_sentences(text: str) -> list[str]:
 
 
 class _Chunker:
-    def __init__(self, document: Document, budget: _Budget) -> None:
+    def __init__(self, document: Document, budget: _Budget, skip_bodyless: bool = True) -> None:
         self._document = document
         self._budget = budget
+        self._skip_bodyless = skip_bodyless
         # Packed pieces are joined by separators, which cost budget too.
         self._separator_size = budget.size(_SEPARATOR)
         self._line_size = budget.size("\n")
@@ -474,6 +493,17 @@ class _Chunker:
         blocks = [block for section in self._buffer for block in section.blocks]
         headings = [section.heading for section in self._buffer if section.heading]
         path = self._buffer[0].path
+        if self._skip_bodyless and not any(
+            block.text.strip() for block in blocks if block.block_type != BlockType.HEADING
+        ):
+            # A heading with nothing under it. The financial report of the corpus
+            # repeats its company name as a section header on every page, which
+            # produced identical contentless chunks competing with the real ones;
+            # the heading itself survives in the breadcrumb of the sections below
+            # it and in the table of contents.
+            self._buffer = []
+            self._buffer_size = 0
+            return
         self._emit(
             blocks,
             section=headings[0] if headings else (path[-1] if path else None),
@@ -810,6 +840,21 @@ class _Chunker:
             prefix = header
             prefix_size = self._budget.size(prefix) + self._line_size
             repeat_prefix = prefix_size <= limit * HEADER_REPEAT_MAX_RATIO
+        if not repeat_prefix and header:
+            # A financial statement has fourteen columns whose names are whole
+            # sentences: the header cannot be repeated verbatim, and without it
+            # the continuation pieces are rows of numbers with nothing to say
+            # which column each belongs to. Abbreviated column names keep that
+            # link at a fraction of the cost, shortened as far as the table is
+            # wide.
+            for cell_chars in COMPACT_HEADER_CELL_CHARS:
+                candidate = _compact_header(header, cell_chars)
+                if not candidate:
+                    break
+                size = self._budget.size(candidate) + self._line_size
+                if size <= limit * HEADER_REPEAT_MAX_RATIO:
+                    prefix, prefix_size, repeat_prefix = candidate, size, True
+                    break
         if not repeat_prefix:
             prefix, prefix_size = "", 0
         row_limit = max(1, limit - prefix_size)
@@ -929,16 +974,30 @@ class _Chunker:
         caption = str(block.metadata.get("caption") or "").strip()
         title = _shorten(caption, BREADCRUMB_MAX_CRUMB_CHARS) if caption else (heading or "")
         label = f"«{title}» " if title else ""
+        heading_line = f"Сводка по таблице {label}(вычислена автоматически):"
         self._emit(
             [block],
             section=heading,
             sections=[heading] if heading else [],
             path=path,
-            text=f"Сводка по таблице {label}(вычислена автоматически):\n{profile}",
+            # A summary cut in half is two half-summaries, neither of which says
+            # which table it belongs to; drop the last measures instead.
+            text=self._fit_profile(heading_line, profile, path),
             # A retrieved summary should still let the model check the table.
             parent=self._bound_parent(block.text),
             extra={"representation": "profile", "table_profile": True},
         )
+
+    def _fit_profile(self, heading_line: str, profile: str, path: list[str]) -> str:
+        """Drop measures from the end until the summary fits into one chunk."""
+        limit = self._reserved_limit(path)
+        lines = profile.split("\n")
+        while lines:
+            text = f"{heading_line}\n" + "\n".join(lines)
+            if self._budget.size(text) <= limit:
+                return text
+            lines.pop()
+        return heading_line
 
     def _emit_table_records(self, block: Block, heading: str | None, path: list[str]) -> None:
         caption, header, rows = self._table_parts(block.text)
@@ -1242,3 +1301,16 @@ def _shorten(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
+
+
+def _compact_header(header: str, cell_chars: int) -> str:
+    """The same columns with abbreviated names, for tables too wide to repeat."""
+    lines = [line for line in header.split("\n") if line.strip()]
+    if not lines:
+        return ""
+    cells = [_shorten(cell, cell_chars) for cell in _table_cells(lines[0])]
+    if not cells:
+        return ""
+    row = "| " + " | ".join(cells) + " |"
+    separator = "|" + "|".join(["---"] * len(cells)) + "|"
+    return f"{row}\n{separator}"
