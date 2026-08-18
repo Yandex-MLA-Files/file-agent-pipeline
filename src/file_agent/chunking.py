@@ -99,9 +99,14 @@ TABLE_ROW_RECORD_MAX_CELL_CHARS = 300
 DEFAULT_TABLE_PROFILES = True
 TABLE_PROFILE_MIN_ROWS = 4
 
-# Formulas are shown, not searched: a standalone formula block travels in the
-# parent passage the model reads but stays out of the embedded chunk text.
-DEFAULT_FORMULA_INDEXING = "context"
+# Where a standalone formula block goes. "inline" embeds it with the prose
+# around it; "context" keeps it out of the embedded text and shows it to the
+# model only through the parent passage. Measured on the formula-dense lecture
+# (200 prose queries + 60 formula queries against two indexes built from the
+# same parse): keeping formulas out did *not* help prose retrieval (hit@1
+# 0.980 -> 0.965) and destroyed formula retrieval (hit@5 1.000 -> 0.567), so
+# the default is to index them.
+DEFAULT_FORMULA_INDEXING = "inline"
 
 # Semantic (topic-boundary) splitting of long unstructured prose. Structured
 # documents are already cut on their own headings, but a transcript or a
@@ -375,15 +380,13 @@ def chunk_document(
 def _indexable(block: Block) -> bool:
     """Whether a block's text belongs in what the retriever embeds.
 
-    A standalone formula is the one exception. Enriching an 85-page lecture
-    adds 378 of them and 31 % more text, which moves the document from 223
-    chunks to 335: the prose that a question actually matches is spread over
-    more chunks, each diluted with LaTeX that no natural-language query looks
-    like. Measured on the corpus, indexing them cost 0.015 answer correctness
-    while answering no question. They stay in the parent passage the model
-    reads (small-to-big), so the formula is still there when the answer needs
-    it — it just stops competing for retrieval slots.
-    ``FORMULA_INDEXING=inline`` puts them back into the embedded text.
+    A standalone formula is the one thing this is asked about, and the answer
+    is measured rather than argued: with ``FORMULA_INDEXING=context`` the
+    formulas leave the embedded text and travel only in the parent passage,
+    which on the formula-dense lecture cost formula retrieval almost entirely
+    (hit@5 1.000 -> 0.567) and did not buy the prose anything (hit@1 0.980 ->
+    0.965). The default therefore indexes them; the switch is kept because a
+    corpus of formula-free questions may prefer the smaller index.
     """
     if block.block_type != BlockType.FORMULA:
         return True

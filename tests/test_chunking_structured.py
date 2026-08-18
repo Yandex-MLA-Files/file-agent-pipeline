@@ -402,8 +402,8 @@ def _formula_document():
 
 
 def test_formulas_are_read_by_the_model_but_not_embedded(monkeypatch):
-    """378 formulas would otherwise dilute the prose a question matches."""
-    monkeypatch.delenv("FORMULA_INDEXING", raising=False)
+    """FORMULA_INDEXING=context: shown to the model, kept out of the index."""
+    monkeypatch.setenv("FORMULA_INDEXING", "context")
 
     chunks = chunk_document(_formula_document(), max_chars=200, overlap=0)
     body = "\n".join(c.text for c in chunks)
@@ -414,8 +414,9 @@ def test_formulas_are_read_by_the_model_but_not_embedded(monkeypatch):
     assert r"\frac{P(A \cap B)}{P(B)}" in context
 
 
-def test_formulas_can_be_embedded_too(monkeypatch):
-    monkeypatch.setenv("FORMULA_INDEXING", "inline")
+def test_formulas_are_embedded_by_default(monkeypatch):
+    """Measured: keeping them out costs formula retrieval and buys nothing."""
+    monkeypatch.delenv("FORMULA_INDEXING", raising=False)
 
     chunks = chunk_document(_formula_document(), max_chars=200, overlap=0)
 
@@ -423,7 +424,7 @@ def test_formulas_can_be_embedded_too(monkeypatch):
 
 
 def test_a_section_of_only_formulas_is_still_indexed(monkeypatch):
-    monkeypatch.delenv("FORMULA_INDEXING", raising=False)
+    monkeypatch.setenv("FORMULA_INDEXING", "context")
     document = Document(
         file_name="lecture.pdf",
         file_type="pdf",

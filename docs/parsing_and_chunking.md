@@ -203,18 +203,30 @@ model does run, its batch is sized from the memory actually free on the card
 back to Docling's 5. That is not a tuning knob but a safety one — the stage
 hides an out-of-memory and answers with empty formulas.
 
-##### Where the formulas are indexed (`FORMULA_INDEXING`, default `context`)
+##### Where the formulas are indexed (`FORMULA_INDEXING`, default `inline`)
 
-Adding 378 formulas to the lecture also moves it from 223 chunks to 335: the
-prose a question matches is spread over 50 % more chunks, each diluted with
-LaTeX that no natural-language query looks like. A control run with
-enrichment off scored **0.015 higher answer correctness** on the 127
-questions — none of which is written in LaTeX. So a standalone formula block
-is kept out of the embedded chunk text and travels in the parent passage the
-model reads instead: the formula is there when the answer needs it, and it
-no longer competes for retrieval slots. `FORMULA_INDEXING=inline` embeds it
-as before. Inline equations inside a DOCX sentence are part of the sentence
-and are always indexed with it.
+Adding 378 formulas to the lecture also moves it from 236 chunks to 336, and
+a control run with enrichment off scored 0.015 higher answer correctness —
+which looked like the formulas diluting the prose. That number sits inside the
+±0.016 the judge moves on its own, so the question was settled at the
+retrieval level instead, with no model in the loop: two indexes built from the
+*same* parse, 200 prose queries (the opening words of a real sentence; a hit
+is the passage containing it) and 60 formula queries (the LaTeX of a real
+formula).
+
+| Formulas | chunks | prose hit@1 | prose hit@5 | formula hit@1 | formula hit@5 |
+|---|---|---|---|---|---|
+| **embedded (`inline`)** | 336 | **0.980** | **1.000** | **0.917** | **1.000** |
+| in the parent only (`context`) | 236 | 0.965 | 0.995 | 0.300 | 0.567 |
+
+The dilution never existed: taking the formulas out of the embedded text made
+prose retrieval slightly *worse* (fewer, larger chunks are less precise), and
+it cost formula retrieval almost everything — a passage carrying the formula
+a question needs is missing from the top five in four cases out of ten. The
+default is therefore to index formulas; `FORMULA_INDEXING=context` remains for
+a corpus where nothing is ever asked about a formula and the smaller index is
+worth it. Inline equations inside a DOCX sentence are part of the sentence and
+are always indexed with it.
 
 Two smaller costs were measured next to it. Reusing one Docling converter
 across the documents of a run instead of building one per file saves ~2.4 s
