@@ -69,9 +69,10 @@ MIN_REGION_SIDE = 6.0
 # Longest transcript we accept for one region; beyond this the model has left
 # the formula and started writing the page.
 MAX_TRANSCRIPT_CHARS = 2000
-# Bump when the prompt changes: cached transcripts of the old prompt are then
-# ignored instead of being served for a different question.
-PROMPT_VERSION = "f1"
+# Bump when the prompt or the post-processing changes: cached transcripts of
+# the old version are then ignored instead of being served for a different
+# question, or in a form the current code would no longer produce.
+PROMPT_VERSION = "f2"
 
 FORMULA_PROMPT = (
     "This image is a single formula cut out of a document page.\n"
