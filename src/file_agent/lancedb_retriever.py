@@ -83,6 +83,10 @@ class LanceDBRetriever:
                 {
                     "chunk_id": chunk.id,
                     "text": chunk.text,
+                    # Own column rather than a field of ``metadata_json``: it is
+                    # the only metadata a query filters on, and LanceDB cannot
+                    # filter inside a JSON string.
+                    "source_file": str((chunk.metadata or {}).get("source_file") or ""),
                     "vector": embeddings[index].tolist(),
                     "metadata_json": json.dumps(
                         chunk.metadata,
@@ -107,22 +111,36 @@ class LanceDBRetriever:
         self,
         query: str,
         top_k: int = 5,
+        source_file: str | None = None,
     ) -> list[SearchResult]:
+        """Retrieve the ``top_k`` passages best matching ``query``.
+
+        ``source_file`` restricts the search to one indexed document, which is
+        what a per-document tool ("what does this file say about X?") needs:
+        without it the same question over a corpus of twenty files answers from
+        whichever file happens to score highest.
+        """
         with tracer.start_as_current_span("file_agent.retriever_search") as span:
             span.set_attribute("file_agent.query", query)
             span.set_attribute("file_agent.top_k", top_k)
+            if source_file:
+                span.set_attribute("file_agent.source_file", source_file)
 
             if top_k <= 0 or self._table is None:
                 span.set_attribute("file_agent.result_count", 0)
                 return []
 
             query = query.strip()
+            source_file = source_file.strip() if source_file is not None else None
             if not query:
                 span.set_attribute("file_agent.result_count", 0)
                 return []
 
             reranker = self._reranker or _load_default_reranker()
-            diversify = _bool_env("RETRIEVAL_DIVERSIFY_DOCS", DEFAULT_DIVERSIFY_DOCS)
+            # One document cannot be diversified against itself.
+            diversify = not source_file and _bool_env(
+                "RETRIEVAL_DIVERSIFY_DOCS", DEFAULT_DIVERSIFY_DOCS
+            )
             candidate_count = top_k
             if reranker is not None:
                 candidate_count = max(
@@ -134,7 +152,7 @@ class LanceDBRetriever:
                 candidate_count = max(candidate_count, DEFAULT_DIVERSIFY_CANDIDATES, top_k)
 
             query_vector = self._encode([query])[0].tolist()
-            rows = (
+            builder = (
                 self._table.search(
                     query_type="hybrid",
                     vector_column_name="vector",
@@ -145,9 +163,14 @@ class LanceDBRetriever:
                 .distance_type("cosine")
                 .distance_range(upper_bound=1.0 - self._semantic_min_score)
                 .rerank(RRFReranker(K=self._rrf_k))
-                .limit(candidate_count)
-                .to_list()
             )
+            if source_file:
+                # Single quotes are the SQL string delimiter, so a file name
+                # containing one would end the literal (and a crafted name could
+                # append a predicate); doubling escapes it.
+                escaped = source_file.replace("'", "''")
+                builder = builder.where(f"source_file = '{escaped}'", prefilter=True)
+            rows = builder.limit(candidate_count).to_list()
 
             results = [self._to_search_result(row) for row in rows]
             if reranker is not None and len(results) > 1:

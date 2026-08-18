@@ -52,6 +52,17 @@ change — usually a parameter, a log line, or a call site.
 parser heading-aware, and this branch did the same thing independently and
 went further. Their change is contained in ours; the conflict is textual.
 
+`lancedb_retriever.py` was the one conflict in this group with real content on
+both sides: `feature/agentic` and `feature/AgenticLangGraph` each added a
+`source_file` column and a `search(..., source_file=…)` filter, which an
+agent's per-document tool cannot work without, while this branch rewrote
+`search()` around reranking and diversification. Taking either side whole would
+have lost the other. It is therefore **implemented here** (as a prefilter, with
+diversification switched off for a single-document query), so both branches can
+resolve that file by taking ours and deleting their own version — and any
+langfuse span attributes or locking they added around it still have to be
+re-applied on top.
+
 ### 3.2 Both sides added features to the same file; merge by hand
 
 | File | ours | `feature/agentic` | `feature/AgenticLangGraph` | `feat/agent` |

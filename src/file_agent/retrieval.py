@@ -19,8 +19,12 @@ class Retriever(Protocol):
         self,
         query: str,
         top_k: int = 5,
+        source_file: str | None = None,
     ) -> list[SearchResult]:
-        """Return the chunks most relevant to the query."""
+        """Return the chunks most relevant to the query.
+
+        ``source_file`` limits the answer to one indexed document.
+        """
         raise NotImplementedError
 
     def clear(self) -> None:

@@ -593,6 +593,15 @@ Every one of these was observed on the project's own corpus, not imagined:
 - Document-diverse top-k (`RETRIEVAL_DIVERSIFY_DOCS`, on): with several
   indexed files, the best hit of every file is kept before the remaining
   slots are filled by score, so "compare A and B" questions see both files.
+- Single-document search (`search(query, top_k, source_file=…)`): the file name
+  is indexed as its own LanceDB column — a filter cannot look inside the JSON
+  the rest of the metadata is stored as — and the predicate runs as a
+  *prefilter*, so the top-k is filled from that document instead of being
+  filtered down to whatever survives. Diversification switches itself off for
+  such a query: there is only one document to diversify over. This is the entry
+  point an agent tool needs ("what does *this* file say about X?"), which over a
+  corpus of twenty files is otherwise answered from whichever file scores
+  highest.
 - The QA prompt (`QA_PROMPT=v3`, default) shows every passage under a compact
   header (`source_file`, pages, heading path) instead of raw retrieval
   metadata and asks for a complete, grounded answer, with an explicit

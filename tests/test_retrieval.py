@@ -201,6 +201,58 @@ def test_multi_document_results_include_each_documents_best_hit():
     assert files == {"a.md", "b.md"}
 
 
+def test_search_can_be_restricted_to_one_document():
+    chunks = [
+        Chunk(id="a1", text="python code one", metadata={"source_file": "a.md"}),
+        Chunk(id="a2", text="python code two", metadata={"source_file": "a.md"}),
+        Chunk(id="b1", text="python code three", metadata={"source_file": "b.md"}),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "python code one": [1.0, 0.0],
+            "python code two": [1.0, 0.0],
+            "python code three": [1.0, 0.0],
+            "python code": [1.0, 0.0],
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+    results = retriever.search("python code", top_k=5, source_file="b.md")
+
+    assert [result.chunk.id for result in results] == ["b1"]
+
+
+def test_source_file_filter_survives_a_quote_in_the_file_name():
+    chunks = [
+        Chunk(id="quoted", text="python code one", metadata={"source_file": "o'brien.md"}),
+        Chunk(id="plain", text="python code two", metadata={"source_file": "b.md"}),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "python code one": [1.0, 0.0],
+            "python code two": [1.0, 0.0],
+            "python code": [1.0, 0.0],
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+    results = retriever.search("python code", top_k=5, source_file="o'brien.md")
+
+    assert [result.chunk.id for result in results] == ["quoted"]
+
+
+def test_search_in_a_document_that_was_never_indexed_returns_nothing():
+    chunks = [Chunk(id="a1", text="python code one", metadata={"source_file": "a.md"})]
+    model = FakeEmbeddingModel({"python code one": [1.0, 0.0], "python code": [1.0, 0.0]})
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+
+    assert retriever.search("python code", source_file="missing.md") == []
+
+
 def test_document_diversification_can_be_disabled(monkeypatch):
     monkeypatch.setenv("RETRIEVAL_DIVERSIFY_DOCS", "false")
     chunks = [
