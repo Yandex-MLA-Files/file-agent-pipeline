@@ -183,7 +183,9 @@ def test_docling_parser_is_reused_between_documents_of_a_run(monkeypatch):
         resolved_pdf_backend = None
         enrichment_available = True
 
-        def __init__(self, do_ocr=False, ocr_full_page=False):
+        def __init__(
+            self, do_ocr=False, ocr_full_page=False, enrich=None, keep_empty_regions=False
+        ):
             built.append((do_ocr, ocr_full_page))
 
     monkeypatch.setattr(pipeline, "DoclingParser", _Parser)

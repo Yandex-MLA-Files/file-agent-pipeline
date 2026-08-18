@@ -6,9 +6,12 @@ from typing import Literal
 from dotenv import load_dotenv
 
 from file_agent.document import BlockType, Document
-from file_agent.parsers.docling_parser import DoclingParser, document_title
+from file_agent.parsers.docling_parser import DoclingParser, document_title, gpu_available
 from file_agent.parsers.docx_parser import DOCXParser
 from file_agent.parsers.enhancer import DocumentEnhancer
+from file_agent.parsers.formula_enrichment import FormulaEnricher
+from file_agent.parsers.formula_enrichment import resolve_cache as resolve_enrichment_cache
+from file_agent.parsers.formula_enrichment import resolve_engine as resolve_enrichment_engine
 from file_agent.parsers.html_parser import HTMLParser
 from file_agent.parsers.local_ocr import LocalPageOCR
 from file_agent.parsers.md_parser import MarkdownParser
@@ -61,10 +64,11 @@ DEFAULT_PARSER_PROFILE: ParserProfile = "structured"
 _DOCLING_PARSERS: dict[tuple, DoclingParser] = {}
 
 
-def _docling_parser(do_ocr: bool, ocr_full_page: bool) -> DoclingParser:
+def _docling_parser(do_ocr: bool, ocr_full_page: bool, engine: str = "docling") -> DoclingParser:
     key = (
         do_ocr,
         ocr_full_page,
+        engine,
         os.getenv("PDF_ENRICHMENT"),
         os.getenv("DOCLING_PDF_BACKEND"),
         os.getenv("OCR_ENGINE"),
@@ -74,7 +78,12 @@ def _docling_parser(do_ocr: bool, ocr_full_page: bool) -> DoclingParser:
     )
     parser = _DOCLING_PARSERS.get(key)
     if parser is None:
-        parser = DoclingParser(do_ocr=do_ocr, ocr_full_page=ocr_full_page)
+        parser = DoclingParser(
+            do_ocr=do_ocr,
+            ocr_full_page=ocr_full_page,
+            enrich=engine == "docling",
+            keep_empty_regions=engine == "vlm",
+        )
         _DOCLING_PARSERS.clear()  # a changed key means the old ones are stale
         _DOCLING_PARSERS[key] = parser
     return parser
@@ -222,8 +231,9 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
     # transcript from a *successful* VLM pass means the pages really are blank,
     # so re-OCRing them with the classic engine would only cost time.
     docling_ocr = do_ocr and not transcribed and not vlm_ocr_ran
+    enrichment_engine = _enrichment_engine(path)
     try:
-        parser = _docling_parser(docling_ocr, ocr_full_page and docling_ocr)
+        parser = _docling_parser(docling_ocr, ocr_full_page and docling_ocr, enrichment_engine)
         document = parser.parse(path)
     except Exception:
         logger.warning(
@@ -237,6 +247,9 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
                 document.blocks = merge_ocr_blocks(document.blocks, transcribed)
             return document
         raise
+
+    if enrichment_engine == "vlm":
+        _enrich_regions(document, path)
 
     if transcribed:
         document.blocks = merge_ocr_blocks(document.blocks, transcribed)
@@ -266,6 +279,29 @@ def resolve_ocr_engine() -> str:
     if engine not in OCR_ENGINES:
         raise ValueError(f"OCR_ENGINE must be one of {', '.join(OCR_ENGINES)}, got {engine!r}")
     return engine
+
+
+def _enrichment_engine(path: Path) -> str:
+    """Who reads the formula and code regions of this PDF: ``vlm``/``docling``/``off``."""
+    if path.suffix.lower() != ".pdf":
+        return "off"
+    return resolve_enrichment_engine(
+        vlm_available=create_vlm_client() is not None,
+        gpu_available=gpu_available(),
+    )
+
+
+def _enrich_regions(document: Document, path: Path) -> None:
+    client = create_vlm_client()
+    if client is None:  # the endpoint disappeared between the two checks
+        return
+    try:
+        stats = FormulaEnricher(client, cache=resolve_enrichment_cache()).enrich(document, path)
+    except Exception:
+        logger.warning("Formula enrichment failed for %s.", path.name, exc_info=True)
+        return
+    if stats:
+        document.metadata["enrichment"] = {"engine": "vlm", **stats}
 
 
 def _vlm_ocr_client() -> VLMPageOCR | None:

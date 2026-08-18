@@ -11,6 +11,7 @@ from docling.document_converter import DocumentConverter
 from file_agent.document import Block, BlockType, Document
 from file_agent.parsers.base import BaseParser
 from file_agent.parsers.common import infer_heading_level, list_to_markdown, strip_bullet
+from file_agent.parsers.formula_enrichment import ENRICHMENT_PENDING
 from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
@@ -45,10 +46,10 @@ def resolve_enrichment() -> bool:
         return True
     if mode in {"0", "false", "no", "off"}:
         return False
-    return _gpu_available()
+    return gpu_available()
 
 
-def _gpu_available() -> bool:
+def gpu_available() -> bool:
     try:
         import torch
 
@@ -118,12 +119,28 @@ class DoclingParser(BaseParser):
     #: model download is not retried for every document of a run.
     enrichment_available: bool = True
 
-    def __init__(self, do_ocr: bool = False, ocr_full_page: bool = False) -> None:
+    def __init__(
+        self,
+        do_ocr: bool = False,
+        ocr_full_page: bool = False,
+        enrich: bool | None = None,
+        keep_empty_regions: bool = False,
+    ) -> None:
+        """:param enrich: run Docling's own formula/code models (``None``: decide
+            from ``PDF_ENRICHMENT``).
+        :param keep_empty_regions: keep formula and code regions that carry no
+            text, so a later pass can read them from the page image. Without it
+            an empty region is dropped, as a block with no text only costs
+            retrieval quality.
+        """
         self.do_ocr = do_ocr
         self.ocr_full_page = ocr_full_page
         type(self).active_ocr_engine = None
         self._backend = self._preferred_backend()
-        self._enrich = resolve_enrichment() and type(self).enrichment_available
+        if enrich is None:
+            enrich = resolve_enrichment()
+        self._enrich = enrich and type(self).enrichment_available
+        self._keep_empty_regions = keep_empty_regions
         if self._enrich:
             apply_enrichment_batch_size()
         self._converter = self._build_converter(do_ocr, ocr_full_page, self._backend)
@@ -381,6 +398,8 @@ class DoclingParser(BaseParser):
             metadata["hierarchy_level"] = infer_heading_level(
                 content, default=int(getattr(item, "level", 1) or 1)
             )
+        if not content and block_type in (BlockType.FORMULA, BlockType.CODE):
+            metadata[ENRICHMENT_PENDING] = True
         if block_type in (BlockType.TABLE, BlockType.FIGURE, BlockType.IMAGE):
             caption = self._caption_text(item, docling_doc)
             if caption:
@@ -458,6 +477,11 @@ class DoclingParser(BaseParser):
         # Figures/images have no text of their own; keep the block so the VLM
         # enhancer can describe it and so it appears in the Markdown output.
         if block_type in (BlockType.FIGURE, BlockType.IMAGE):
+            return ""
+
+        # A formula region without enrichment is empty; keep it when something
+        # downstream is going to read it from the page image.
+        if self._keep_empty_regions and block_type in (BlockType.FORMULA, BlockType.CODE):
             return ""
 
         return None
