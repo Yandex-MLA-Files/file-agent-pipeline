@@ -3,16 +3,23 @@ import re
 
 import pandas as pd
 import pytest
+from ragas import RunConfig
 from ragas.callbacks import ChainRun
 from ragas.metrics import (
-    FactualCorrectness,
+    AnswerCorrectness,
     Faithfulness,
     LLMContextPrecisionWithReference,
     LLMContextRecall,
     ResponseRelevancy,
 )
 
-from eval.judge.ragas_judge import RagasJudge, _parse_row_traces, _TokenUsageCallback, _usage_cost
+from eval.judge.ragas_judge import (
+    RagasJudge,
+    _build_default_llm,
+    _parse_row_traces,
+    _TokenUsageCallback,
+    _usage_cost,
+)
 
 _METRIC_OFFSETS = {
     "faithfulness": 0.01,
@@ -44,7 +51,7 @@ def _score_for(name: str, sample) -> float:
 def patched_metrics(monkeypatch):
     for cls in (
         Faithfulness,
-        FactualCorrectness,
+        AnswerCorrectness,
         ResponseRelevancy,
         LLMContextPrecisionWithReference,
         LLMContextRecall,
@@ -112,7 +119,7 @@ def test_max_concurrency_reads_env_override(monkeypatch):
 def test_timeout_and_max_retries_default(monkeypatch):
     judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
     assert judge.timeout == 300
-    assert judge.max_retries == 15
+    assert judge.max_retries == 3
 
 
 def test_timeout_and_max_retries_read_env_override(monkeypatch):
@@ -121,6 +128,81 @@ def test_timeout_and_max_retries_read_env_override(monkeypatch):
     judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
     assert judge.timeout == 120
     assert judge.max_retries == 5
+
+
+def test_default_llm_applies_bounds_and_reasoning_mode(monkeypatch):
+    monkeypatch.setenv("JUDGE_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("JUDGE_API_KEY", "test-key")
+
+    llm = _build_default_llm(
+        "test-model",
+        reasoning_mode="disabled",
+        max_tokens=8192,
+        request_timeout=300,
+    )
+    # Ragas normally replaces the provider timeout with the whole-metric
+    # timeout. The bounded wrapper must retain the tighter HTTP limit.
+    llm.set_run_config(RunConfig(timeout=900))
+
+    chat = llm.langchain_llm
+    assert chat.max_tokens == 8192
+    assert chat.request_timeout == 300
+    assert chat.extra_body == {"reasoning_mode": "DISABLED"}
+
+
+def test_yandex_openai_endpoint_omits_unsupported_reasoning_mode(monkeypatch):
+    monkeypatch.setenv("JUDGE_BASE_URL", "https://ai.api.cloud.yandex.net/v1")
+    monkeypatch.setenv("JUDGE_API_KEY", "test-key")
+
+    llm = _build_default_llm("test-model", reasoning_mode="disabled")
+
+    assert llm.langchain_llm.extra_body is None
+
+
+def test_fallback_retries_only_the_incomplete_metric(monkeypatch, tmp_path):
+    primary_llm = object()
+    fallback_llm = object()
+    calls: list[tuple[str, bool]] = []
+
+    for cls in (
+        Faithfulness,
+        AnswerCorrectness,
+        ResponseRelevancy,
+        LLMContextPrecisionWithReference,
+        LLMContextRecall,
+    ):
+
+        async def fake_ascore(self, sample, callbacks, _cls=cls):
+            is_fallback = self.llm is fallback_llm
+            calls.append((self.name, is_fallback))
+            if self.name == "faithfulness" and not is_fallback:
+                return float("nan")
+            return _score_for(self.name, sample)
+
+        monkeypatch.setattr(cls, "_single_turn_ascore", fake_ascore)
+
+    monkeypatch.setenv("JUDGE_FALLBACK_REASONING_MODE", "disabled")
+    judge = RagasJudge(
+        model="test-model",
+        llm=primary_llm,
+        fallback_llm=fallback_llm,
+        embeddings=object(),
+    )
+
+    scored = judge.evaluate(_run_df(1))
+
+    assert scored.loc[0, "faithfulness"] == pytest.approx(0.01)
+    assert calls.count(("faithfulness", False)) == 1
+    assert calls.count(("faithfulness", True)) == 1
+    assert not any(is_fallback for name, is_fallback in calls if name != "faithfulness")
+
+    usage_entry = json.loads((tmp_path / "usage_log.jsonl").read_text(encoding="utf-8").strip())
+    assert usage_entry["fallback_metric_attempts"] == {"faithfulness": 1}
+
+    trace_file = next(tmp_path.glob("judge_trace_log_*.jsonl"))
+    trace_entry = json.loads(trace_file.read_text(encoding="utf-8").strip())
+    assert trace_entry["fallback_metrics"] == ["faithfulness"]
+    assert trace_entry["fallback_failed_metrics"] == []
 
 
 def test_evaluate_passes_run_config_settings_to_ragas(patched_metrics, monkeypatch):
@@ -156,6 +238,12 @@ def test_metric_names_match_report_expectations():
         "context_precision",
         "context_recall",
     )
+
+
+def test_answer_correctness_uses_the_standard_ragas_metric():
+    judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
+
+    assert isinstance(judge._metrics[1], AnswerCorrectness)
 
 
 class _FakeLLMResult:

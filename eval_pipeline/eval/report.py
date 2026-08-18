@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,10 +19,12 @@ def build_report(
 
     is_negative = None
     if negative_example_pattern is not None:
-        is_negative = scored_df["answer"].str.contains(
-            negative_example_pattern, case=False, na=False, regex=True
+        compiled_pattern = re.compile(negative_example_pattern, flags=re.IGNORECASE)
+        is_negative = scored_df["answer"].map(
+            lambda answer: bool(compiled_pattern.search(str(answer))) if pd.notna(answer) else False
         )
         report["n_negative_examples"] = int(is_negative.sum())
+        report["n_answerable_examples"] = int((~is_negative).sum())
 
     for metric in metric_names:
         report[metric] = {
@@ -33,6 +36,10 @@ def build_report(
         if is_negative is not None and is_negative.any():
             report[metric]["mean_on_negative_examples"] = round(
                 scored_df.loc[is_negative, metric].mean(), 4
+            )
+        if is_negative is not None and (~is_negative).any():
+            report[metric]["mean_on_answerable_examples"] = round(
+                scored_df.loc[~is_negative, metric].mean(), 4
             )
 
     return report
@@ -79,6 +86,10 @@ def append_run_log(
     }
     for metric in metric_names:
         entry[f"{metric}_mean"] = report[metric]["mean"]
+        for subset in ("answerable", "negative"):
+            key = f"mean_on_{subset}_examples"
+            if key in report[metric]:
+                entry[f"{metric}_{key}"] = report[metric][key]
 
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,12 +39,43 @@ def _normalize_contexts(contexts) -> list[str]:
         if isinstance(chunk, str):
             normalized.append(chunk)
         elif isinstance(chunk, dict) and isinstance(chunk.get("text"), str):
-            normalized.append(chunk["text"])
+            normalized.append(_context_with_source_metadata(chunk))
         else:
             raise RunValidationError(
                 f"context chunk must be a string or a dict with a 'text' key, got: {chunk!r}"
             )
     return normalized
+
+
+def _context_with_source_metadata(chunk: dict) -> str:
+    """Render source coordinates next to text so citation claims are judgeable."""
+
+    metadata = chunk.get("metadata_json") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    source = metadata.get("source_file") or chunk.get("document_id")
+    pages = metadata.get("page_numbers")
+    if not pages and metadata.get("page_number") is not None:
+        pages = [metadata["page_number"]]
+    if pages is not None and not pd.api.types.is_list_like(pages):
+        pages = [pages]
+
+    coordinates = []
+    if source:
+        coordinates.append(f"source: {source}")
+    if pages:
+        coordinates.append(f"pages: {', '.join(str(page) for page in pages)}")
+
+    text = chunk["text"]
+    if not coordinates:
+        return text
+    return f"[{'; '.join(coordinates)}]\n{text}"
 
 
 def _validate_schema(df: pd.DataFrame) -> None:

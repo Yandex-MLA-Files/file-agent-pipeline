@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -79,6 +80,51 @@ def test_contexts_as_chunk_dicts_extracts_text(tmp_path):
     loaded = load_run(path)
     assert loaded.loc[0, "contexts"] == ["chunk 1"]
     assert loaded.loc[1, "contexts"] == ["chunk 3"]
+
+
+def test_contexts_as_chunk_dicts_preserve_source_and_pages(tmp_path):
+    df = _valid_df().iloc[[0]].copy()
+    df["contexts"] = [
+        [
+            {
+                "rank": 1,
+                "document_id": "q0001/document.pdf",
+                "text": "chunk text",
+                "metadata_json": json.dumps(
+                    {
+                        "source_file": "document.pdf",
+                        "page_number": 7,
+                        "page_numbers": [7, 8],
+                    }
+                ),
+            }
+        ]
+    ]
+    path = tmp_path / "run.parquet"
+    df.to_parquet(path, index=False)
+
+    loaded = load_run(path)
+
+    assert loaded.loc[0, "contexts"] == ["[source: document.pdf; pages: 7, 8]\nchunk text"]
+
+
+def test_context_metadata_falls_back_to_document_id(tmp_path):
+    df = _valid_df().iloc[[0]].copy()
+    df["contexts"] = [
+        [
+            {
+                "document_id": "q0001/document.pdf",
+                "text": "chunk text",
+                "metadata_json": "not-json",
+            }
+        ]
+    ]
+    path = tmp_path / "run.parquet"
+    df.to_parquet(path, index=False)
+
+    loaded = load_run(path)
+
+    assert loaded.loc[0, "contexts"] == ["[source: q0001/document.pdf]\nchunk text"]
 
 
 def test_contexts_chunk_dict_without_text_raises(tmp_path):

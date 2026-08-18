@@ -31,13 +31,29 @@ def test_report_with_pattern_adds_negative_breakdown():
         _scored_df(), ("faithfulness",), negative_example_pattern="no information"
     )
     assert report["n_negative_examples"] == 1
+    assert report["n_answerable_examples"] == 2
     assert report["faithfulness"]["mean_on_negative_examples"] == 0.2
+    assert report["faithfulness"]["mean_on_answerable_examples"] == 0.85
 
 
 def test_report_pattern_matching_nothing_is_not_an_error():
     report = build_report(_scored_df(), ("faithfulness",), negative_example_pattern="xyz-no-match")
     assert report["n_negative_examples"] == 0
+    assert report["n_answerable_examples"] == 3
     assert "mean_on_negative_examples" not in report["faithfulness"]
+    assert report["faithfulness"]["mean_on_answerable_examples"] == pytest.approx(0.6333)
+
+
+def test_report_uses_python_regex_for_patterns_unsupported_by_pyarrow():
+    scored_df = _scored_df().convert_dtypes(dtype_backend="pyarrow")
+
+    report = build_report(
+        scored_df,
+        ("faithfulness",),
+        negative_example_pattern=r"(?:no information|not available)",
+    )
+
+    assert report["n_negative_examples"] == 1
 
 
 def test_save_report_serializes_numpy_int64(tmp_path):
@@ -93,3 +109,25 @@ def test_append_run_log_writes_one_line_per_call(tmp_path):
     assert entry["n_examples"] == 2
     assert entry["faithfulness_mean"] == 0.9
     assert "timestamp" in entry
+
+
+def test_append_run_log_includes_subset_means(tmp_path):
+    import json
+
+    from eval.report import append_run_log
+
+    log_path = tmp_path / "runs_log.jsonl"
+    report = {
+        "n_examples": 2,
+        "faithfulness": {
+            "mean": 0.7,
+            "mean_on_answerable_examples": 0.9,
+            "mean_on_negative_examples": 0.5,
+        },
+    }
+
+    append_run_log(report, ("faithfulness",), "run.parquet", "reports/v1", "ragas", log_path)
+
+    entry = json.loads(log_path.read_text(encoding="utf-8"))
+    assert entry["faithfulness_mean_on_answerable_examples"] == 0.9
+    assert entry["faithfulness_mean_on_negative_examples"] == 0.5

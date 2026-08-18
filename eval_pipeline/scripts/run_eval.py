@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from eval.judge.ragas_judge import RagasJudge
 from eval.report import append_run_log, build_report, save_report
-from eval.resumable import CheckpointError, evaluate_in_batches
+from eval.resumable import CheckpointError, IncompleteEvaluationError, evaluate_in_batches
 from eval.run_loader import RunValidationError, load_run
 
 JUDGE_NAME = "ragas"
@@ -32,10 +32,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--negative-example-pattern",
-        default=None,
+        default=os.environ.get("JUDGE_NEGATIVE_EXAMPLE_PATTERN") or None,
         help="regex matched against answer (the reference/ground-truth column) "
-        "to break metrics down over 'no answer in source' examples; "
-        "dataset-specific, off by default",
+        "to break metrics down over answerable and 'no answer in source' examples; "
+        "default: JUDGE_NEGATIVE_EXAMPLE_PATTERN or off",
     )
     parser.add_argument(
         "--runs-log",
@@ -53,7 +53,11 @@ def main() -> None:
         print(f"Run file failed validation: {e}", file=sys.stderr)
         sys.exit(1)
 
-    judge = RagasJudge()
+    out_dir = Path(args.out)
+    judge = RagasJudge(
+        usage_log_path=os.environ.get("JUDGE_USAGE_LOG_PATH") or out_dir / "usage_log.jsonl",
+        trace_log_path=os.environ.get("JUDGE_TRACE_LOG_PATH") or out_dir / "judge_trace_log.jsonl",
+    )
     try:
         evaluation = evaluate_in_batches(
             run_df,
@@ -66,11 +70,15 @@ def main() -> None:
             embedding_model=os.environ.get(
                 "JUDGE_EMBEDDING_MODEL", "intfloat/multilingual-e5-small"
             ),
+            judge_config=judge.checkpoint_config,
             on_checkpoint=lambda completed, total: print(
                 f"Checkpoint saved: {completed}/{total} rows"
             ),
+            on_incomplete=lambda ids, total: print(
+                f"Incomplete row(s) deferred: {ids}; continuing with the remaining {total} rows"
+            ),
         )
-    except (CheckpointError, ValueError) as e:
+    except (CheckpointError, IncompleteEvaluationError, ValueError) as e:
         print(f"Cannot continue evaluation: {e}", file=sys.stderr)
         sys.exit(1)
 
