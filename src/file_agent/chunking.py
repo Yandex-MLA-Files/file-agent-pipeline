@@ -443,6 +443,11 @@ class _Chunker:
         self._document = document
         self._budget = budget
         self._skip_bodyless = skip_bodyless
+        self._heading_counts: dict[str, int] = {}
+        for block in document.blocks:
+            if block.block_type == BlockType.HEADING and block.text.strip():
+                key = " ".join(block.text.split())
+                self._heading_counts[key] = self._heading_counts.get(key, 0) + 1
         # Packed pieces are joined by separators, which cost budget too.
         self._separator_size = budget.size(_SEPARATOR)
         self._line_size = budget.size("\n")
@@ -493,14 +498,13 @@ class _Chunker:
         blocks = [block for section in self._buffer for block in section.blocks]
         headings = [section.heading for section in self._buffer if section.heading]
         path = self._buffer[0].path
-        if self._skip_bodyless and not any(
-            block.text.strip() for block in blocks if block.block_type != BlockType.HEADING
-        ):
-            # A heading with nothing under it. The financial report of the corpus
-            # repeats its company name as a section header on every page, which
-            # produced identical contentless chunks competing with the real ones;
-            # the heading itself survives in the breadcrumb of the sections below
-            # it and in the table of contents.
+        if self._skip_bodyless and self._is_repeated_running_header(blocks):
+            # A heading with nothing under it, whose text repeats elsewhere in
+            # the document: the financial report of the corpus carries its
+            # company name as a section header on every page, and those chunks
+            # were identical, contentless and competing with the real ones. A
+            # *unique* empty heading is kept — it may be the only place a
+            # subject is named.
             self._buffer = []
             self._buffer_size = 0
             return
@@ -512,6 +516,15 @@ class _Chunker:
         )
         self._buffer = []
         self._buffer_size = 0
+
+    def _is_repeated_running_header(self, blocks: list[Block]) -> bool:
+        """Heading-only content whose text the document repeats elsewhere."""
+        if any(block.text.strip() for block in blocks if block.block_type != BlockType.HEADING):
+            return False
+        headings = [block.text.strip() for block in blocks if block.text.strip()]
+        if not headings:
+            return True
+        return all(self._heading_counts.get(" ".join(text.split()), 0) > 1 for text in headings)
 
     # -- splitting oversized sections -------------------------------------------------
 

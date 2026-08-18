@@ -392,6 +392,11 @@ class FormulaEnricher:
 
 _FENCE = re.compile(r"^```[a-zA-Z]*\n?|```$", re.MULTILINE)
 _SPACING_RUN = re.compile(r"(\\(?:qquad|quad|;|:|,|!))(?:\s*\\(?:qquad|quad|;|:|,|!)){2,}")
+# Macros that change how a symbol is set, not what it means.
+_TYPOGRAPHIC = re.compile(
+    r"\\(?:operatorname|mathrm|textrm|textnormal|textsf|textstyle|displaystyle|scriptstyle)"
+    r"\s*\{([^{}]*)\}"
+)
 _REFUSAL = re.compile(
     r"^(i (?:cannot|can't|am unable)|sorry|unable to|as an ai|извин|я не мог|не могу)",
     re.IGNORECASE,
@@ -417,6 +422,7 @@ def clean_transcript(text: str) -> str:
     # ("\qquad \qquad \qquad ..."); they carry nothing and cost tokens in every
     # chunk the formula lands in.
     cleaned = _SPACING_RUN.sub(lambda match: match.group(1), cleaned)
+    cleaned = simplify_latex(cleaned)
     for opening, closing in (("$$", "$$"), ("\\[", "\\]"), ("$", "$")):
         if (
             cleaned.startswith(opening)
@@ -426,6 +432,23 @@ def clean_transcript(text: str) -> str:
             cleaned = cleaned[len(opening) : -len(closing)].strip()
             break
     return cleaned
+
+
+def simplify_latex(text: str) -> str:
+    """Drop the typographic macros a model wraps every symbol in.
+
+    ``\\operatorname { P } ( A \\mid B )`` and ``P ( A \\mid B )`` render the
+    same, but the first spends half its tokens on typesetting: the retriever
+    embeds those tokens, and BM25 matches them, so the formula competes with
+    the prose around it on noise rather than on content.
+    """
+    simplified = text
+    for _ in range(3):  # nested wrappers: \mathrm { \mathrm { P } }
+        replaced = _TYPOGRAPHIC.sub(lambda match: match.group(1).strip(), simplified)
+        if replaced == simplified:
+            break
+        simplified = replaced
+    return re.sub(r"[ \t]{2,}", " ", simplified).strip()
 
 
 def validate_transcript(text: str, kind: str = "formula") -> TranscriptCheck:

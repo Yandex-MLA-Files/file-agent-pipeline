@@ -268,3 +268,16 @@ def test_crops_are_rendered_from_the_pdf(tmp_path):
     # 240 x 40 points plus 18 % padding, rendered at 2x.
     assert 600 < width < 750
     assert 80 < height < 160
+
+
+def test_typographic_macros_are_dropped_before_indexing():
+    """`\operatorname{P}(A)` and `P(A)` render alike; only one is searchable."""
+    from file_agent.parsers.formula_enrichment import simplify_latex
+
+    assert simplify_latex(r"\operatorname { P } ( A \mid B )") == r"P ( A \mid B )"
+    assert simplify_latex(r"{ \mathrm { P } } ( A )") == "{ P } ( A )"
+    assert simplify_latex(r"\mathrm { \mathrm { P } } ( A )") == "P ( A )"
+    # Meaningful structure is untouched.
+    assert simplify_latex(r"\frac { 1 } { 2 } \sum _ { i } x _ { i }") == (
+        r"\frac { 1 } { 2 } \sum _ { i } x _ { i }"
+    )
