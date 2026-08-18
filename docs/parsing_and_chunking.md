@@ -259,6 +259,7 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | v5, judged a second time | 127 | 0 | 0.956 | 0.616 | 0.823 | 0.763 | 0.861 | — |
 | v5 + concise prompt (v4) | 127 | 0 | 0.941 | 0.554 | 0.823 | 0.772 | 0.854 | 10.8 |
 | v5 + top-k 8 | 127 | 0 | 0.962 | 0.598 | 0.846 | 0.744 | 0.875 | 14.1 |
+| v8 = v5 + parsing round 3 | 127 | 0 | 0.950 | 0.597 | 0.822 | 0.767 | 0.847 | 18.3 |
 
 Means over successfully processed rows only differ for the baseline (0.715 /
 0.429 / 0.560 / 0.570 / 0.630 over 122 rows).
@@ -298,6 +299,19 @@ text:
   ingestion changes, not measurement drift.
 - **The footer was not what produced the zero correctness scores**: they are
   still there without it (0.601 → 0.603).
+
+**The third round of parsing work is metric-neutral on this corpus, and that
+is the expected result.** Formula/code enrichment, DOCX footnotes, text
+frames, nested tables and real list numbers, HTML merged cells and the
+column repair recover content that would otherwise be silently missing — 378
+formulas in one lecture, 9 footnotes, 4 text frames, the item numbers of the
+exam programme — but these 127 questions do not ask about that content, and
+the corpus contains no HTML at all. Per document, 26 of the 29 groups score
+*exactly* the same as in v5; the three that moved all involve `AB_test.pdf`,
+the only file whose text comes from 29 VLM-transcribed pages, and those
+transcripts differ between runs (the model is not deterministic under
+batching). The changes are kept because losing a document's formulas or
+footnotes is a correctness bug that this dataset simply does not measure.
 
 Two settings were tried on top of v5 and neither is adopted:
 
