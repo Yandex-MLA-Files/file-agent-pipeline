@@ -367,6 +367,35 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | `pc-v7-topk8-127` | v5 (default prompt) with `--top-k 8`: eight passages per question instead of five, for the multi-document questions whose context recall is the lowest of the set. |
 | `pc-v5-rejudge` | The v5 run judged a second time, unchanged, to measure how much of a difference between runs is the judge's own variance. |
 | `pc-v8-parsing3-127` | v5 defaults plus the third round of parsing work: formula/code enrichment for PDF, DOCX footnotes, text frames, nested tables and real list numbers, HTML merged cells, and the two-column reading-order repair. (Hyperlink targets landed after the run started and are the one item it does not cover.) |
+| `pc-v9-vlmenrich-127` | v8 with formulas read by the serving model instead of Docling's, plus the chunking fixes the ingestion audit produced (abbreviated headers on wide tables, no contentless chunks, summaries trimmed to one chunk). |
+| `pc-v10-enrich-fixes-127` (**current default**) | v9 with the two corrections its own numbers demanded: an empty heading is dropped only when the document *repeats* it, and enriched formulas are stored without their typesetting macros. |
+
+### 3.1a Auditing the ingestion itself (`tools/audit_ingestion.py`)
+
+The judged runs measure answers; they say nothing about a chunk that quietly
+lost its table header. `tools/audit_ingestion.py` parses and chunks a folder
+and checks structural invariants — empty blocks, chunks over the encoder
+budget, table pieces without a header, contentless or duplicated chunks, lost
+page numbers, mojibake — and with `--coverage N` samples sentences from an
+*independent* read of each file (PyMuPDF text layer, python-docx paragraphs,
+openpyxl cells) and verifies they are still findable in the chunks.
+
+Run over the project's corpus it found the two defects §2.3 describes, and
+after the fixes:
+
+| Rule | before | after |
+|---|---|---|
+| table chunk without a header | 51 | 14 (regions that have no header row in the source) |
+| chunk with no content of its own | 2 | 0 |
+| duplicated chunk | 11 | 9 (rows repeated verbatim in the source table) |
+| automatic summaries split over several chunks (the report) | 69 pieces for 34 tables | 14 |
+
+Content survival, with OCR and figure description switched off so only parsing
+and chunking are measured: **641 of 651 sampled sentences** (DOCX 160/160,
+Markdown 80/80, PPTX 10/10, TXT 80/80, XLSX 1/1, PDF 310/320). Every one of
+the ten misses is a table-of-contents line with dot leaders, or text that
+lives inside a figure and therefore reaches the index through the description
+pass that this probe disables.
 
 ### 3.2 Results (ragas, judge = Qwen3.5-27B without thinking; pipeline failures scored 0)
 
@@ -383,9 +412,31 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | v5 + concise prompt (v4) | 127 | 0 | 0.941 | 0.554 | 0.823 | 0.772 | 0.854 | 10.8 |
 | v5 + top-k 8 | 127 | 0 | 0.962 | 0.598 | 0.846 | 0.744 | 0.875 | 14.1 |
 | v8 = v5 + parsing round 3 | 127 | 0 | 0.950 | 0.597 | 0.822 | 0.767 | 0.847 | 18.3 |
+| v9 = v8 + VLM enrichment + chunking fixes | 127 | 0 | 0.959 | 0.565 | 0.824 | 0.752 | 0.852 | 14.9 |
+| **v10 = v9 + the two corrections (current default)** | 127 | 0 | 0.954 | 0.577 | 0.823 | 0.762 | 0.843 | **15.1** |
 
 Means over successfully processed rows only differ for the baseline (0.715 /
 0.429 / 0.560 / 0.570 / 0.630 over 122 rows).
+
+**v10 against v8, read properly.** 108 of the 127 answers are *byte-identical*
+to v8's, and on those rows the judge gives 0.607 → 0.605 — that is the
+measurement floor. Of the 19 answers that did change, two carry the whole
+difference: `q0029` and `q0030` ("does the lecture state a minimum sample
+size / give a formula for the confidence interval?") went 1.00 → 0.00 while
+saying the same thing, the new answer merely opening with "Нет," before the
+sentence v8 scored 1.00 for. Both keep faithfulness 1.00 and context recall
+1.00 in both runs. Two rows are 0.016 of a 127-row mean — about four fifths of
+the −0.020 gap — and faithfulness on the same 19 changed rows *rose*, 0.908 →
+0.950. Those two questions belong to `AB_test.pdf`, whose text comes from 29
+model-transcribed pages that differ between runs, so the wording change is not
+something the parser chose.
+
+Read together with §2.2: the accuracy of the answers is unchanged, ingestion
+of a formula-dense document is 2.6× faster, a question is answered 3.2 s
+faster, and the formulas themselves are measurably better transcribed. The
+first attempt (v9) is kept in the table because it is where the two
+corrections came from: dropping *every* empty heading cost Exam.md four chunks
+and the philosophy course two, and each lost a question with them.
 
 **`answer_correctness` is the noisy column of this table and must not be read
 alone.** The judge measures it as ragas `FactualCorrectness` in recall mode:
