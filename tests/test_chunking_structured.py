@@ -361,3 +361,85 @@ def test_a_document_of_headings_only_is_still_indexed():
 
     assert chunks
     assert "Глава 1" in chunks[0].text
+
+
+def _formula_document():
+    blocks = [
+        Block(
+            id="h1",
+            text="Условная вероятность",
+            type=BlockType.HEADING.value,
+            metadata={"source_file": "lecture.pdf", "hierarchy_level": 1},
+            block_type=BlockType.HEADING,
+            page_number=1,
+        ),
+        Block(
+            id="t1",
+            text="Условной вероятностью события A при условии B называется величина",
+            type=BlockType.TEXT.value,
+            metadata={"source_file": "lecture.pdf"},
+            block_type=BlockType.TEXT,
+            page_number=1,
+        ),
+        Block(
+            id="f1",
+            text=r"P(A \mid B) = \frac{P(A \cap B)}{P(B)}",
+            type=BlockType.FORMULA.value,
+            metadata={"source_file": "lecture.pdf", "enrichment": "vlm"},
+            block_type=BlockType.FORMULA,
+            page_number=1,
+        ),
+        Block(
+            id="t2",
+            text="Она определена, когда вероятность события B строго положительна.",
+            type=BlockType.TEXT.value,
+            metadata={"source_file": "lecture.pdf"},
+            block_type=BlockType.TEXT,
+            page_number=1,
+        ),
+    ]
+    return Document(file_name="lecture.pdf", file_type="pdf", blocks=blocks, metadata={})
+
+
+def test_formulas_are_read_by_the_model_but_not_embedded(monkeypatch):
+    """378 formulas would otherwise dilute the prose a question matches."""
+    monkeypatch.delenv("FORMULA_INDEXING", raising=False)
+
+    chunks = chunk_document(_formula_document(), max_chars=200, overlap=0)
+    body = "\n".join(c.text for c in chunks)
+    context = "\n".join(str((c.metadata or {}).get("context") or "") for c in chunks)
+
+    assert "Условной вероятностью" in body
+    assert r"\frac{P(A \cap B)}{P(B)}" not in body
+    assert r"\frac{P(A \cap B)}{P(B)}" in context
+
+
+def test_formulas_can_be_embedded_too(monkeypatch):
+    monkeypatch.setenv("FORMULA_INDEXING", "inline")
+
+    chunks = chunk_document(_formula_document(), max_chars=200, overlap=0)
+
+    assert any(r"\frac{P(A \cap B)}{P(B)}" in c.text for c in chunks)
+
+
+def test_a_section_of_only_formulas_is_still_indexed(monkeypatch):
+    monkeypatch.delenv("FORMULA_INDEXING", raising=False)
+    document = Document(
+        file_name="lecture.pdf",
+        file_type="pdf",
+        blocks=[
+            Block(
+                id="f1",
+                text=r"E[\xi] = \sum_k k \, P\{\xi = k\}",
+                type=BlockType.FORMULA.value,
+                metadata={"source_file": "lecture.pdf"},
+                block_type=BlockType.FORMULA,
+                page_number=2,
+            )
+        ],
+        metadata={},
+    )
+
+    chunks = chunk_document(document, max_chars=200, overlap=0)
+
+    assert chunks and r"E[\xi]" in chunks[0].text

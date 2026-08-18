@@ -67,11 +67,63 @@ def gpu_available() -> bool:
 ENRICHMENT_BATCH_ENV = "PDF_ENRICHMENT_BATCH"
 
 
-def apply_enrichment_batch_size() -> int | None:
-    """Apply ``PDF_ENRICHMENT_BATCH`` to Docling's enrichment stage."""
-    raw = (os.getenv(ENRICHMENT_BATCH_ENV) or "").strip()
-    if not raw:
+DEFAULT_ENRICHMENT_BATCH = 5
+# Measured on the CodeFormulaV2 stage: ~2.5 GB of weights and workspace, then
+# roughly a quarter of a gigabyte per region in the batch (16 regions ran in
+# ~5.5 GB; 32 asked for 2.4-3.2 GB more than the 1.9 GB that were free).
+ENRICHMENT_BATCH_BASE_GB = 2.5
+ENRICHMENT_BATCH_PER_ELEMENT_GB = 0.25
+# Never plan to use the last of the card: something else shares this GPU.
+ENRICHMENT_BATCH_MEMORY_MARGIN_GB = 1.0
+MAX_ENRICHMENT_BATCH = 32
+
+
+def free_gpu_memory_gb() -> float | None:
+    """Free memory on the current CUDA device, or None when there is no GPU."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        free_bytes, _total = torch.cuda.mem_get_info()
+        return free_bytes / (1024**3)
+    except Exception:  # pragma: no cover - driver or build without mem_get_info
         return None
+
+
+def resolve_enrichment_batch_size(free_gb: float | None) -> int:
+    """Batch size that fits the memory actually free right now.
+
+    Docling swallows an out-of-memory inside the enrichment stage and returns
+    empty text for the whole batch, so a batch chosen for a card that is not
+    there costs the document all of its formulas — silently. The size is
+    therefore derived from the free memory rather than fixed: on the shared
+    A100 (~8 GB free next to vLLM) that lands on 16, which is ~29 % faster
+    than Docling's 5, and on a busy card it falls back to 5.
+    """
+    if free_gb is None:
+        return DEFAULT_ENRICHMENT_BATCH
+    usable = free_gb - ENRICHMENT_BATCH_BASE_GB - ENRICHMENT_BATCH_MEMORY_MARGIN_GB
+    if usable <= 0:
+        return DEFAULT_ENRICHMENT_BATCH
+    size = int(usable / ENRICHMENT_BATCH_PER_ELEMENT_GB)
+    return max(DEFAULT_ENRICHMENT_BATCH, min(size, MAX_ENRICHMENT_BATCH))
+
+
+def apply_enrichment_batch_size() -> int | None:
+    """Apply ``PDF_ENRICHMENT_BATCH`` to Docling's enrichment stage.
+
+    ``auto`` (the default) sizes the batch from the free GPU memory; a number
+    pins it; anything else is ignored with a warning.
+    """
+    raw = (os.getenv(ENRICHMENT_BATCH_ENV) or "auto").strip().lower()
+    if raw in ("auto", ""):
+        free_gb = free_gpu_memory_gb()
+        size = resolve_enrichment_batch_size(free_gb)
+        if size == DEFAULT_ENRICHMENT_BATCH:
+            return None  # Docling's own default; nothing to patch
+        logger.info("Formula enrichment batch %d (%.1f GB free on the GPU).", size, free_gb or 0.0)
+        return _patch_batch_size(size)
     try:
         size = int(raw)
     except ValueError:
@@ -80,7 +132,10 @@ def apply_enrichment_batch_size() -> int | None:
     if size < 1:
         logger.warning("%s must be at least 1; ignoring %d.", ENRICHMENT_BATCH_ENV, size)
         return None
+    return _patch_batch_size(size)
 
+
+def _patch_batch_size(size: int) -> int | None:
     for module_path, class_name in (
         ("docling.models.stages.code_formula.code_formula_vlm_model", "CodeFormulaVlmModel"),
         ("docling.models.code_formula_model", "CodeFormulaModel"),

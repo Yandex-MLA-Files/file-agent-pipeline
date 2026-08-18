@@ -148,3 +148,32 @@ def write_fixture(out: Path) -> Path:
 def write_numbered_headings(out: Path) -> Path:
     """Write a document whose sections are numbered by ``numbering.xml``."""
     return _write(out, NUMBERED_HEADINGS)
+
+
+# Word stores an equation as an m:oMath tree; python-docx walks past it.
+M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+
+EQUATIONS = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:m="{M}">
+  <w:body>
+    <w:p><w:r><w:t>Условная вероятность определяется формулой:</w:t></w:r></w:p>
+    <w:p>
+      <m:oMathPara><m:oMath>
+        <m:r><m:t>P(A|B)=</m:t></m:r>
+        <m:f><m:num><m:r><m:t>P(A∩B)</m:t></m:r></m:num>
+          <m:den><m:r><m:t>P(B)</m:t></m:r></m:den></m:f>
+      </m:oMath></m:oMathPara>
+    </w:p>
+    <w:p><w:r><w:t xml:space="preserve">Дисперсия равна </w:t></w:r>
+      <m:oMath>
+        <m:sSup><m:e><m:r><m:t>σ</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup>
+      </m:oMath>
+      <w:r><w:t xml:space="preserve"> для выборки.</w:t></w:r>
+    </w:p>
+  </w:body>
+</w:document>"""
+
+
+def write_equations(out: Path) -> Path:
+    """Write a document with a display equation and an inline one."""
+    return _write(out, EQUATIONS)

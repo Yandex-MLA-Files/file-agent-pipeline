@@ -99,6 +99,10 @@ TABLE_ROW_RECORD_MAX_CELL_CHARS = 300
 DEFAULT_TABLE_PROFILES = True
 TABLE_PROFILE_MIN_ROWS = 4
 
+# Formulas are shown, not searched: a standalone formula block travels in the
+# parent passage the model reads but stays out of the embedded chunk text.
+DEFAULT_FORMULA_INDEXING = "context"
+
 # Semantic (topic-boundary) splitting of long unstructured prose. Structured
 # documents are already cut on their own headings, but a transcript or a
 # lecture with no subheadings is cut at the token budget, which lands mid-topic.
@@ -368,6 +372,31 @@ def chunk_document(
         return chunks
 
 
+def _indexable(block: Block) -> bool:
+    """Whether a block's text belongs in what the retriever embeds.
+
+    A standalone formula is the one exception. Enriching an 85-page lecture
+    adds 378 of them and 31 % more text, which moves the document from 223
+    chunks to 335: the prose that a question actually matches is spread over
+    more chunks, each diluted with LaTeX that no natural-language query looks
+    like. Measured on the corpus, indexing them cost 0.015 answer correctness
+    while answering no question. They stay in the parent passage the model
+    reads (small-to-big), so the formula is still there when the answer needs
+    it — it just stops competing for retrieval slots.
+    ``FORMULA_INDEXING=inline`` puts them back into the embedded text.
+    """
+    if block.block_type != BlockType.FORMULA:
+        return True
+    return _formula_indexing() == "inline"
+
+
+def _formula_indexing() -> str:
+    mode = (os.getenv("FORMULA_INDEXING") or DEFAULT_FORMULA_INDEXING).strip().lower()
+    if mode not in ("context", "inline"):
+        raise ValueError(f"FORMULA_INDEXING must be 'context' or 'inline', got {mode!r}")
+    return mode
+
+
 def _run_chunker(
     document: Document,
     budget: "_Budget",
@@ -394,11 +423,19 @@ class _Section:
 
     @property
     def text(self) -> str:
-        return _SEPARATOR.join(b.text for b in self.blocks if b.text)
+        return _SEPARATOR.join(b.text for b in self.indexed_blocks if b.text)
+
+    @property
+    def indexed_blocks(self) -> list[Block]:
+        """Blocks whose text is embedded (see :func:`_indexable`)."""
+        indexed = [b for b in self.blocks if _indexable(b)]
+        # A section of nothing but formulas is still content: index it rather
+        # than drop it.
+        return indexed or self.blocks
 
     @property
     def body_blocks(self) -> list[Block]:
-        return [b for b in self.blocks if b.block_type != BlockType.HEADING]
+        return [b for b in self.indexed_blocks if b.block_type != BlockType.HEADING]
 
 
 def _group_sections(blocks: list[Block]) -> list[_Section]:
@@ -508,11 +545,20 @@ class _Chunker:
             self._buffer = []
             self._buffer_size = 0
             return
+        indexed = [block for section in self._buffer for block in section.indexed_blocks]
+        # When the section holds blocks that are shown but not embedded (a
+        # formula), the chunk carries the full section as its parent passage.
+        parent = (
+            self._parent_window(blocks, 0, len(blocks), path)
+            if len(indexed) != len(blocks)
+            else None
+        )
         self._emit(
-            blocks,
+            indexed,
             section=headings[0] if headings else (path[-1] if path else None),
             sections=headings,
             path=path,
+            parent=parent,
         )
         self._buffer = []
         self._buffer_size = 0
@@ -532,7 +578,8 @@ class _Chunker:
         heading = section.heading
         # The heading itself travels in the breadcrumb of every piece; the body
         # is what gets packed. A piece never consists of a heading alone.
-        blocks = section.body_blocks or section.blocks
+        blocks = section.body_blocks or section.indexed_blocks
+        window_blocks = [b for b in section.blocks if b.block_type != BlockType.HEADING]
         path = section.path + ([heading] if heading else [])
         limit = self._reserved_limit(path)
         buffer: list[Block] = []
@@ -544,7 +591,9 @@ class _Chunker:
             nonlocal buffer, buffer_size
             if not buffer:
                 return
-            parent = self._parent_window(blocks, end_index - len(buffer), end_index, path)
+            parent = self._window_around(
+                window_blocks, blocks, end_index - len(buffer), end_index, path
+            )
             self._emit(
                 buffer,
                 section=heading,
@@ -564,7 +613,7 @@ class _Chunker:
             if block.block_type == BlockType.TABLE or size > limit:
                 flush_buffer(index)
                 buffer, buffer_size = [], 0
-                parent = self._parent_window(blocks, index, index + 1, path)
+                parent = self._window_around(window_blocks, blocks, index, index + 1, path)
                 self._emit_oversized(block, text, heading, path, parent)
                 cursor = index + 1
                 continue
@@ -599,6 +648,32 @@ class _Chunker:
         if len(seed) == len(blocks):  # never carry the whole chunk forward
             seed = seed[1:]
         return seed
+
+    def _window_around(
+        self,
+        window_blocks: list[Block],
+        packed: list[Block],
+        start: int,
+        end: int,
+        path: list[str],
+    ) -> str:
+        """Parent passage for ``packed[start:end]``, taken from the full section.
+
+        The packed list is what gets embedded and may leave blocks out (a
+        formula, see :func:`_indexable`); the passage the model reads must
+        still contain them, so positions are translated into the full list.
+        """
+        if window_blocks is packed or len(window_blocks) == len(packed):
+            return self._parent_window(window_blocks, start, end, path)
+        start = max(0, min(start, len(packed) - 1)) if packed else 0
+        end = max(start + 1, min(end, len(packed)))
+        first, last = packed[start], packed[end - 1]
+        try:
+            window_start = window_blocks.index(first)
+            window_end = window_blocks.index(last) + 1
+        except ValueError:  # pragma: no cover - packed always comes from blocks
+            return self._parent_window(packed, start, end, path)
+        return self._parent_window(window_blocks, window_start, window_end, path)
 
     def _parent_window(self, blocks: list[Block], start: int, end: int, path: list[str]) -> str:
         """Section text around ``blocks[start:end]``, grown both ways up to the cap.

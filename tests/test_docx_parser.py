@@ -205,3 +205,33 @@ def test_hyperlink_target_is_kept_next_to_its_text(tmp_path):
     body = next(b for b in parsed.blocks if "установщик" in b.text)
 
     assert body.text == ("скачайте установщик (https://www.mongodb.com/try/download/compass)")
+
+
+def test_word_equations_are_read_as_latex(tmp_path):
+    """python-docx walks past m:oMath, so equations used to vanish silently."""
+    from tests._docx_fixture import write_equations
+
+    document = DOCXParser().parse(write_equations(tmp_path / "math.docx"))
+    texts = [(b.block_type.value, b.text) for b in document.blocks]
+
+    # A paragraph that is only an equation becomes a formula block ...
+    assert ("formula", r"P(A|B)=\frac{P(A \cap B)}{P(B)}") in texts
+    # ... an inline one stays inside its sentence, which stops the sentence
+    # from arriving as "Дисперсия равна для выборки".
+    assert ("text", r"Дисперсия равна $\sigma^{2}$ для выборки.") in texts
+    assert document.metadata["formula_count"] == 1
+
+
+def test_equations_survive_without_the_latex_converter(tmp_path, monkeypatch):
+    """Without Docling's converter the symbols are still indexed, not dropped."""
+    from file_agent.parsers import docx_math
+    from tests._docx_fixture import write_equations
+
+    monkeypatch.setattr(docx_math, "_converter", None)
+    monkeypatch.setattr(docx_math, "_converter_loaded", True)
+
+    document = DOCXParser().parse(write_equations(tmp_path / "math.docx"))
+    texts = [b.text for b in document.blocks]
+
+    assert "P(A|B)=P(A∩B)P(B)" in texts
+    assert any("σ2" in text for text in texts)

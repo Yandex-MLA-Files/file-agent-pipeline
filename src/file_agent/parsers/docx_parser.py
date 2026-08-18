@@ -41,6 +41,12 @@ from file_agent.parsers.common import (
     strip_bullet,
     table_to_markdown,
 )
+from file_agent.parsers.docx_math import (
+    display_equation,
+    is_math,
+    omml_to_latex,
+    outermost_math,
+)
 from file_agent.parsers.docx_numbering import DocxNumbering
 from file_agent.telemetry import tracer
 
@@ -117,6 +123,7 @@ class DOCXParser(BaseParser):
                     "figure_count": walker.figure_count,
                     "table_count": walker.table_count,
                     "footnote_count": walker.footnote_count,
+                    "formula_count": walker.formula_count,
                     "text_box_count": walker.text_box_count,
                 },
             )
@@ -134,6 +141,7 @@ class _BodyWalker:
         self.figure_count = 0
         self.table_count = 0
         self.footnote_count = 0
+        self.formula_count = 0
         self.text_box_count = 0
         self._body_size = self._estimate_body_font_size()
         self._pending_list: list[tuple[int, str]] = []
@@ -211,6 +219,18 @@ class _BodyWalker:
             self._emit_text_boxes(text_boxes)
             return
 
+        equation = display_equation(paragraph._p)
+        if equation:
+            # A paragraph that is nothing but an equation is the statement
+            # itself, not a phrase inside one.
+            self._flush_list()
+            self._last_figure = None
+            self.formula_count += 1
+            self.factory.add(equation, BlockType.FORMULA, {"latex": True})
+            self._emit_text_boxes(text_boxes)
+            self._emit_notes(paragraph)
+            return
+
         style_name = self._style_name(paragraph)
         level = self._heading_level(paragraph, style_name, text)
         if level is not None:
@@ -286,9 +306,19 @@ class _BodyWalker:
         # different reading order, so their runs are excluded here and emitted
         # as their own blocks (see :meth:`_text_boxes`).
         framed = {node for box in paragraph._p.iter(_TEXTBOX_CONTENT) for node in box.iter()}
+        # An equation is an ``m:oMath`` tree, not ``w:t`` runs: it is converted
+        # to LaTeX in place, so "Дисперсия равна $\sigma^{2}=…$ для выборки"
+        # keeps both its sentence and its formula.
+        equations = outermost_math(paragraph._p)
+        inside_equation = {node for math in equations for node in math.iter() if node is not math}
         parts: list[str] = []
         for node in paragraph._p.iter():
-            if node in framed:
+            if node in framed or node in inside_equation:
+                continue
+            if is_math(node):
+                latex = omml_to_latex(node)
+                if latex:
+                    parts.append(f" ${latex}$ ")
                 continue
             tag = node.tag
             if tag == qn("w:t"):

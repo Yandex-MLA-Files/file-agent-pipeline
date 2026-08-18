@@ -164,9 +164,11 @@ def test_blocks_without_geometry_are_never_reordered():
 
 
 def test_enrichment_batch_size_is_opt_in_and_survives_a_bad_value(monkeypatch, caplog):
+    from file_agent.parsers import docling_parser
     from file_agent.parsers.docling_parser import apply_enrichment_batch_size
 
     monkeypatch.delenv("PDF_ENRICHMENT_BATCH", raising=False)
+    monkeypatch.setattr(docling_parser, "free_gpu_memory_gb", lambda: None)
     assert apply_enrichment_batch_size() is None
 
     monkeypatch.setenv("PDF_ENRICHMENT_BATCH", "not-a-number")
@@ -196,3 +198,32 @@ def test_enrichment_that_returns_nothing_is_reported(caplog):
         _warn_on_lost_enrichment(Path("lecture.pdf"), enriched=378, empty=4)
         _warn_on_lost_enrichment(Path("paper.pdf"), enriched=0, empty=0)
     assert caplog.text == ""
+
+
+def test_the_enrichment_batch_is_sized_from_the_free_gpu_memory():
+    """Docling hides an out-of-memory and returns *no* formulas, so plan for it."""
+    from file_agent.parsers.docling_parser import resolve_enrichment_batch_size
+
+    # No GPU, or a card with nothing to spare: Docling's own default.
+    assert resolve_enrichment_batch_size(None) == 5
+    assert resolve_enrichment_batch_size(2.0) == 5
+    # The shared A100 next to vLLM (~8 GB free) — the size measured as safe.
+    assert resolve_enrichment_batch_size(8.0) == 18
+    # A free card is capped, not extrapolated.
+    assert resolve_enrichment_batch_size(70.0) == 32
+
+
+def test_an_explicit_batch_size_still_wins(monkeypatch):
+    from docling.models.stages.code_formula.code_formula_vlm_model import CodeFormulaVlmModel
+
+    from file_agent.parsers import docling_parser
+    from file_agent.parsers.docling_parser import apply_enrichment_batch_size
+
+    monkeypatch.setattr(docling_parser, "free_gpu_memory_gb", lambda: 70.0)
+    monkeypatch.setenv("PDF_ENRICHMENT_BATCH", "7")
+    assert apply_enrichment_batch_size() == 7
+    assert CodeFormulaVlmModel.elements_batch_size == 7
+
+    monkeypatch.setenv("PDF_ENRICHMENT_BATCH", "auto")
+    assert apply_enrichment_batch_size() == 32
+    CodeFormulaVlmModel.elements_batch_size = 5
