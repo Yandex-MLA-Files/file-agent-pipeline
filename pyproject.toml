@@ -52,7 +52,10 @@ torch = [{ index = "pytorch-cu124", marker = "sys_platform == 'linux'" }]
 torchvision = [{ index = "pytorch-cu124", marker = "sys_platform == 'linux'" }]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+# "." keeps the shared fixtures importable as ``tests._docx_fixture`` under the
+# ``pytest`` console script, which — unlike ``python -m pytest`` — does not put
+# the working directory on sys.path.
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 
 [tool.ruff]
