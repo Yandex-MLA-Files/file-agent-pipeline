@@ -52,6 +52,34 @@ ParserProfile = Literal["structured", "legacy"]
 DEFAULT_PARSER_PROFILE: ParserProfile = "structured"
 
 
+# Docling parsers, keyed by everything that shapes their converter. Each
+# converter builds its own layout, table and enrichment models, so a fresh one
+# per file costs about 2.4 s per document (34.6 s against 27.5 s over three
+# PDFs). Ingestion is sequential, so one live parser per configuration is
+# enough; the key carries the environment so a setting changed between calls
+# still takes effect.
+_DOCLING_PARSERS: dict[tuple, DoclingParser] = {}
+
+
+def _docling_parser(do_ocr: bool, ocr_full_page: bool) -> DoclingParser:
+    key = (
+        do_ocr,
+        ocr_full_page,
+        os.getenv("PDF_ENRICHMENT"),
+        os.getenv("DOCLING_PDF_BACKEND"),
+        os.getenv("OCR_ENGINE"),
+        os.getenv("OCR_LANGS"),
+        DoclingParser.resolved_pdf_backend,
+        DoclingParser.enrichment_available,
+    )
+    parser = _DOCLING_PARSERS.get(key)
+    if parser is None:
+        parser = DoclingParser(do_ocr=do_ocr, ocr_full_page=ocr_full_page)
+        _DOCLING_PARSERS.clear()  # a changed key means the old ones are stale
+        _DOCLING_PARSERS[key] = parser
+    return parser
+
+
 def parse_file(
     file_path: str | Path,
     enable_vlm: bool | None = None,
@@ -195,7 +223,7 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
     # so re-OCRing them with the classic engine would only cost time.
     docling_ocr = do_ocr and not transcribed and not vlm_ocr_ran
     try:
-        parser = DoclingParser(do_ocr=docling_ocr, ocr_full_page=ocr_full_page and docling_ocr)
+        parser = _docling_parser(docling_ocr, ocr_full_page and docling_ocr)
         document = parser.parse(path)
     except Exception:
         logger.warning(

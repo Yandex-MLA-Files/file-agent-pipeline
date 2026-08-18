@@ -170,3 +170,30 @@ def test_auto_engine_arms_the_local_fallback_and_vlm_does_not(monkeypatch):
 
     monkeypatch.setenv("OCR_ENGINE", "easyocr")
     assert pipeline._vlm_ocr_client() is None
+
+
+def test_docling_parser_is_reused_between_documents_of_a_run(monkeypatch):
+    """One converter per configuration: rebuilding it costs seconds per file."""
+    from file_agent import pipeline
+
+    pipeline._DOCLING_PARSERS.clear()
+    built = []
+
+    class _Parser:
+        resolved_pdf_backend = None
+        enrichment_available = True
+
+        def __init__(self, do_ocr=False, ocr_full_page=False):
+            built.append((do_ocr, ocr_full_page))
+
+    monkeypatch.setattr(pipeline, "DoclingParser", _Parser)
+
+    first = pipeline._docling_parser(False, False)
+    assert pipeline._docling_parser(False, False) is first
+    assert pipeline._docling_parser(True, False) is not first
+    assert built == [(False, False), (True, False)]
+
+    # A changed setting must not be served from the cache.
+    monkeypatch.setenv("PDF_ENRICHMENT", "off")
+    assert pipeline._docling_parser(False, False) is not first
+    pipeline._DOCLING_PARSERS.clear()
