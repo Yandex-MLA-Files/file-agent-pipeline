@@ -31,7 +31,7 @@ coordinates and a document title.
 | Format | Implementation | Structure recovered |
 |---|---|---|
 | PDF | Docling (layout model, reading order, tables) + post-processing in `docling_parser.py` | heading levels inferred from numbering (`1.2.3` → level 3), consecutive list items grouped into one list block (bullet glyphs stripped), captions folded into figure/table blocks, headings split over two lines stitched, running headers/footers dropped, words broken by justification rejoined (`обыкновен- ных` → `обыкновенных`: 26 such breaks in one financial report, each one a term the query could not match), **formulas and code re-read by Docling's enrichment models** (`PDF_ENRICHMENT`) so a formula arrives as LaTeX instead of glyph soup, and a **two-column page whose reading order crosses the gutter** is re-sorted column by column |
-| DOCX | `python-docx` (`docx_parser.py`), Docling as fallback | whole paragraphs; heading levels from `Heading N`/`Заголовок N` styles, outline levels or bold-and-larger formatting; **list numbers replayed from `numbering.xml`** (decimal/letter/roman, multi-level `%1.%2.` templates, per-instance start overrides), tables with merged cells and **tables nested in cells**, **footnotes and endnotes** (marked in the sentence, emitted next to it), **text frames** (their own blocks instead of being concatenated into the host paragraph), embedded pictures with captions, monospace paragraphs as code |
+| DOCX | `python-docx` (`docx_parser.py`), Docling as fallback | whole paragraphs; **Word equations (`m:oMath`) as LaTeX** (a display equation becomes a formula block, an inline one stays inside its sentence); heading levels from `Heading N`/`Заголовок N` styles, outline levels or bold-and-larger formatting; **list numbers replayed from `numbering.xml`** (decimal/letter/roman, multi-level `%1.%2.` templates, per-instance start overrides), tables with merged cells and **tables nested in cells**, **footnotes and endnotes** (marked in the sentence, emitted next to it), **text frames** (their own blocks instead of being concatenated into the host paragraph), embedded pictures with captions, monospace paragraphs as code |
 | PPTX | `python-pptx` (`pptx_parser.py`) | slide title → heading (level 1 for section dividers, else 2), body in visual reading order with grouped shapes flattened, bullet lists with indentation, tables and charts as Markdown, pictures with image bytes, speaker notes; slide number stored as `page_number` |
 | XLSX | `openpyxl` (`xlsx_parser.py`) | a **workbook overview** (sheet count, sheet names, rows and columns of each) so questions about the file itself are answerable; one heading per sheet, one Markdown table per data region, one- or two-row header detection, merged cells filled, note cells kept as text, `1100.0 → 1100`, ISO dates; a **profile block** per table (row count, column types, min/max with row label, sums/means, distinct values, sums grouped by every low-cardinality column) so aggregate questions are answerable from retrieval. A blank row inside a table no longer starts a new one: a 92-row sheet used to become ten fragments with ten contradictory automatic summaries, and "the maximum rating in the table" was answered from eleven rows |
 | HTML | BeautifulSoup walker (`html_parser.py`) | `h1–h6`, paragraphs, nested lists, tables, `pre` code, `img` alt text; nav/header/footer/script/style removed |
@@ -167,7 +167,24 @@ The other properties are the ones a generative transcriber needs:
   crop is sent alone, and if it fails the rest are skipped.
 
 `PDF_ENRICHMENT_ENGINE=docling` keeps the local model, `off` disables
-enrichment, and `PDF_ENRICHMENT=off` still wins over both.
+enrichment, and `PDF_ENRICHMENT=off` still wins over both. When the local
+model does run, its batch is sized from the memory actually free on the card
+(`PDF_ENRICHMENT_BATCH=auto`): ~8 GB next to vLLM gives 16, a busy card falls
+back to Docling's 5. That is not a tuning knob but a safety one — the stage
+hides an out-of-memory and answers with empty formulas.
+
+##### Where the formulas are indexed (`FORMULA_INDEXING`, default `context`)
+
+Adding 378 formulas to the lecture also moves it from 223 chunks to 335: the
+prose a question matches is spread over 50 % more chunks, each diluted with
+LaTeX that no natural-language query looks like. A control run with
+enrichment off scored **0.015 higher answer correctness** on the 127
+questions — none of which is written in LaTeX. So a standalone formula block
+is kept out of the embedded chunk text and travels in the parent passage the
+model reads instead: the formula is there when the answer needs it, and it
+no longer competes for retrieval slots. `FORMULA_INDEXING=inline` embeds it
+as before. Inline equations inside a DOCX sentence are part of the sentence
+and are always indexed with it.
 
 Two smaller costs were measured next to it. Reusing one Docling converter
 across the documents of a run instead of building one per file saves ~2.4 s
