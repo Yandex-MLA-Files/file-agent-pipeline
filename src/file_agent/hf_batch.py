@@ -1,7 +1,9 @@
+import concurrent.futures
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from collections.abc import Sequence
 from copy import deepcopy
@@ -26,6 +28,12 @@ CHECKPOINT_SCHEMA_VERSION = 3
 CHECKPOINTS_DIRECTORY_NAME = "checkpoints"
 RAG_PIPELINE_VERSION = "section-token-small-to-big-v1"
 AGENT_PIPELINE_VERSION = "react-tool-calling-v2"
+# Same default and same reasoning as scripts/docbench_pilot.py's
+# MAX_CONCURRENT_QUESTIONS: each row's cost is dominated by network-bound LLM
+# round-trips (a reasoning model over a shared/tunneled endpoint), not local
+# CPU/GPU work, so bounded concurrency turns that dead waiting time into
+# throughput. Not unlimited - the endpoint is shared with other teammates.
+MAX_CONCURRENT_ROWS_DEFAULT = 8
 LOGGER = logging.getLogger(__name__)
 
 
@@ -85,10 +93,13 @@ def generate_hf_qa_records(
     resume: bool = False,
     max_iterations: int = MAX_ITERATIONS_DEFAULT,
     verify_answers: bool = True,
+    max_concurrency: int = MAX_CONCURRENT_ROWS_DEFAULT,
 ) -> BatchGenerationResult:
     validate_qa_dataset(dataset)
     if not isinstance(dataset_id, str) or not dataset_id.strip():
         raise ValueError("dataset_id must be a non-empty string")
+    if max_concurrency <= 0:
+        raise ValueError("max_concurrency must be greater than 0")
 
     checkpoints_dir = Path(output_dir) / CHECKPOINTS_DIRECTORY_NAME
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
@@ -109,12 +120,15 @@ def generate_hf_qa_records(
         max_iterations=max_iterations,
         verify_answers=verify_answers,
     )
-    records: list[GeneratedQARecord] = []
-    durations: list[float | None] = []
-    processed_count = 0
-    resumed_count = 0
-    failed_count = 0
     document_loader = _create_cached_document_loader()
+    dataset_size = len(dataset)
+
+    # Keyed by row_index rather than appended-to-as-completed: rows finish in
+    # whatever order their LLM calls happen to return under concurrency, but
+    # the output must still line up 1:1 with the source dataset (consumed
+    # positionally by save_generated_qa_dataset) - reassembled in order below.
+    results: dict[int, _RowResult] = {}
+    pending_row_indices: list[int] = []
 
     for row_index, row in enumerate(dataset):
         record = QADatasetRecord.from_row(row, row_index=row_index)
@@ -126,18 +140,27 @@ def generate_hf_qa_records(
                 source_record=record,
                 expected_parameters=parameters,
             )
-            resumed_count += 1
             LOGGER.info(
                 "Loaded checkpoint for row %s/%s (%s)",
                 row_index + 1,
-                len(dataset),
+                dataset_size,
                 record.id,
             )
+            results[row_index] = _RowResult(
+                record=generated_record,
+                duration_seconds=duration_seconds,
+                status="resumed",
+            )
         else:
-            started_at = time.monotonic()
-            try:
-                generated_record = process_hf_qa_record(
-                    record=record,
+            pending_row_indices.append(row_index)
+
+    if pending_row_indices:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrency) as executor:
+            future_to_row_index = {
+                executor.submit(
+                    _process_row,
+                    row_index=row_index,
+                    row=dataset[row_index],
                     dataset_id=dataset_id,
                     llm_client=llm_client,
                     revision=revision,
@@ -150,46 +173,30 @@ def generate_hf_qa_records(
                     document_loader=document_loader,
                     max_iterations=max_iterations,
                     verify_answers=verify_answers,
-                )
-            except Exception as exc:  # noqa: BLE001 - row-level isolation is deliberate
-                # A genuine LLM/pipeline failure on one row (e.g. the model
-                # exhausting its empty-response retries) must not abort the
-                # whole batch - it becomes a visible placeholder instead, and
-                # is left uncheckpointed so --resume retries it fresh (it
-                # might have been transient; temperature > 0 means a retry
-                # can actually diverge from the same failure).
-                duration_seconds = time.monotonic() - started_at
-                LOGGER.error(
-                    "Row %s/%s (%s) failed after %.2fs: %s",
-                    row_index + 1,
-                    len(dataset),
-                    record.id,
-                    duration_seconds,
-                    exc,
-                    exc_info=True,
-                )
-                generated_record = _failed_record(record, exc)
-                failed_count += 1
-            else:
-                duration_seconds = time.monotonic() - started_at
-                _validate_generated_record(generated_record, record)
-                _write_checkpoint(
-                    checkpoint_path=checkpoint_path,
                     parameters=parameters,
-                    generated_record=generated_record,
-                    duration_seconds=duration_seconds,
-                )
-                processed_count += 1
-                LOGGER.info(
-                    "Processed row %s/%s (%s) in %.2fs",
-                    row_index + 1,
-                    len(dataset),
-                    record.id,
-                    duration_seconds,
-                )
+                    checkpoint_path=_checkpoint_path(checkpoints_dir, row_index),
+                    dataset_size=dataset_size,
+                ): row_index
+                for row_index in pending_row_indices
+            }
+            for future in concurrent.futures.as_completed(future_to_row_index):
+                results[future_to_row_index[future]] = future.result()
 
-        records.append(generated_record)
-        durations.append(duration_seconds)
+    records: list[GeneratedQARecord] = []
+    durations: list[float | None] = []
+    processed_count = 0
+    resumed_count = 0
+    failed_count = 0
+    for row_index in range(dataset_size):
+        row_result = results[row_index]
+        records.append(row_result.record)
+        durations.append(row_result.duration_seconds)
+        if row_result.status == "resumed":
+            resumed_count += 1
+        elif row_result.status == "processed":
+            processed_count += 1
+        else:
+            failed_count += 1
 
     return BatchGenerationResult(
         records=tuple(records),
@@ -197,6 +204,97 @@ def generate_hf_qa_records(
         resumed_count=resumed_count,
         failed_count=failed_count,
         durations_seconds=tuple(durations),
+    )
+
+
+@dataclass(frozen=True)
+class _RowResult:
+    record: GeneratedQARecord
+    duration_seconds: float | None
+    status: str  # "processed" | "failed" - "resumed" is assigned directly, never by _process_row
+
+
+def _process_row(
+    row_index: int,
+    row: dict[str, Any],
+    dataset_id: str,
+    llm_client: LLMClient,
+    revision: str | None,
+    cache_dir: str | Path | None,
+    token: str | bool | None,
+    top_k: int,
+    max_chars: int,
+    overlap: int,
+    retriever: Retriever | None,
+    document_loader: DocumentLoader,
+    max_iterations: int,
+    verify_answers: bool,
+    parameters: dict[str, Any],
+    checkpoint_path: Path,
+    dataset_size: int,
+) -> _RowResult:
+    """Runs one not-yet-checkpointed row; called from a worker thread under
+    concurrency, so must not mutate anything shared without its own locking
+    (document_loader's cache does its own locking; checkpoint_path is unique
+    per row_index, so the write below never collides with another worker)."""
+    record = QADatasetRecord.from_row(row, row_index=row_index)
+    started_at = time.monotonic()
+    try:
+        generated_record = process_hf_qa_record(
+            record=record,
+            dataset_id=dataset_id,
+            llm_client=llm_client,
+            revision=revision,
+            cache_dir=cache_dir,
+            token=token,
+            top_k=top_k,
+            max_chars=max_chars,
+            overlap=overlap,
+            retriever=retriever,
+            document_loader=document_loader,
+            max_iterations=max_iterations,
+            verify_answers=verify_answers,
+        )
+    except Exception as exc:  # noqa: BLE001 - row-level isolation is deliberate
+        # A genuine LLM/pipeline failure on one row (e.g. the model
+        # exhausting its empty-response retries) must not abort the whole
+        # batch - it becomes a visible placeholder instead, and is left
+        # uncheckpointed so --resume retries it fresh (it might have been
+        # transient; temperature > 0 means a retry can actually diverge from
+        # the same failure).
+        duration_seconds = time.monotonic() - started_at
+        LOGGER.error(
+            "Row %s/%s (%s) failed after %.2fs: %s",
+            row_index + 1,
+            dataset_size,
+            record.id,
+            duration_seconds,
+            exc,
+            exc_info=True,
+        )
+        return _RowResult(
+            record=_failed_record(record, exc),
+            duration_seconds=duration_seconds,
+            status="failed",
+        )
+
+    duration_seconds = time.monotonic() - started_at
+    _validate_generated_record(generated_record, record)
+    _write_checkpoint(
+        checkpoint_path=checkpoint_path,
+        parameters=parameters,
+        generated_record=generated_record,
+        duration_seconds=duration_seconds,
+    )
+    LOGGER.info(
+        "Processed row %s/%s (%s) in %.2fs",
+        row_index + 1,
+        dataset_size,
+        record.id,
+        duration_seconds,
+    )
+    return _RowResult(
+        record=generated_record, duration_seconds=duration_seconds, status="processed"
     )
 
 
@@ -212,7 +310,21 @@ def _failed_record(record: QADatasetRecord, exc: Exception) -> GeneratedQARecord
 
 
 def _create_cached_document_loader() -> DocumentLoader:
-    cache: dict[str, Document] = {}
+    # Rows now run concurrently (see max_concurrency), and this cache is
+    # shared across every worker thread. Per-key single-flight, not one
+    # global lock around the parse: several rows can (and in a real HF
+    # dataset routinely do - e.g. q0001/report.pdf, q0002/report.pdf are
+    # distinct per-question Hub blobs with byte-identical content) reference
+    # the SAME document, and a single global lock would serialize their
+    # parses even though only same-key work needs to wait on each other -
+    # observed for real in runs/local-qwen35-27b-agent-007-e5large-vlm-pilot:
+    # 3 rows sharing one document all landed at ~410s (fighting the same
+    # lock) versus ~125-150s for rows with unique documents. Each cache_key
+    # gets its own Future: the first caller for a key parses and resolves
+    # it, later callers for a *different* key never wait on that parse at
+    # all, and later callers for the *same* key just await the one Future.
+    in_flight: dict[str, concurrent.futures.Future] = {}
+    entries_lock = threading.Lock()
 
     def load_cached_documents(file_paths: list[str | Path]) -> list[Document]:
         documents: list[Document] = []
@@ -225,13 +337,30 @@ def _create_cached_document_loader() -> DocumentLoader:
             # identical content), which gave every row its own path and made
             # a path-keyed cache miss every single time.
             cache_key = hashlib.sha256(source_path.read_bytes()).hexdigest()
-            cached_document = cache.get(cache_key)
-            if cached_document is None:
-                cached_document = load_documents([source_path])[0]
-                cache[cache_key] = cached_document
+
+            with entries_lock:
+                future = in_flight.get(cache_key)
+                is_owner = future is None
+                if is_owner:
+                    future = concurrent.futures.Future()
+                    in_flight[cache_key] = future
+
+            if is_owner:
+                try:
+                    parsed_document = load_documents([source_path])[0]
+                except BaseException as exc:  # noqa: BLE001 - must unblock every waiter
+                    with entries_lock:
+                        # Not left cached as a permanent failure - a later,
+                        # unrelated row referencing the same document should
+                        # still get a fresh attempt.
+                        del in_flight[cache_key]
+                    future.set_exception(exc)
+                    raise
+                future.set_result(parsed_document)
             else:
                 LOGGER.info("Reusing parsed document from batch cache: %s", source_path.name)
 
+            cached_document = future.result()
             # HF processing adds row-specific dataset metadata to every block.
             # Return an isolated copy so one question cannot mutate the cached
             # document or leak its metadata into another question.

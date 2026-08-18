@@ -9,22 +9,11 @@ from .smolvlm import SmolVLMClient
 logger = logging.getLogger(__name__)
 
 DEFAULT_VLM_BACKEND = "off"
+DEFAULT_VLM_MAX_TOKENS = 1500
 
 
 def create_vlm_client() -> VLMClient | None:
-    """Build the VLM client selected by the ``VLM_BACKEND`` environment variable.
 
-    - ``off`` (default): figure description disabled — parsing stays fully
-      offline and free.
-    - ``smolvlm``: local SmolVLM-256M via transformers. Cheapest working option:
-      no server, no API key, CPU-friendly; model downloads once (~500 MB).
-      Override the checkpoint with ``VLM_LOCAL_MODEL``.
-    - ``openai``: any OpenAI-compatible vision endpoint (Ollama ``qwen2.5-vl``,
-      vLLM, a cloud API) configured via ``VLM_BASE_URL`` / ``VLM_MODEL`` /
-      ``VLM_API_KEY``. Best quality; cost depends on the endpoint.
-
-    Returns None when disabled or misconfigured — callers skip enhancement.
-    """
     backend = os.getenv("VLM_BACKEND", DEFAULT_VLM_BACKEND).strip().lower()
 
     if backend in ("", "off", "none", "disabled"):
@@ -43,6 +32,7 @@ def create_vlm_client() -> VLMClient | None:
             base_url=base_url,
             model=model,
             api_key=os.getenv("VLM_API_KEY", "dummy"),
+            max_tokens=int(os.getenv("VLM_MAX_TOKENS", str(DEFAULT_VLM_MAX_TOKENS))),
         )
 
     logger.warning("Unknown VLM_BACKEND=%r; VLM disabled.", backend)

@@ -180,6 +180,14 @@ shared/tunneled endpoint, for a measured but modest faithfulness gain.
 tool-calling turns the ReAct agent gets per question before it's forced to
 answer with whatever it has gathered so far.
 
+`--max-concurrency` (default 8) processes that many rows in parallel. Each
+row's wall-clock cost is mostly waiting on the LLM endpoint, not local
+compute, so this is the main lever for total run time — raise it if the
+endpoint (and any GPU it shares) can absorb more concurrent requests, lower
+it if a shared/tunneled endpoint gets overloaded. It's an execution detail
+only: it doesn't change what gets generated, so a `--resume` run can freely
+use a different value than the run that wrote the checkpoints.
+
 Detach from `tmux` with `Ctrl+B`, then `D`. Reattach with:
 
 ```bash

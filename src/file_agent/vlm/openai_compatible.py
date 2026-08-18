@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class OpenAICompatibleVLMClient(VLMClient):
     """VLM client for any OpenAI-compatible vision endpoint (Ollama, vLLM, ...)."""
 
-    def __init__(self, base_url: str, model: str, api_key: str = "dummy", max_tokens: int = 500):
+    def __init__(self, base_url: str, model: str, api_key: str = "dummy", max_tokens: int = 1500):
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.model = model
         self.max_tokens = max_tokens
@@ -42,7 +42,14 @@ class OpenAICompatibleVLMClient(VLMClient):
                     ],
                     max_tokens=self.max_tokens,
                 )
-                description = (response.choices[0].message.content or "").strip()
+                message = response.choices[0].message
+                description = (message.content or "").strip()
+                if not description:
+
+                    reasoning = getattr(message, "reasoning", None) or getattr(
+                        message, "reasoning_content", None
+                    )
+                    description = (reasoning or "").strip()
 
                 span.set_attribute("file_agent.response_length", len(description))
                 usage = getattr(response, "usage", None)

@@ -13,6 +13,7 @@ from datasets import Dataset
 
 from file_agent.agent.loop import MAX_ITERATIONS_DEFAULT
 from file_agent.hf_batch import (
+    MAX_CONCURRENT_ROWS_DEFAULT,
     BatchGenerationResult,
     build_generation_parameters,
     duration_stats,
@@ -46,6 +47,7 @@ class HFGenerationConfig:
     resume: bool = False
     max_iterations: int = MAX_ITERATIONS_DEFAULT
     verify_answers: bool = False
+    max_concurrency: int = MAX_CONCURRENT_ROWS_DEFAULT
 
     def __post_init__(self) -> None:
         _require_non_empty(self.dataset_id, "dataset_id")
@@ -66,6 +68,8 @@ class HFGenerationConfig:
             raise ValueError("limit must be greater than 0")
         if self.max_iterations <= 0:
             raise ValueError("max_iterations must be greater than 0")
+        if self.max_concurrency <= 0:
+            raise ValueError("max_concurrency must be greater than 0")
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,7 @@ def run_hf_dataset_generation(
         resume=config.resume,
         max_iterations=config.max_iterations,
         verify_answers=config.verify_answers,
+        max_concurrency=config.max_concurrency,
     )
     artifacts = save_generated_qa_dataset(
         source_dataset=selected_dataset,
@@ -188,6 +193,16 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "cost over a shared/tunneled endpoint. Off by default.",
     )
     parser.add_argument(
+        "--max-concurrency",
+        type=_positive_int,
+        default=MAX_CONCURRENT_ROWS_DEFAULT,
+        help="Rows processed in parallel (default: 8). Each row's cost is "
+        "mostly network-bound LLM round-trips, so this is the main lever for "
+        "wall-clock time - but the endpoint may be a shared tunnel other "
+        "teammates also use, so avoid raising it past what the endpoint can "
+        "actually absorb.",
+    )
+    parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="INFO",
@@ -227,6 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             resume=args.resume,
             max_iterations=args.max_iterations,
             verify_answers=args.verify_answers,
+            max_concurrency=args.max_concurrency,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -296,6 +312,11 @@ def _build_manifest(
         "generation": {
             **generation_parameters,
             "resume_requested": config.resume,
+            # Execution-strategy knob, not a fingerprint field: it changes
+            # nothing about what gets generated, so (unlike everything in
+            # generation_parameters) it's fine for a --resume run to use a
+            # different value than the run that wrote the checkpoints.
+            "max_concurrency": config.max_concurrency,
         },
         "result": {
             "total_count": batch_result.total_count,

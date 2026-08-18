@@ -219,6 +219,7 @@ def test_run_hf_dataset_generation_writes_timing_stats_to_manifest(monkeypatch, 
         ({"max_chars": 100, "overlap": 100}, "overlap"),
         ({"overlap": -1}, "overlap"),
         ({"limit": 0}, "limit"),
+        ({"max_concurrency": 0}, "max_concurrency"),
     ],
 )
 def test_generation_config_rejects_invalid_numeric_values(tmp_path, overrides, message):
@@ -355,3 +356,38 @@ def test_main_parses_max_iterations_flag(monkeypatch, tmp_path, capsys):
 
     assert exit_code == 0
     assert calls[0].max_iterations == 3
+
+
+def test_main_parses_max_concurrency_flag(monkeypatch, tmp_path, capsys):
+    output_dir = tmp_path / "run"
+    expected_result = HFGenerationRunResult(
+        batch=BatchGenerationResult(records=(), processed_count=0, resumed_count=0),
+        artifacts=GeneratedDatasetArtifacts(
+            parquet_path=output_dir / "answers.parquet",
+            hf_dataset_path=output_dir / "hf_dataset",
+            row_count=0,
+        ),
+        manifest_path=output_dir / "run_manifest.json",
+    )
+    calls = []
+
+    def fake_run(config):
+        calls.append(config)
+        return expected_result
+
+    monkeypatch.setattr("file_agent.hf_cli.run_hf_dataset_generation", fake_run)
+    monkeypatch.setattr("file_agent.hf_cli.configure_telemetry", lambda: None)
+
+    exit_code = main(
+        [
+            "--dataset-id",
+            "owner/rag-qa",
+            "--output-dir",
+            str(output_dir),
+            "--max-concurrency",
+            "4",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls[0].max_concurrency == 4

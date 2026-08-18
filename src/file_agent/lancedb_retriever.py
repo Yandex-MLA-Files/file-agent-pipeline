@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import threading
 from functools import lru_cache
 from typing import Protocol
@@ -179,4 +180,12 @@ class LanceDBRetriever:
 def _load_default_embedding_model() -> EmbeddingModel:
     from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(DEFAULT_SEMANTIC_MODEL_NAME)
+    # Read here, not at module-import time: callers (app.py, hf_cli.py-based
+    # scripts) load .env lazily, well after this module is first imported -
+    # an env-var read baked into a module-level constant would almost always
+    # miss it. chunking.py's get_embedding_tokenizer() already reads
+    # EMBEDDING_MODEL the same way, for the same reason - keep both in sync,
+    # or retrieval and chunk-token-budgeting silently disagree about which
+    # model's tokenizer/dimensions are in play.
+    model_name = os.getenv("EMBEDDING_MODEL") or DEFAULT_SEMANTIC_MODEL_NAME
+    return SentenceTransformer(model_name)
