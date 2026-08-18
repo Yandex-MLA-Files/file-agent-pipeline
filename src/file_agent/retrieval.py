@@ -21,10 +21,7 @@ class Retriever(Protocol):
         top_k: int = 5,
         source_file: str | None = None,
     ) -> list[SearchResult]:
-        """Return the chunks most relevant to the query.
-
-        ``source_file`` limits the answer to one indexed document.
-        """
+        """Return relevant chunks, optionally restricted to one source file."""
         raise NotImplementedError
 
     def clear(self) -> None:
