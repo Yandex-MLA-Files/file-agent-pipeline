@@ -99,6 +99,44 @@ On a CPU the same pass takes tens of minutes, which is why the default is
 otherwise. `on` / `off` force it, and a conversion that cannot load the models
 repeats itself without them rather than failing.
 
+**Where those 523 seconds go, and what shortens them.** Docling's own stage
+timings put **503 s of the 523 in the enrichment model** — layout, tables and
+page parsing together are 17 s, and two consecutive runs differ by 1 s. So
+the document is not slow: transcribing 378 formulas one small batch at a time
+is, at 1.33 s per formula. The model already runs in bfloat16 (its model spec
+says so), 8-bit quantization is off, and there is no flash-attention build
+here, so the levers that remain are the batch and the model itself:
+
+| Setting | model time | per formula | output |
+|---|---|---|---|
+| shipped (5 regions per pass) | 503 s | 1331 ms | reference |
+| repeat of the same run | 504 s | 1333 ms | identical, 378/378 |
+| 16 regions per pass | **358 s** | 947 ms | 355/378 identical; of the 23 that differ, 15 are crops the model already failed to read, 6 are cosmetic (`b_n^{\prime}` against `b^{\prime}_n`), one is worse |
+| 32 regions per pass | 47 s | — | **all 378 formulas empty**: CUDA OOM inside the stage |
+| the serving Qwen3.5-27B, 8 requests in flight | 184 s (measured on 60 crops, 488 ms each) | 488 ms | equivalent LaTeX, `$$…$$` wrappers, and *better* on formulas containing Russian words |
+
+Two things follow. `PDF_ENRICHMENT_BATCH` exposes the batch (unset = Docling's
+5); 16 is about 29 % faster where the GPU has room. And because Docling
+catches every exception inside the stage — an out-of-memory included — and
+returns empty text for the whole batch, a document can come back *faster*
+than with enrichment off and silently without its formulas. The parser now
+counts the formula and code regions that came back empty and warns when most
+of them did, so that failure is visible instead of looking like a document
+that simply has no formulas.
+
+The remaining large lever is the last row: the multimodal model already
+serving the project transcribes formula crops concurrently, so wall-clock
+cost drops with the number of requests in flight rather than with GPU speed.
+It is not adopted yet — it would make ingestion depend on the chat endpoint,
+and it needs the same validation the page transcriber has.
+
+Two smaller costs were measured next to it. Reusing one Docling converter
+across the documents of a run instead of building one per file saves ~2.4 s
+per document (34.6 s against 27.5 s over three PDFs) — that is what the
+`+16 s` on the formula-free paper mostly is, model setup rather than work.
+And nothing is gained by de-duplicating crops: all 378 formulas of the
+lecture are distinct.
+
 #### Why the model reads scans better than an OCR engine
 
 The question "is a VLM really better than EasyOCR here, in quality *and*
@@ -136,6 +174,40 @@ The real cost is latency: ~33 s per page against ~2 s. That is why pages are
 transcribed concurrently (a 29-page deck takes ~2.5 min, not 16), why only
 pages without a text layer are sent at all, and why the classic engine
 remains the fallback rather than being removed.
+
+#### What the two riskiest repairs actually do to this corpus
+
+A repair that rewrites reading order, and one that invents numbers that are
+nowhere in the file, can both *lose* information if they misfire. Both were
+replayed over the corpus rather than argued about (`column_audit.py`,
+`numbering_audit.py`).
+
+**Column repair fires on 0 of 393 PDF pages.** 201 pages are rejected because
+a full-width block proves the page is not a clean two-column layout, 191
+because they hold fewer than six blocks, and one page of `Agentic Memory.pdf`
+because it alternates between the halves three times where four are required.
+The corpus contains two genuine two-column arXiv papers, and Docling's layout
+model orders both correctly — which is the point: the repair is a safety net
+for the case where the model fails, and on documents where it does not fail
+the guard never triggers. Its behaviour when it *is* needed is pinned by
+`tests/test_docling_postprocess.py`.
+
+**Automatic numbering matches what the file declares.** Across the four DOCX
+of the corpus 350 paragraphs carry a `numId`; the counters reproduce the
+exam programme as 1…N (the dataset asks about "пункт 26"), and the two lists
+of the philosophy course that start at 2 and 6 do so because the document's
+own `w:start` says 2 and 6 — not because a number was lost. No item came out
+with a doubled number.
+
+The audit did find one real defect, since fixed: Word advances a counter for
+*every* paragraph carrying the `numId`, including the numbered section
+headings a list is nested under, while the parser only advanced it for
+paragraphs it emitted as list items. In the lab manual of the corpus that
+numbered the second section's sub-items "1.1…1.5" where the document shows
+"2.1…2.5". The counter now runs in document order before the paragraph is
+classified, numbered headings carry their number ("2. Теоретическое
+обоснование", as the document displays it), and a number already typed into
+the text is not repeated.
 
 ### 2.3 Structured chunker (`CHUNKING_STRATEGY=structured`, default)
 

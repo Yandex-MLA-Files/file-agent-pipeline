@@ -161,3 +161,38 @@ def test_blocks_without_geometry_are_never_reordered():
     ]
 
     assert repair_column_order(stream) == stream
+
+
+def test_enrichment_batch_size_is_opt_in_and_survives_a_bad_value(monkeypatch, caplog):
+    from file_agent.parsers.docling_parser import apply_enrichment_batch_size
+
+    monkeypatch.delenv("PDF_ENRICHMENT_BATCH", raising=False)
+    assert apply_enrichment_batch_size() is None
+
+    monkeypatch.setenv("PDF_ENRICHMENT_BATCH", "not-a-number")
+    assert apply_enrichment_batch_size() is None
+
+    monkeypatch.setenv("PDF_ENRICHMENT_BATCH", "16")
+    assert apply_enrichment_batch_size() == 16
+
+    from docling.models.stages.code_formula.code_formula_vlm_model import CodeFormulaVlmModel
+
+    assert CodeFormulaVlmModel.elements_batch_size == 16
+    CodeFormulaVlmModel.elements_batch_size = 5
+
+
+def test_enrichment_that_returns_nothing_is_reported(caplog):
+    """Docling swallows a CUDA OOM inside the stage and returns empty text."""
+    from pathlib import Path
+
+    from file_agent.parsers.docling_parser import _warn_on_lost_enrichment
+
+    with caplog.at_level("WARNING"):
+        _warn_on_lost_enrichment(Path("lecture.pdf"), enriched=378, empty=378)
+    assert "no text for 378 of 378" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        _warn_on_lost_enrichment(Path("lecture.pdf"), enriched=378, empty=4)
+        _warn_on_lost_enrichment(Path("paper.pdf"), enriched=0, empty=0)
+    assert caplog.text == ""

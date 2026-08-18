@@ -57,6 +57,45 @@ def _gpu_available() -> bool:
         return False
 
 
+# Docling hands the enrichment model five regions per forward pass. Sixteen is
+# ~29 % faster on a formula-dense lecture (503 s → 358 s of model time) but
+# needs proportionally more GPU memory, and Docling *swallows* an out-of-memory
+# error inside the stage: at 32 the same document came back with all 378
+# formulas empty, in 67 s, looking exactly like a document without formulas.
+# The default therefore stays Docling's, and the size is opt-in.
+ENRICHMENT_BATCH_ENV = "PDF_ENRICHMENT_BATCH"
+
+
+def apply_enrichment_batch_size() -> int | None:
+    """Apply ``PDF_ENRICHMENT_BATCH`` to Docling's enrichment stage."""
+    raw = (os.getenv(ENRICHMENT_BATCH_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        size = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; ignoring it.", ENRICHMENT_BATCH_ENV, raw)
+        return None
+    if size < 1:
+        logger.warning("%s must be at least 1; ignoring %d.", ENRICHMENT_BATCH_ENV, size)
+        return None
+
+    for module_path, class_name in (
+        ("docling.models.stages.code_formula.code_formula_vlm_model", "CodeFormulaVlmModel"),
+        ("docling.models.code_formula_model", "CodeFormulaModel"),
+    ):
+        try:
+            module = __import__(module_path, fromlist=[class_name])
+            getattr(module, class_name).elements_batch_size = size
+        except Exception:  # pragma: no cover - depends on the Docling version
+            continue
+        logger.info("Formula/code enrichment batch size set to %d.", size)
+        return size
+
+    logger.warning("Could not find Docling's enrichment stage; %s ignored.", ENRICHMENT_BATCH_ENV)
+    return None
+
+
 class DoclingParser(BaseParser):
     """Structured parser for PDF and DOCX built on Docling.
 
@@ -85,6 +124,8 @@ class DoclingParser(BaseParser):
         type(self).active_ocr_engine = None
         self._backend = self._preferred_backend()
         self._enrich = resolve_enrichment() and type(self).enrichment_available
+        if self._enrich:
+            apply_enrichment_batch_size()
         self._converter = self._build_converter(do_ocr, ocr_full_page, self._backend)
         self.ocr_engine = type(self).active_ocr_engine if do_ocr else None
 
@@ -259,10 +300,15 @@ class DoclingParser(BaseParser):
             page_heights = self._page_heights(docling_doc)
 
             raw_blocks: list[Block] = []
+            enriched, empty = 0, 0
             for item, level in docling_doc.iterate_items():
+                if self._enrich and _is_enriched_label(getattr(item, "label", "")):
+                    enriched += 1
+                    empty += 0 if (getattr(item, "text", "") or "").strip() else 1
                 block = self._item_to_block(item, level, docling_doc, page_heights, path)
                 if block is not None:
                     raw_blocks.append(block)
+            _warn_on_lost_enrichment(path, enriched, empty)
             if path.suffix.lower() == ".pdf":
                 raw_blocks = repair_column_order(raw_blocks)
             blocks = _postprocess_blocks(raw_blocks)
@@ -527,6 +573,37 @@ class DoclingParser(BaseParser):
         if label_lower == "code":
             return BlockType.CODE
         return BlockType.TEXT
+
+
+# Share of enrichment regions that may come back empty before the run is
+# treated as a failure rather than as a few unreadable crops.
+LOST_ENRICHMENT_RATIO = 0.5
+
+
+def _is_enriched_label(label) -> bool:
+    text = str(label).lower()
+    return "formula" in text or text == "code"
+
+
+def _warn_on_lost_enrichment(path: Path, enriched: int, empty: int) -> None:
+    """Say it out loud when enrichment ran but returned nothing.
+
+    Docling catches every exception inside the enrichment stage, including CUDA
+    out-of-memory, and returns empty text for the whole batch. The document
+    then parses *faster* than without enrichment and silently arrives without
+    its formulas — the failure mode that is easiest to ship by accident.
+    """
+    if not enriched or empty < max(1, int(enriched * LOST_ENRICHMENT_RATIO)):
+        return
+    logger.warning(
+        "Formula/code enrichment returned no text for %d of %d region(s) in %s; "
+        "the document is indexed without them (most often not enough free GPU memory — "
+        "lower %s or set PDF_ENRICHMENT=off).",
+        empty,
+        enriched,
+        path.name,
+        ENRICHMENT_BATCH_ENV,
+    )
 
 
 # -- post-processing -------------------------------------------------------------
