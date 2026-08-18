@@ -99,43 +99,82 @@ On a CPU the same pass takes tens of minutes, which is why the default is
 otherwise. `on` / `off` force it, and a conversion that cannot load the models
 repeats itself without them rather than failing.
 
-**Where those 523 seconds go, and what shortens them.** Docling's own stage
-timings put **503 s of the 523 in the enrichment model** — layout, tables and
-page parsing together are 17 s, and two consecutive runs differ by 1 s. So
-the document is not slow: transcribing 378 formulas one small batch at a time
-is, at 1.33 s per formula. The model already runs in bfloat16 (its model spec
-says so), 8-bit quantization is off, and there is no flash-attention build
-here, so the levers that remain are the batch and the model itself:
+##### Where those 523 seconds went
+
+Docling's own stage timings put **503 s of the 523 in the enrichment model** —
+layout, tables and page parsing together are 17 s, and two consecutive runs
+differ by 1 s. The document is not slow; transcribing 378 formulas five at a
+time at 1.33 s each is. The model already runs in bfloat16 (its model spec
+says so), 8-bit quantization is off and there is no flash-attention build
+here, so inside Docling only the batch is left to turn:
 
 | Setting | model time | per formula | output |
 |---|---|---|---|
 | shipped (5 regions per pass) | 503 s | 1331 ms | reference |
 | repeat of the same run | 504 s | 1333 ms | identical, 378/378 |
-| 16 regions per pass | **358 s** | 947 ms | 355/378 identical; of the 23 that differ, 15 are crops the model already failed to read, 6 are cosmetic (`b_n^{\prime}` against `b^{\prime}_n`), one is worse |
+| 16 regions per pass | 358 s | 947 ms | 355/378 identical; of the 23 that differ, 15 are crops the model already failed to read, 6 are cosmetic (`b_n^{\prime}` against `b^{\prime}_n`), one is worse |
 | 32 regions per pass | 47 s | — | **all 378 formulas empty**: CUDA OOM inside the stage |
-| the serving Qwen3.5-27B, 8 requests in flight | 184 s (measured on 60 crops, 488 ms each) | 488 ms | equivalent LaTeX, `$$…$$` wrappers, and *better* on formulas containing Russian words |
 
-Two things follow. `PDF_ENRICHMENT_BATCH` exposes the batch (unset = Docling's
-5); 16 is about 29 % faster where the GPU has room. And because Docling
-catches every exception inside the stage — an out-of-memory included — and
-returns empty text for the whole batch, a document can come back *faster*
-than with enrichment off and silently without its formulas. The parser now
-counts the formula and code regions that came back empty and warns when most
-of them did, so that failure is visible instead of looking like a document
-that simply has no formulas.
+`PDF_ENRICHMENT_BATCH` exposes the batch (unset = Docling's 5). The last row
+is the trap worth naming: Docling catches every exception inside the stage,
+an out-of-memory included, and returns empty text for the whole batch — so
+the document parses *faster* than with enrichment off and arrives without a
+single formula. The parser now counts the regions that came back empty and
+warns when most of them did.
 
-The remaining large lever is the last row: the multimodal model already
-serving the project transcribes formula crops concurrently, so wall-clock
-cost drops with the number of requests in flight rather than with GPU speed.
-It is not adopted yet — it would make ingestion depend on the chat endpoint,
-and it needs the same validation the page transcriber has.
+##### What replaced it: the serving model, concurrently
+(`PDF_ENRICHMENT_ENGINE`, default `auto`)
+
+A batch of five is the wrong axis. The multimodal model that already answers
+the project's questions runs on vLLM, which is built to serve many requests at
+once, so `parsers/formula_enrichment.py` crops each region from the page and
+transcribes them **in parallel** (`PDF_ENRICHMENT_CONCURRENCY`, default 8).
+Measured on the same 85-page lecture, same 378 regions:
+
+| Path | enrichment | whole document | per formula |
+|---|---|---|---|
+| Docling CodeFormulaV2, 5 per pass | 503 s | 523 s | 1331 ms |
+| **serving Qwen3.5-27B, 8 in flight** | **184 s** | **202 s** | **486 ms** |
+| serving Qwen3.5-27B, 16 in flight | 135 s | 154 s | 357 ms |
+| the same document again, from the cache | 3 s | 21 s | 7 ms |
+
+**2.6× on the document, and the output is better.** Both transcriptions of all
+378 regions were compared by a vision judge that sees the crop and both
+candidates, with the sides alternated, on a random sample of 120 regions where
+the two disagree: **73 for the serving model, 35 for CodeFormulaV2, 12 ties**.
+Two counts do not depend on a judge at all: CodeFormulaV2 emits undefined
+control sequences for the Russian words inside formulas (`\i a p { \i }` for
+"пары") in 7 transcripts and never produces a Cyrillic letter, while the
+serving model produces none of that junk and keeps the Russian words in 11.
+The judge is the same model family as one of the candidates, so its preference
+is reported next to those counts, not instead of them.
+
+The other properties are the ones a generative transcriber needs:
+
+- **Validation.** Refusals, descriptions of the image ("The image shows…"),
+  decoding loops, output cut off mid-formula and answers longer than any
+  formula are rejected; a suspect answer is retried once with twice the
+  budget, and a region that still fails is left empty rather than filled with
+  an invention. On the lecture: 371 clean reads, 5 kept after a retry, 2
+  regions too small to be worth a request, 0 refusals or loops.
+- **A cache keyed by the pixels of the crop**, so re-ingesting a corpus — the
+  normal case while tuning retrieval — costs 3 s instead of 184 s, and
+  identical crops inside one document are transcribed once.
+- **No GPU needed on the ingesting machine.** This is why `auto` prefers it:
+  on a laptop Docling's enrichment is minutes per document, so formulas used
+  to be a server-only feature.
+- **The endpoint costs one request to fail, not one per region**: the first
+  crop is sent alone, and if it fails the rest are skipped.
+
+`PDF_ENRICHMENT_ENGINE=docling` keeps the local model, `off` disables
+enrichment, and `PDF_ENRICHMENT=off` still wins over both.
 
 Two smaller costs were measured next to it. Reusing one Docling converter
 across the documents of a run instead of building one per file saves ~2.4 s
 per document (34.6 s against 27.5 s over three PDFs) — that is what the
 `+16 s` on the formula-free paper mostly is, model setup rather than work.
-And nothing is gained by de-duplicating crops: all 378 formulas of the
-lecture are distinct.
+And nothing is gained by de-duplicating crops *within* this document: all 378
+formulas of the lecture are distinct.
 
 #### Why the model reads scans better than an OCR engine
 
@@ -222,8 +261,20 @@ and adds:
   even when the passage itself does not repeat it.
 - **Type-aware splitting.** Prose is split on sentence boundaries with
   sentence overlap (Russian/English abbreviations protected), lists on
-  items, code on lines, tables on rows with caption + header repeated (or the
-  header once when it is too wide); pieces never consist of a heading alone.
+  items, code on lines, tables on rows with caption + header repeated;
+  pieces never consist of a heading alone.
+- **Column names survive a wide table.** A financial statement has fourteen
+  columns whose names are sentences: the header cannot be repeated on every
+  piece, and without it the continuation pieces are rows of numbers with
+  nothing to say which column each belongs to (22 such chunks in the report of
+  the corpus). The names are abbreviated instead — 18, 12, 8 or 6 characters
+  each, whichever fits the budget, numbered apart when two shorten to the same
+  string — and repeated on every piece.
+- **A heading with nothing under it is not a chunk.** The same report repeats
+  its company name as a section header on every page, which produced identical
+  contentless chunks competing with real ones. They are dropped; the heading
+  still travels in the breadcrumb of the sections below it. (A document that
+  is *only* headings falls back to indexing them, so an outline is not lost.)
 - **Parent windows.** A piece of a long section carries in
   `metadata["context"]` a window of the section *around the piece* (not its
   first 4000 characters), opened by the heading path — that is what the LLM
