@@ -75,7 +75,7 @@ HEADER_REPEAT_MAX_RATIO = 0.25
 # переоценки инструментов хеджирования" → "Резерв переоценки…", which still
 # tells the columns apart. The widths are tried in order, so a table with
 # fourteen columns gets shorter names than one with four.
-COMPACT_HEADER_CELL_CHARS = (18, 12, 8)
+COMPACT_HEADER_CELL_CHARS = (18, 12, 8, 6)
 
 # Row records (multi-representation indexing of tables). A table split into
 # row *windows* answers "show me this part of the table", but not "which row
@@ -1311,6 +1311,15 @@ def _compact_header(header: str, cell_chars: int) -> str:
     cells = [_shorten(cell, cell_chars) for cell in _table_cells(lines[0])]
     if not cells:
         return ""
+    # Two long column names can shorten to the same string ("Резерв переоц…"),
+    # which would make the abbreviated header worse than none; number those.
+    seen: dict[str, int] = {}
+    for index, cell in enumerate(cells):
+        seen[cell] = seen.get(cell, 0) + 1
+        if seen[cell] > 1:
+            cells[index] = f"{cell}#{seen[cell]}"
     row = "| " + " | ".join(cells) + " |"
-    separator = "|" + "|".join(["---"] * len(cells)) + "|"
+    # A minimal separator: the piece still parses as a Markdown table, and on a
+    # fourteen-column statement the usual "|---|" costs more than the names.
+    separator = "|" + "|".join(["-"] * len(cells)) + "|"
     return f"{row}\n{separator}"

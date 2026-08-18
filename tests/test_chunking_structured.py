@@ -303,7 +303,7 @@ def test_a_header_too_wide_to_repeat_is_abbreviated_not_dropped():
     assert len(windows) > 1
     for chunk in windows:
         assert "Резерв пере" in chunk.text
-        assert "---" in chunk.text
+        assert "|-|" in chunk.text  # still a Markdown table, just a terse one
     # Abbreviated, not verbatim: the full column name would not fit twice.
     assert "Резерв переоценки инструментов хеджирования" not in windows[-1].text
 
