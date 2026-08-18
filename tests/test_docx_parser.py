@@ -235,3 +235,53 @@ def test_equations_survive_without_the_latex_converter(tmp_path, monkeypatch):
 
     assert "P(A|B)=P(A∩B)P(B)" in texts
     assert any("σ2" in text for text in texts)
+
+
+def test_an_equation_inside_a_table_cell_is_kept(tmp_path):
+    """`cell.text` reads paragraphs only, so a formula in a cell used to vanish."""
+    import zipfile
+
+    from tests._docx_fixture import (
+        CONTENT_TYPES,
+        DOC_RELS,
+        FOOTNOTES,
+        M,
+        NUMBERING,
+        R,
+        ROOT_RELS,
+        STYLES,
+        W,
+    )
+
+    document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:m="{M}">
+  <w:body>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>Параметр</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>Формула</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>Дисперсия</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p>
+          <m:oMath><m:sSup><m:e><m:r><m:t>σ</m:t></m:r></m:e>
+            <m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath>
+        </w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>"""
+
+    path = tmp_path / "cells.docx"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as package:
+        package.writestr("[Content_Types].xml", CONTENT_TYPES)
+        package.writestr("_rels/.rels", ROOT_RELS)
+        package.writestr("word/document.xml", document_xml)
+        package.writestr("word/_rels/document.xml.rels", DOC_RELS)
+        package.writestr("word/styles.xml", STYLES)
+        package.writestr("word/numbering.xml", NUMBERING)
+        package.writestr("word/footnotes.xml", FOOTNOTES)
+
+    table = DOCXParser().parse(path).blocks[0]
+
+    assert r"$\sigma^{2}$" in table.text

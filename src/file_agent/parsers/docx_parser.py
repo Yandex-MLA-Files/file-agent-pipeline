@@ -590,6 +590,27 @@ class _BodyWalker:
 
     # -- tables -------------------------------------------------------------------
 
+    @staticmethod
+    def _cell_text(cell: Any) -> str:
+        """Cell text with its equations, which ``cell.text`` does not include."""
+        equations = outermost_math(cell._tc)
+        if not equations:
+            return cell.text
+        inside = {node for math in equations for node in math.iter() if node is not math}
+        parts: list[str] = []
+        for node in cell._tc.iter():
+            if node in inside:
+                continue
+            if is_math(node):
+                latex = omml_to_latex(node)
+                if latex:
+                    parts.append(f" ${latex}$ ")
+            elif node.tag == qn("w:t"):
+                parts.append(node.text or "")
+            elif node.tag in (qn("w:br"), qn("w:cr"), qn("w:p")):
+                parts.append(" ")
+        return "".join(parts)
+
     def _handle_table(self, table: Table, nested_in: int | None = None) -> None:
         rows: list[list[str]] = []
         for row in table.rows[:_MAX_TABLE_ROWS]:
@@ -602,7 +623,7 @@ class _BodyWalker:
                     cells.append("")
                     continue
                 previous = cell._tc
-                cells.append(clean_text(cell.text).replace("\n", " "))
+                cells.append(clean_text(self._cell_text(cell)).replace("\n", " "))
             rows.append(cells)
         markdown = table_to_markdown(rows)
         if markdown:
