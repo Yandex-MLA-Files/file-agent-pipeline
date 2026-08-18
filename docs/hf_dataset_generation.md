@@ -171,6 +171,15 @@ CUDA_VISIBLE_DEVICES="" uv run python generate_hf_dataset.py \
 For a full run, use a new `RUN_NAME` and remove `--limit 20`. Add
 `--revision <dataset-commit>` when the run must use a fixed dataset snapshot.
 
+Add `--verify-answers` to run each answer through an extra faithfulness-check
+LLM call before returning it (compares the draft against the evidence
+gathered and rewrites it if a claim isn't supported). Off by default: it's a
+full extra round-trip per question, a real latency cost over a
+shared/tunneled endpoint, for a measured but modest faithfulness gain.
+`--max-iterations` (default 10, or `$AGENT_MAX_ITERATIONS`) caps how many
+tool-calling turns the ReAct agent gets per question before it's forced to
+answer with whatever it has gathered so far.
+
 Detach from `tmux` with `Ctrl+B`, then `D`. Reattach with:
 
 ```bash

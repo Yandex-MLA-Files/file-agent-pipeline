@@ -51,6 +51,27 @@ def test_run_sandboxed_code_returns_captured_output(monkeypatch, tmp_path):
     assert f"{source_path.resolve()}:/data/data.xlsx:ro" in " ".join(command)
 
 
+def test_run_sandboxed_code_decodes_output_as_utf8(monkeypatch, tmp_path):
+    # Regression: subprocess.run's text=True otherwise decodes with the OS
+    # locale encoding, which crashed subprocess's own reader thread on a
+    # non-English Windows locale (cp1251) when sandboxed code printed
+    # Cyrillic text - explicit encoding/errors must always be passed.
+    source_path = tmp_path / "data.xlsx"
+    source_path.write_text("fake xlsx", encoding="utf-8")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    run_sandboxed_code(source_paths={"data.xlsx": source_path}, code="print('привет')")
+
+    assert calls[0]["encoding"] == "utf-8"
+    assert calls[0]["errors"] == "replace"
+
+
 def test_run_sandboxed_code_mounts_every_document(monkeypatch, tmp_path):
     first_path = tmp_path / "first.xlsx"
     first_path.write_text("fake xlsx", encoding="utf-8")
@@ -139,6 +160,26 @@ def test_run_sandboxed_code_truncates_long_output(monkeypatch, tmp_path):
 
     assert len(result.stdout) == 10
     assert result.truncated
+
+
+def test_run_sandboxed_code_handles_none_stdout_and_stderr(monkeypatch, tmp_path):
+    """Regression test: subprocess.run's .stdout/.stderr have been observed
+    None despite capture_output=True + text=True (seen on Windows + Docker
+    Desktop; never on the Linux server this was originally built against) -
+    must not crash with TypeError: object of type 'NoneType' has no len()."""
+    source_path = tmp_path / "data.xlsx"
+    source_path.write_text("fake xlsx", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        return SimpleNamespace(stdout=None, stderr=None, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_sandboxed_code(source_paths={"data.xlsx": source_path}, code="print(1)")
+
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert not result.truncated
 
 
 @pytest.mark.parametrize("exit_code", [1, 2])

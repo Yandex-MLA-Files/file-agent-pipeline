@@ -10,7 +10,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DEFAULT_SANDBOX_IMAGE = os.getenv("SANDBOX_IMAGE", "file-agent-sandbox:latest")
-DEFAULT_TIMEOUT_SECONDS = 10.0
+DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_MEMORY_LIMIT_MB = 512
 DEFAULT_CPUS = 1.0
 DEFAULT_MAX_OUTPUT_CHARS = 4000
@@ -34,14 +34,7 @@ def run_sandboxed_code(
     max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
     image: str = DEFAULT_SANDBOX_IMAGE,
 ) -> SandboxResult:
-    """Run untrusted Python against all available documents in an isolated, ephemeral container.
 
-    No network, read-only rootfs, dropped capabilities, and hard resource
-    limits - the container is the security boundary, not the Python code.
-    Every entry in source_paths (file_name -> local path) is mounted
-    read-only under /data/<file_name>, so the sandboxed code can open
-    whichever files it needs by their real name.
-    """
     resolved_paths: dict[str, Path] = {}
     for file_name, source_path in source_paths.items():
         if ":" in file_name:
@@ -82,7 +75,9 @@ def run_sandboxed_code(
             "--pids-limit=64",
             "--read-only",
             "--tmpfs",
-            "/tmp:size=64m",
+            "/tmp:size=64m,mode=1777",
+            "--tmpfs",
+            "/sandbox/work:size=64m,mode=1777",
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -98,7 +93,12 @@ def run_sandboxed_code(
 
         try:
             completed = subprocess.run(
-                command, capture_output=True, text=True, timeout=timeout_seconds
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired:
             _force_kill(container_name)
@@ -113,8 +113,8 @@ def run_sandboxed_code(
                 truncated=False,
             )
 
-        stdout, stdout_truncated = _truncate(completed.stdout, max_output_chars)
-        stderr, stderr_truncated = _truncate(completed.stderr, max_output_chars)
+        stdout, stdout_truncated = _truncate(completed.stdout or "", max_output_chars)
+        stderr, stderr_truncated = _truncate(completed.stderr or "", max_output_chars)
         return SandboxResult(
             stdout=stdout,
             stderr=stderr,
@@ -125,8 +125,7 @@ def run_sandboxed_code(
 
 
 def _force_kill(container_name: str) -> None:
-    # subprocess's own timeout kills the client process, not the container it
-    # started - without this the sandboxed code keeps running past the timeout.
+
     subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=5, check=False)
 
 

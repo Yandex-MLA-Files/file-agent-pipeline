@@ -95,7 +95,12 @@ def create_text_documents(tmp_path):
 def test_process_qa_record_generates_answer_and_serializes_exact_contexts(tmp_path):
     record = make_record()
     document_paths = create_text_documents(tmp_path)
-    llm_client = ScriptedToolLLM(search_then_answer(record.question, "Generated answer"))
+    # search_then_answer's turns plus one more: the verification call that
+    # fires whenever sources were gathered (see run_react_agent's faithfulness
+    # gate), here echoing the same answer back unchanged.
+    llm_client = ScriptedToolLLM(
+        [*search_then_answer(record.question, "Generated answer"), final_answer("Generated answer")]
+    )
     retriever = FakeRetriever()
 
     result = process_qa_record(
@@ -114,7 +119,7 @@ def test_process_qa_record_generates_answer_and_serializes_exact_contexts(tmp_pa
     assert retriever.index_calls == 1
     assert retriever.search_calls == [(record.question, 2)]
     assert retriever.clear_calls == 1
-    assert len(llm_client.calls) == 2  # tool-call turn + final-answer turn
+    assert len(llm_client.calls) == 3  # tool-call turn + final-answer turn + verification turn
 
     first_context, second_context = result.contexts
     assert first_context.rank == 1

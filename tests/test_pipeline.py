@@ -68,6 +68,23 @@ def test_parse_file_parses_pdf(tmp_path):
     assert any("Hello from PDF" in block.text for block in document.blocks)
 
 
+def test_parse_file_does_not_eagerly_call_the_vlm_by_default(tmp_path, monkeypatch):
+    # Eager per-figure VLM description used to run automatically whenever
+    # VLM_BACKEND was configured, dominating a PDF's parse time (~1m40s
+    # observed) even when the question never needed any figure's content.
+    # It's opt-in now (enable_vlm=True) - describe_image describes a figure
+    # on demand instead, independent of this eager pass.
+    monkeypatch.setenv("VLM_BACKEND", "smolvlm")
+    calls = []
+    monkeypatch.setattr("file_agent.pipeline.create_vlm_client", lambda: calls.append(1) or None)
+    file_path = tmp_path / "example.pdf"
+    create_pdf(file_path, "Hello from PDF")
+
+    parse_file(file_path)
+
+    assert calls == []
+
+
 def test_parse_file_uses_html_parser(tmp_path):
     file_path = tmp_path / "example.html"
     file_path.write_text("<p>Hello from HTML</p>", encoding="utf-8")
@@ -106,6 +123,18 @@ def test_parse_file_uses_pptx_parser(tmp_path):
     assert document.blocks[0].type == "pptx_slide"
     assert "Project Overview" in document.blocks[0].text
     assert "PowerPoint content" in document.blocks[0].text
+
+
+def test_parse_file_uses_image_parser(tmp_path):
+    file_path = tmp_path / "photo.png"
+    file_path.write_bytes(b"not a real png, the parser never opens the file")
+
+    document = parse_file(file_path)
+
+    assert document.file_name == "photo.png"
+    assert document.file_type == "png"
+    assert len(document.blocks) == 1
+    assert document.blocks[0].page_number == 1
 
 
 def test_parse_file_rejects_unsupported_extension(tmp_path):

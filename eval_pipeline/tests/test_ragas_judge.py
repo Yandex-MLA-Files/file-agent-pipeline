@@ -298,6 +298,57 @@ def test_parse_row_traces_keeps_every_call_of_a_repeated_prompt_name():
     assert [c["output"]["verdict"] for c in calls] == [1, 0]
 
 
+def test_parse_row_traces_flags_a_call_that_never_completed():
+    # Regression: ragas.callbacks.RagasTracer.on_chain_end is the only thing
+    # that ever sets .outputs (see on_chain_error's absence) - a chain that
+    # raised (e.g. exhausted its JSON-repair retries) leaves .outputs at its
+    # default {}, same shape as a call that legitimately returned {}. Before
+    # this fix, _parse_row_traces couldn't tell the two apart in the log.
+    ragas_traces = {
+        "root": ChainRun(
+            run_id="root",
+            parent_run_id=None,
+            name="evaluation",
+            inputs={},
+            metadata={},
+            children=["row0"],
+        ),
+        "row0": ChainRun(
+            run_id="row0",
+            parent_run_id="root",
+            name="row 0",
+            inputs={},
+            metadata={},
+            children=["metric0"],
+        ),
+        "metric0": ChainRun(
+            run_id="metric0",
+            parent_run_id="row0",
+            name="faithfulness",
+            inputs={},
+            metadata={},
+            # No outputs= override - this is what a chain that raised looks like.
+            children=["prompt0"],
+        ),
+        "prompt0": ChainRun(
+            run_id="prompt0",
+            parent_run_id="metric0",
+            name="nli_statements_prompt",
+            inputs={"data": {"context": "..."}},
+            metadata={},
+            # Also never completed.
+        ),
+    }
+
+    row_traces = _parse_row_traces(ragas_traces, run_id=None)
+
+    assert row_traces[0]["scores"]["faithfulness"] != {}
+    assert "no output recorded" in row_traces[0]["scores"]["faithfulness"]
+    call_output = row_traces[0]["calls"]["faithfulness"][0]["output"]
+    assert call_output != {}
+    assert "no output recorded" in call_output
+
+
 def test_evaluate_writes_separate_trace_files_for_separate_runs(patched_metrics, tmp_path):
     judge = RagasJudge(model="test-model", llm=object(), embeddings=object())
 

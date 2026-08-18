@@ -15,6 +15,7 @@ from file_agent.agent.loop import MAX_ITERATIONS_DEFAULT
 from file_agent.hf_batch import (
     BatchGenerationResult,
     build_generation_parameters,
+    duration_stats,
     generate_hf_qa_records,
 )
 from file_agent.hf_dataset import QADatasetRecord, load_qa_dataset
@@ -44,6 +45,7 @@ class HFGenerationConfig:
     limit: int | None = None
     resume: bool = False
     max_iterations: int = MAX_ITERATIONS_DEFAULT
+    verify_answers: bool = False
 
     def __post_init__(self) -> None:
         _require_non_empty(self.dataset_id, "dataset_id")
@@ -114,6 +116,7 @@ def run_hf_dataset_generation(
         overlap=config.overlap,
         resume=config.resume,
         max_iterations=config.max_iterations,
+        verify_answers=config.verify_answers,
     )
     artifacts = save_generated_qa_dataset(
         source_dataset=selected_dataset,
@@ -130,7 +133,22 @@ def run_hf_dataset_generation(
     )
     manifest_path = _write_manifest(config.output_dir, manifest)
 
-    LOGGER.info("Generation complete: %s rows", batch_result.total_count)
+    timing = duration_stats(batch_result.durations_seconds)
+    if timing["count"]:
+        LOGGER.info(
+            "Generation complete: %s rows (avg %.2fs/row, total %.1fs over %s timed row(s))",
+            batch_result.total_count,
+            timing["average_seconds"],
+            timing["total_seconds"],
+            timing["count"],
+        )
+    else:
+        LOGGER.info("Generation complete: %s rows", batch_result.total_count)
+    if batch_result.failed_count:
+        LOGGER.warning(
+            "%s row(s) failed and were not checkpointed - rerun with --resume to retry them",
+            batch_result.failed_count,
+        )
     return HFGenerationRunResult(
         batch=batch_result,
         artifacts=artifacts,
@@ -158,8 +176,16 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--max-iterations",
         type=_positive_int,
         default=int(os.getenv("AGENT_MAX_ITERATIONS", MAX_ITERATIONS_DEFAULT)),
-        help="Hard cap on ReAct tool-calling turns per question (default: 6, "
+        help="Hard cap on ReAct tool-calling turns per question (default: 10, "
         "or $AGENT_MAX_ITERATIONS)",
+    )
+    parser.add_argument(
+        "--verify-answers",
+        action="store_true",
+        help="Faithfulness gate: one extra LLM call per answered question, "
+        "checking the draft against the evidence gathered and revising if "
+        "needed. Measured +0.05 faithfulness (RagasJudge) at a real latency "
+        "cost over a shared/tunneled endpoint. Off by default.",
     )
     parser.add_argument(
         "--log-level",
@@ -200,6 +226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             limit=args.limit,
             resume=args.resume,
             max_iterations=args.max_iterations,
+            verify_answers=args.verify_answers,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -251,6 +278,7 @@ def _build_manifest(
         max_chars=config.max_chars,
         overlap=config.overlap,
         max_iterations=config.max_iterations,
+        verify_answers=config.verify_answers,
     )
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -273,7 +301,9 @@ def _build_manifest(
             "total_count": batch_result.total_count,
             "processed_count": batch_result.processed_count,
             "resumed_count": batch_result.resumed_count,
+            "failed_count": batch_result.failed_count,
         },
+        "timing": duration_stats(batch_result.durations_seconds),
         "artifacts": {
             "parquet": artifacts.parquet_path.name,
             "hf_dataset": artifacts.hf_dataset_path.name,

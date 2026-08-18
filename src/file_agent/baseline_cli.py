@@ -34,11 +34,6 @@ from file_agent.rag import answer_documents, load_documents
 from file_agent.retrieval import Retriever
 from file_agent.telemetry import configure_telemetry
 
-# A separate baseline used only to compare against the ReAct agent pipeline
-# (see hf_cli.py/hf_batch.py) via eval_pipeline's RagasJudge: one search, one
-# LLM call, no tools. Kept fully independent from the agent's checkpoint/
-# manifest schema versions - the two pipelines evolve for unrelated reasons
-# and shouldn't be coupled through a shared version counter.
 MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_FILE_NAME = "run_manifest.json"
 FINAL_ARTIFACT_NAMES = ("answers.parquet", "hf_dataset", MANIFEST_FILE_NAME)

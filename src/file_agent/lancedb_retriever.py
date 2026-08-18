@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 from functools import lru_cache
 from typing import Protocol
 
@@ -15,9 +16,8 @@ from file_agent.telemetry import tracer
 logger = logging.getLogger(__name__)
 
 DEFAULT_SEMANTIC_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-# sentence-transformers defaults to 32; a document with thousands of chunks
-# means thousands/32 forward passes, each paying Python-loop overhead on top of
-# the (small, GPU-cheap) model call. Larger batches cut that overhead down.
+
+
 DEFAULT_ENCODE_BATCH_SIZE = 128
 DEFAULT_FTS_LANGUAGE = "Russian"
 DEFAULT_RRF_K = 60
@@ -49,6 +49,7 @@ class LanceDBRetriever:
         self._rrf_k = rrf_k
         self._semantic_min_score = semantic_min_score
         self._table = None
+        self._search_lock = threading.Lock()
 
     def index(self, chunks: list[Chunk]) -> None:
         with tracer.start_as_current_span("file_agent.retriever_index") as span:
@@ -65,6 +66,7 @@ class LanceDBRetriever:
                     "chunk_id": chunk.id,
                     "text": chunk.text,
                     "vector": embeddings[index].tolist(),
+                    "source_file": str(chunk.metadata.get("source_file") or ""),
                     "metadata_json": json.dumps(
                         chunk.metadata,
                         ensure_ascii=False,
@@ -80,7 +82,7 @@ class LanceDBRetriever:
             )
             self._table.create_index(
                 "text",
-                config=FTS(language=self._fts_language),
+                config=FTS(language=self._fts_language, with_position=True),
             )
             logger.info("Indexed %d chunk(s) into table %r", len(chunks), self._table_name)
 
@@ -88,10 +90,13 @@ class LanceDBRetriever:
         self,
         query: str,
         top_k: int = 5,
+        source_file: str | None = None,
     ) -> list[SearchResult]:
         with tracer.start_as_current_span("file_agent.retriever_search") as span:
             span.set_attribute("file_agent.query", query)
             span.set_attribute("file_agent.top_k", top_k)
+            if source_file:
+                span.set_attribute("file_agent.source_file", source_file)
 
             if top_k <= 0 or self._table is None:
                 span.set_attribute("file_agent.result_count", 0)
@@ -102,25 +107,33 @@ class LanceDBRetriever:
                 span.set_attribute("file_agent.result_count", 0)
                 return []
 
-            query_vector = self._encode([query])[0].tolist()
-            rows = (
-                self._table.search(
-                    query_type="hybrid",
-                    vector_column_name="vector",
-                    fts_columns="text",
+            with self._search_lock:
+                query_vector = self._encode([query])[0].tolist()
+                search_query = (
+                    self._table.search(
+                        query_type="hybrid",
+                        vector_column_name="vector",
+                        fts_columns="text",
+                    )
+                    .vector(query_vector)
+                    .text(query)
+                    .distance_type("cosine")
+                    .distance_range(upper_bound=1.0 - self._semantic_min_score)
+                    .rerank(RRFReranker(K=self._rrf_k))
                 )
-                .vector(query_vector)
-                .text(query)
-                .distance_type("cosine")
-                .distance_range(upper_bound=1.0 - self._semantic_min_score)
-                .rerank(RRFReranker(K=self._rrf_k))
-                .limit(top_k)
-                .to_list()
-            )
+                if source_file:
+                    escaped_source_file = source_file.replace("'", "''")
+                    search_query = search_query.where(f"source_file = '{escaped_source_file}'")
+                rows = search_query.limit(top_k).to_list()
 
             results = [self._to_search_result(row) for row in rows]
             span.set_attribute("file_agent.result_count", len(results))
-            logger.info("Query %r returned %d result(s)", query, len(results))
+            logger.info(
+                "Query %r (source_file=%r) returned %d result(s)",
+                query,
+                source_file,
+                len(results),
+            )
             return results
 
     def clear(self) -> None:
@@ -133,7 +146,7 @@ class LanceDBRetriever:
             embeddings = model.encode(
                 texts, batch_size=DEFAULT_ENCODE_BATCH_SIZE, show_progress_bar=False
             )
-        except TypeError:  # a minimal EmbeddingModel that only accepts sentences
+        except TypeError:
             embeddings = model.encode(texts)
 
         if hasattr(embeddings, "detach"):

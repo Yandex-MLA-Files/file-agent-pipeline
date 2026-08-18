@@ -169,3 +169,49 @@ def test_overlap_must_be_smaller_than_max_chars():
 
     with pytest.raises(ValueError, match="overlap must be smaller"):
         chunk_document(document, max_chars=10, overlap=10)
+
+
+class _CharTokenizer:
+    """Test double: one "token" per character, so a small max_tokens is easy to
+    reason about without pulling in a real HF tokenizer."""
+
+    def encode(self, text: str, **kwargs) -> list[int]:
+        return list(range(len(text)))
+
+
+def test_oversized_heading_is_dropped_instead_of_starving_the_budget():
+    # Regression for a real corpus bug: Docling misclassified a long sentence
+    # as a HEADING, and that "heading" alone nearly filled the token budget,
+    # leaving ~0 room for content. _fit_windows then degenerated into a
+    # near-empty chunk per character of the remaining text (a 527-char
+    # heading turned ~30 ordinary blocks into 3855 chunks). A heading this
+    # large relative to the budget must be dropped as a breadcrumb, not
+    # crowd out the content it's supposed to introduce.
+    #
+    # max_tokens=40 with a 1-char-per-token tokenizer: a 36-char heading
+    # clears the HEADER_REPEAT_MAX_RATIO (0.25) drop threshold of 10 tokens
+    # but still fits in a single chunk on its own (36 <= 40) - it's only
+    # pathological once reserved as a breadcrumb, which leaves just
+    # max(1, 40 - 36 - separator) = ~2 tokens for every paragraph's content.
+    from file_agent.document import BlockType
+
+    oversized_heading = Block(id="h1", text="H" * 36, type="heading", block_type=BlockType.HEADING)
+    body = [
+        Block(id=f"p{i}", text=f"Paragraph {i} here.", type="text", block_type=BlockType.TEXT)
+        for i in range(20)
+    ]
+    document = Document(file_name="doc.docx", file_type="docx", blocks=[oversized_heading, *body])
+
+    chunks = chunk_document(
+        document, max_chars=1000, overlap=5, max_tokens=40, tokenizer=_CharTokenizer()
+    )
+
+    # Sane output (roughly one chunk per couple of paragraphs), not a chunk
+    # explosion (the same shape of bug produced 3855 chunks from ~30 blocks).
+    assert len(chunks) < 15
+    # The heading still shows up once as ordinary packed content, but it is
+    # not repeated as a breadcrumb into every other chunk.
+    heading_text = "H" * 36
+    occurrences = sum(chunk.text.count(heading_text) for chunk in chunks)
+    assert occurrences <= 1
+    assert all(chunk.metadata.get("section") is None for chunk in chunks)

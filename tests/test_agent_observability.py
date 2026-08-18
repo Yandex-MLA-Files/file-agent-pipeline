@@ -140,6 +140,57 @@ def test_log_generation_and_tool_call_and_finish_trace_reach_the_client(monkeypa
     assert client.updated_span_output == "final answer"
 
 
+def test_log_generation_attaches_reasoning_as_metadata_when_present(monkeypatch):
+    _reset_client(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    with observability.pipeline_trace("question"):
+        observability.log_generation(
+            model="m", input_messages=[], output="a", reasoning="thinking..."
+        )
+
+    client = observability._get_client()
+    assert client.observations[0]["metadata"] == {"reasoning": "thinking..."}
+
+
+def test_log_generation_omits_metadata_without_reasoning(monkeypatch):
+    _reset_client(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    with observability.pipeline_trace("question"):
+        observability.log_generation(model="m", input_messages=[], output="a")
+
+    client = observability._get_client()
+    assert client.observations[0]["metadata"] is None
+
+
+def test_log_generation_forwards_usage_as_usage_details(monkeypatch):
+    _reset_client(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    usage = {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
+
+    with observability.pipeline_trace("question"):
+        observability.log_generation(model="m", input_messages=[], output="a", usage=usage)
+
+    client = observability._get_client()
+    assert client.observations[0]["usage_details"] == usage
+
+
+def test_log_generation_usage_details_is_none_without_usage(monkeypatch):
+    _reset_client(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    with observability.pipeline_trace("question"):
+        observability.log_generation(model="m", input_messages=[], output="a")
+
+    client = observability._get_client()
+    assert client.observations[0]["usage_details"] is None
+
+
 def test_pipeline_trace_does_not_detach_the_ambient_otel_context(monkeypatch):
     """Regression test: pipeline_trace must NOT clear the ambient OTel context
     before opening its own Langfuse span. The whole point of opening the

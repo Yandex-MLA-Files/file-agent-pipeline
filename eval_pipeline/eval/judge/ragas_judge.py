@@ -149,6 +149,26 @@ def _per_run_trace_path(base_path: str | Path, now: datetime) -> Path:
     return base.with_name(f"{base.stem}_{stamp}{base.suffix}")
 
 
+_CALL_DID_NOT_COMPLETE = (
+    "<no output recorded - this call likely raised (e.g. exhausted its JSON-repair "
+    "retries, see PydanticPrompt.generate_multiple's retries_left=3) rather than "
+    "returning {} for real. ragas.callbacks.RagasTracer only records outputs via "
+    "on_chain_end and has no on_chain_error hook, so no exception detail survives "
+    "into this trace - check the row's NaN metric score(s) for which one failed.>"
+)
+
+
+def _completed_output(outputs: dict[str, Any]) -> Any:
+    # outputs defaults to {} on the ChainRun itself (ragas.callbacks.ChainRun) and
+    # is only ever overwritten by on_chain_end - a chain that raised leaves it at
+    # that same default, indistinguishable by shape alone from a call that
+    # legitimately returned {}. Surfacing that ambiguity explicitly beats letting a
+    # real failure quietly look like a valid empty response in the log.
+    if not outputs:
+        return _CALL_DID_NOT_COMPLETE
+    return outputs.get("output", {})
+
+
 def _parse_row_traces(
     ragas_traces: dict[str, ChainRun],
     run_id: str | None,
@@ -165,11 +185,11 @@ def _parse_row_traces(
         calls: dict[str, list[dict[str, Any]]] = {}
         for metric_uuid in row_trace.children:
             metric_trace = ragas_traces[metric_uuid]
-            scores[metric_trace.name] = metric_trace.outputs.get("output", {})
+            scores[metric_trace.name] = _completed_output(metric_trace.outputs)
             metric_calls = []
             for prompt_uuid in metric_trace.children:
                 prompt_trace = ragas_traces[prompt_uuid]
-                output = prompt_trace.outputs.get("output", {})
+                output = _completed_output(prompt_trace.outputs)
                 output = output[0] if isinstance(output, list) else output
                 metric_calls.append(
                     {

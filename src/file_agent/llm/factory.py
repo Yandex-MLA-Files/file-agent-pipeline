@@ -10,23 +10,14 @@ from file_agent.llm.openai_client import OpenAILLMClient
 DEFAULT_LLM_BACKEND = "yandex"
 DEFAULT_YANDEX_BASE_URL = "https://ai.api.cloud.yandex.net/v1"
 DEFAULT_YANDEX_MODEL = "qwen3.6-35b-a3b"
+
 DEFAULT_LOCAL_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_LOCAL_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
-# Empirically, Qwen2.5 + vLLM's hermes tool-call parser reliably emits a
-# well-formed <tool_call> tag at temperature=0 but not at 0.2 (the
-# OpenAILLMClient default) - sampling noise makes the model miss the exact
-# special-token sequence often enough to break tool-calling. Plain (no-tools)
-# generation is unaffected either way, so this only needs to be low for the
-# local backend, not Yandex.
-DEFAULT_LOCAL_TEMPERATURE = 0.0
-# 60s/0 retries was too brittle for long batch runs (generate_hf_dataset.py /
-# generate_baseline_rag_dataset.py): a single slow vLLM response - e.g. GPU
-# contention from another process sharing the box, or just a longer-than-usual
-# generation - crashed the whole run with no automatic recovery, only
-# --resume from the last checkpoint. The openai SDK's own max_retries already
-# retries timeouts/connection errors/429/5xx with exponential backoff, so
-# raising both absorbs transient blips without any code of our own.
-DEFAULT_TIMEOUT_SECONDS = 120
+
+DEFAULT_LOCAL_TEMPERATURE = 0.2
+DEFAULT_LOCAL_MAX_TOKENS = 16384
+DEFAULT_LOCAL_CONTEXT_LENGTH = 32768
+DEFAULT_TIMEOUT_SECONDS = 240
 DEFAULT_MAX_RETRIES = 3
 LOCAL_API_KEY_PLACEHOLDER = "not-used"
 
@@ -92,6 +83,8 @@ def _create_local_client() -> OpenAILLMClient:
         client=client,
         model=_getenv("LOCAL_LLM_MODEL", DEFAULT_LOCAL_MODEL),
         temperature=float(_getenv("LOCAL_LLM_TEMPERATURE", str(DEFAULT_LOCAL_TEMPERATURE))),
+        max_tokens=int(_getenv("LOCAL_LLM_MAX_TOKENS", str(DEFAULT_LOCAL_MAX_TOKENS))),
+        context_length=int(_getenv("LOCAL_LLM_CONTEXT_LENGTH", str(DEFAULT_LOCAL_CONTEXT_LENGTH))),
     )
 
 

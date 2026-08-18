@@ -12,27 +12,17 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_CHARS = 1000
 DEFAULT_OVERLAP = 100
-# Upper bound for an auto-detected token budget: most sentence-transformers
-# encoders top out at 512 positions, and tokenizers often report a sentinel
-# value (e.g. 1e30) as ``model_max_length``.
 MAX_AUTO_TOKENS = 512
 
 _SEPARATOR = "\n\n"
-
-# Per-block Docling internals that are meaningless once blocks are packed together.
 _SKIP_BLOCK_METADATA = frozenset({"docling_label", "hierarchy_level"})
 
-# Upper bound for the parent passage stored in chunk metadata (small-to-big
-# retrieval): small chunks give precise embeddings, but the LLM answers from the
-# surrounding section, so each chunk carries its parent text up to this size.
+
 PARENT_CONTEXT_MAX_CHARS = 4000
 
-# A table header is repeated on every piece only while it stays this small a
-# share of the budget; a huge header would crowd out the actual data rows.
+
 HEADER_REPEAT_MAX_RATIO = 0.25
 
-# Sentence boundary: end punctuation (Latin or Cyrillic text) followed by space,
-# or an explicit line break. Used to avoid cutting a chunk mid-sentence.
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+|\n+")
 
 
@@ -70,15 +60,6 @@ class _Section:
 
 
 class _Budget:
-    """Chunk size budget, measured in tokens when possible, characters otherwise.
-
-    Character counts are only a proxy for what an embedding model actually sees:
-    it truncates at a fixed number of *tokens*, and token density differs per
-    language (Cyrillic text costs more tokens per character than English). When
-    a tokenizer is supplied we therefore budget in real tokens, which keeps
-    chunks inside the encoder's window in every language.
-    """
-
     def __init__(self, limit: int, minimum: int, overlap: int, tokenizer: Tokenizer | None):
         self.limit = limit
         self.minimum = minimum
@@ -105,12 +86,7 @@ class _Budget:
             return len(text)
 
     def sizes(self, texts: list[str]) -> list[int]:
-        """Batched ``size()``: one tokenizer call instead of one per string.
 
-        Large documents split into thousands of sentences; calling ``encode()``
-        per sentence pays Python/tokenizer call overhead thousands of times.
-        Fast (Rust-backed) tokenizers batch far more cheaply than that.
-        """
         if self._tokenizer is None:
             return [len(text) for text in texts]
         if not texts:
@@ -159,12 +135,7 @@ def _tokenizer_limit(tokenizer: Tokenizer) -> int:
 
 @lru_cache(maxsize=4)
 def get_embedding_tokenizer(model_name: str | None = None) -> Tokenizer | None:
-    """Return the tokenizer of the retrieval embedding model, or None.
 
-    Chunk sizes should match what the encoder can actually embed; anything past
-    its window is silently dropped at index time. Loading is lazy and failures
-    (offline environment, missing extra) degrade to character budgeting.
-    """
     name = model_name or os.getenv("EMBEDDING_MODEL")
     if not name:
         from file_agent.lancedb_retriever import DEFAULT_SEMANTIC_MODEL_NAME
@@ -207,29 +178,7 @@ def chunk_document(
     max_tokens: int | None = None,
     tokenizer: Tokenizer | None = None,
 ) -> list[Chunk]:
-    """Split a document into retrieval-sized, section-coherent chunks.
 
-    The chunker follows three principles used by production RAG stacks:
-
-    1. **Structure first.** Blocks are grouped into sections (a heading plus its
-       body), so a heading always opens a chunk and never dangles at the end of
-       an unrelated one. Whole sections are then packed together up to the size
-       budget, which keeps small slides/paragraphs from becoming useless
-       single-sentence chunks while never mixing a section into a chunk that is
-       already large enough to stand on its own.
-    2. **Budget in the encoder's unit.** When ``tokenizer`` is provided, chunk
-       size is measured in tokens (default: the encoder's own window, see
-       :func:`get_embedding_tokenizer`) instead of characters, so nothing is
-       silently truncated at index time and Russian and English text are treated
-       consistently. Without a tokenizer the budget falls back to characters.
-    3. **Split on natural boundaries.** Oversized blocks are divided at sentence
-       boundaries (then words, then characters as a last resort) rather than
-       mid-word, tables are split by rows repeating the header, and continuation
-       chunks keep their section heading as a breadcrumb.
-
-    Each chunk records the section it starts under, all sections it covers, page
-    numbers, block ids and any VLM description for filtering and tracing.
-    """
     if max_chars <= 0:
         raise ValueError("max_chars must be greater than 0")
     if overlap < 0:
@@ -320,6 +269,14 @@ class _Chunker:
         self._buffer = []
         self._buffer_size = 0
 
+    def _usable_heading(self, heading: str | None) -> str | None:
+
+        if not heading:
+            return None
+        if self._budget.size(heading) > self._budget.limit * HEADER_REPEAT_MAX_RATIO:
+            return None
+        return heading
+
     def _reserved_limit(self, heading: str | None) -> int:
         """Budget available for content once the breadcrumb heading is added."""
         if not heading:
@@ -328,6 +285,7 @@ class _Chunker:
         return max(1, self._budget.limit - reserve)
 
     def _pack_blocks(self, blocks: list[Block], heading: str | None) -> None:
+        heading = self._usable_heading(heading)
         limit = self._reserved_limit(heading)
         # Small-to-big retrieval: every piece of this oversized section links back
         # to the whole section text, which is what the LLM will actually read.
@@ -518,9 +476,6 @@ class _Chunker:
 
         header, rows = self._table_parts(text)
         if not rows:
-            # Degenerate export (a header with no data rows, or one merged row):
-            # splitting it can only produce header fragments, so keep it whole.
-            # The parent context carries the full table to the LLM anyway.
             return [text]
 
         header_size = (self._budget.size(header) + self._line_size) if header else 0
@@ -661,13 +616,12 @@ class _Chunker:
         while start < len(text):
             window = self._estimate_window(text[start:])
             piece = text[start : start + window]
-            # Shrink until the measured size fits: token density varies wildly
-            # between prose, references and formulas, so estimates need checking.
             while window > 1 and self._budget.size(prefix + piece) > self._budget.limit:
-                window = max(1, int(window * 0.8))
+                window = max(1, window // 2)
                 piece = text[start : start + window]
             pieces.append(prefix + piece)
-            start += max(1, window - self._char_overlap())
+            advance = max(window - self._char_overlap(), max(1, window // 2))
+            start += advance
         return pieces
 
     def _estimate_window(self, text: str) -> int:
@@ -693,8 +647,6 @@ class _Chunker:
         pages = sorted({b.page_number for b in blocks if b.page_number is not None})
         descriptions = [b.vlm_description for b in blocks if b.vlm_description]
 
-        # Preserve useful source coordinates set by parsers (page_number,
-        # slide_number, sheet_name, ...); the first block wins on conflicts.
         metadata: dict[str, Any] = {}
         for block in blocks:
             for key, value in block.metadata.items():

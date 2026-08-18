@@ -5,7 +5,11 @@ import pytest
 from datasets import Dataset
 
 from file_agent.document import Block, Document
-from file_agent.hf_batch import _create_cached_document_loader, generate_hf_qa_records
+from file_agent.hf_batch import (
+    _create_cached_document_loader,
+    duration_stats,
+    generate_hf_qa_records,
+)
 from file_agent.hf_rag import GeneratedQARecord, RetrievedContext
 
 
@@ -157,6 +161,105 @@ def test_generate_hf_qa_records_rejects_max_iterations_change_on_resume(
         )
 
 
+def test_generate_hf_qa_records_records_per_row_durations(monkeypatch, tmp_path):
+    calls = []
+    install_fake_processor(monkeypatch, calls)
+
+    result = generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+    )
+
+    assert len(result.durations_seconds) == 2
+    assert all(duration is not None and duration >= 0 for duration in result.durations_seconds)
+
+    checkpoint = json.loads((tmp_path / "checkpoints" / "000000.json").read_text(encoding="utf-8"))
+    assert checkpoint["duration_seconds"] == pytest.approx(result.durations_seconds[0])
+
+
+def test_generate_hf_qa_records_carries_duration_forward_on_resume(monkeypatch, tmp_path):
+    install_fake_processor(monkeypatch, [])
+    first_run = generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+    )
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("Processor must not be called for completed rows")
+
+    monkeypatch.setattr("file_agent.hf_batch.process_hf_qa_record", fail_if_called)
+    resumed_run = generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+        resume=True,
+    )
+
+    assert resumed_run.durations_seconds == first_run.durations_seconds
+
+
+def test_generate_hf_qa_records_treats_legacy_checkpoints_without_duration_as_unknown(
+    monkeypatch, tmp_path
+):
+    install_fake_processor(monkeypatch, [])
+    generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+    )
+
+    # Simulate a checkpoint written before duration_seconds existed.
+    checkpoint_path = tmp_path / "checkpoints" / "000000.json"
+    payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    del payload["duration_seconds"]
+    checkpoint_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("Processor must not be called for completed rows")
+
+    monkeypatch.setattr("file_agent.hf_batch.process_hf_qa_record", fail_if_called)
+    resumed_run = generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+        resume=True,
+    )
+
+    assert resumed_run.durations_seconds[0] is None
+    assert resumed_run.durations_seconds[1] is not None
+
+
+def test_duration_stats_summarizes_known_durations_and_ignores_unknown():
+    stats = duration_stats([1.0, None, 3.0, 2.0])
+
+    assert stats == {
+        "count": 3,
+        "total_seconds": 6.0,
+        "average_seconds": 2.0,
+        "min_seconds": 1.0,
+        "max_seconds": 3.0,
+    }
+
+
+def test_duration_stats_handles_no_known_durations():
+    stats = duration_stats([None, None])
+
+    assert stats == {
+        "count": 0,
+        "total_seconds": None,
+        "average_seconds": None,
+        "min_seconds": None,
+        "max_seconds": None,
+    }
+
+
 def test_cached_document_loader_reuses_parsing_and_returns_isolated_copies(
     monkeypatch,
     tmp_path,
@@ -198,6 +301,44 @@ def test_cached_document_loader_reuses_parsing_and_returns_isolated_copies(
     assert "dataset_record_id" not in second_document.blocks[0].metadata
 
 
+def test_cached_document_loader_dedupes_identical_content_at_different_paths(
+    monkeypatch,
+    tmp_path,
+):
+    """Regression test: some HF datasets store a separate per-question copy
+    of the same source document (e.g. q0001/report.pdf, q0002/report.pdf -
+    distinct Hub blobs, byte-identical content). A cache keyed by resolved
+    path treats these as different files and re-parses every single row;
+    the fix keys by content hash instead, so identical bytes at different
+    paths still hit the cache."""
+    first_path = tmp_path / "q0001" / "shared.txt"
+    second_path = tmp_path / "q0002" / "shared.txt"
+    first_path.parent.mkdir()
+    second_path.parent.mkdir()
+    first_path.write_text("Shared document", encoding="utf-8")
+    second_path.write_text("Shared document", encoding="utf-8")
+    load_calls = []
+
+    def fake_load_documents(file_paths):
+        paths = list(file_paths)
+        load_calls.append(paths)
+        return [
+            Document(
+                file_name=paths[0].name,
+                file_type="txt",
+                blocks=[Block(id="block-1", text="Shared document", type="text", metadata={})],
+            )
+        ]
+
+    monkeypatch.setattr("file_agent.hf_batch.load_documents", fake_load_documents)
+    loader = _create_cached_document_loader()
+
+    loader([first_path])
+    loader([second_path])
+
+    assert load_calls == [[first_path]]
+
+
 def test_generate_hf_qa_records_resumes_without_processing_again(monkeypatch, tmp_path):
     calls = []
     install_fake_processor(monkeypatch, calls)
@@ -227,23 +368,45 @@ def test_generate_hf_qa_records_resumes_without_processing_again(monkeypatch, tm
     assert resumed_run.resumed_count == 2
 
 
-def test_generate_hf_qa_records_continues_after_partial_failure(monkeypatch, tmp_path):
+def test_generate_hf_qa_records_continues_past_a_row_failure(monkeypatch, tmp_path):
     calls = []
     install_fake_processor(monkeypatch, calls, fail_on_id="q0002")
 
-    with pytest.raises(RuntimeError, match="Failed on q0002"):
-        generate_hf_qa_records(
-            dataset=make_dataset(),
-            dataset_id="owner/rag-qa",
-            llm_client=DummyLLM(),
-            output_dir=tmp_path,
-        )
+    result = generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+    )
 
+    # The batch completes in a single call - q0002 failing doesn't abort it.
+    assert [record_id for record_id, _ in calls] == ["q0001", "q0002"]
+    assert result.processed_count == 1
+    assert result.failed_count == 1
+    assert result.resumed_count == 0
+    assert [record.id for record in result.records] == ["q0001", "q0002"]
+
+    failed_record = result.records[1]
+    assert failed_record.answer_model.startswith("[GENERATION FAILED:")
+    assert "Failed on q0002" in failed_record.answer_model
+    assert failed_record.contexts == ()
+
+    # Only the successful row is checkpointed - the failed one stays retryable.
     assert (tmp_path / "checkpoints" / "000000.json").exists()
     assert not (tmp_path / "checkpoints" / "000001.json").exists()
 
+
+def test_generate_hf_qa_records_retries_a_failed_row_on_resume(monkeypatch, tmp_path):
+    install_fake_processor(monkeypatch, [], fail_on_id="q0002")
+    generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+    )
+
     resumed_calls = []
-    install_fake_processor(monkeypatch, resumed_calls)
+    install_fake_processor(monkeypatch, resumed_calls)  # succeeds for every row now
     result = generate_hf_qa_records(
         dataset=make_dataset(),
         dataset_id="owner/rag-qa",
@@ -255,7 +418,9 @@ def test_generate_hf_qa_records_continues_after_partial_failure(monkeypatch, tmp
     assert [record_id for record_id, _ in resumed_calls] == ["q0002"]
     assert result.processed_count == 1
     assert result.resumed_count == 1
+    assert result.failed_count == 0
     assert [record.id for record in result.records] == ["q0001", "q0002"]
+    assert result.records[1].answer_model == "q0002 generated"
 
 
 def test_generate_hf_qa_records_rejects_existing_checkpoints_without_resume(

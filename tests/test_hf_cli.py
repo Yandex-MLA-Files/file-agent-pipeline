@@ -150,10 +150,64 @@ def test_run_hf_dataset_generation_orchestrates_limited_run_and_writes_manifest(
         "total_count": 1,
         "processed_count": 1,
         "resumed_count": 0,
+        "failed_count": 0,
     }
     assert manifest["artifacts"] == {
         "parquet": "answers.parquet",
         "hf_dataset": "hf_dataset",
+    }
+
+
+def test_run_hf_dataset_generation_writes_timing_stats_to_manifest(monkeypatch, tmp_path):
+    source_dataset = make_source_dataset()
+    llm_client = DummyLLM()
+
+    def fake_generate_hf_qa_records(**kwargs):
+        selected_dataset = kwargs["dataset"]
+        records = tuple(generated_record_from_row(row) for row in selected_dataset)
+        return BatchGenerationResult(
+            records=records,
+            processed_count=2,
+            resumed_count=0,
+            durations_seconds=(1.0, 3.0),
+        )
+
+    def fake_save_generated_qa_dataset(**kwargs):
+        output_dir = tmp_path / "run"
+        parquet_path = output_dir / "answers.parquet"
+        hf_dataset_path = output_dir / "hf_dataset"
+        output_dir.mkdir(parents=True)
+        parquet_path.write_text("parquet", encoding="utf-8")
+        hf_dataset_path.mkdir()
+        return GeneratedDatasetArtifacts(
+            parquet_path=parquet_path,
+            hf_dataset_path=hf_dataset_path,
+            row_count=2,
+        )
+
+    monkeypatch.setattr(
+        "file_agent.hf_cli.create_generation_llm_client", lambda **kwargs: llm_client
+    )
+    monkeypatch.setattr("file_agent.hf_cli.load_qa_dataset", lambda **kwargs: source_dataset)
+    monkeypatch.setattr(
+        "file_agent.hf_cli.generate_hf_qa_records",
+        fake_generate_hf_qa_records,
+    )
+    monkeypatch.setattr(
+        "file_agent.hf_cli.save_generated_qa_dataset",
+        fake_save_generated_qa_dataset,
+    )
+
+    config = HFGenerationConfig(dataset_id="owner/rag-qa", output_dir=tmp_path / "run")
+    result = run_hf_dataset_generation(config)
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["timing"] == {
+        "count": 2,
+        "total_seconds": 4.0,
+        "average_seconds": 2.0,
+        "min_seconds": 1.0,
+        "max_seconds": 3.0,
     }
 
 

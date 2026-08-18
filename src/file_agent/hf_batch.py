@@ -2,8 +2,10 @@ import hashlib
 import json
 import logging
 import os
+import time
+from collections.abc import Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -32,10 +34,40 @@ class BatchGenerationResult:
     records: tuple[GeneratedQARecord, ...]
     processed_count: int
     resumed_count: int
+    # Rows where process_hf_qa_record raised (a genuine LLM/pipeline
+    # failure, not a tool-call error - those are already handled inside the
+    # agent loop). Included in records as a placeholder (see _failed_record)
+    # so the row count still matches the source dataset, but never
+    # checkpointed - a later --resume retries it fresh rather than
+    # permanently baking in what might have been a transient failure.
+    failed_count: int = 0
+    # One entry per record, same order - None where a row's timing is
+    # unknown (a checkpoint written before this field existed, on --resume).
+    durations_seconds: tuple[float | None, ...] = field(default_factory=tuple)
 
     @property
     def total_count(self) -> int:
         return len(self.records)
+
+
+def duration_stats(durations: Sequence[float | None]) -> dict[str, Any]:
+    """Aggregate per-row timings, ignoring rows with unknown duration."""
+    known = [duration for duration in durations if duration is not None]
+    if not known:
+        return {
+            "count": 0,
+            "total_seconds": None,
+            "average_seconds": None,
+            "min_seconds": None,
+            "max_seconds": None,
+        }
+    return {
+        "count": len(known),
+        "total_seconds": round(sum(known), 2),
+        "average_seconds": round(sum(known) / len(known), 2),
+        "min_seconds": round(min(known), 2),
+        "max_seconds": round(max(known), 2),
+    }
 
 
 def generate_hf_qa_records(
@@ -52,6 +84,7 @@ def generate_hf_qa_records(
     retriever: Retriever | None = None,
     resume: bool = False,
     max_iterations: int = MAX_ITERATIONS_DEFAULT,
+    verify_answers: bool = True,
 ) -> BatchGenerationResult:
     validate_qa_dataset(dataset)
     if not isinstance(dataset_id, str) or not dataset_id.strip():
@@ -74,10 +107,13 @@ def generate_hf_qa_records(
         max_chars=max_chars,
         overlap=overlap,
         max_iterations=max_iterations,
+        verify_answers=verify_answers,
     )
     records: list[GeneratedQARecord] = []
+    durations: list[float | None] = []
     processed_count = 0
     resumed_count = 0
+    failed_count = 0
     document_loader = _create_cached_document_loader()
 
     for row_index, row in enumerate(dataset):
@@ -85,7 +121,7 @@ def generate_hf_qa_records(
         checkpoint_path = _checkpoint_path(checkpoints_dir, row_index)
 
         if checkpoint_path.exists():
-            generated_record = _load_checkpoint(
+            generated_record, duration_seconds = _load_checkpoint(
                 checkpoint_path=checkpoint_path,
                 source_record=record,
                 expected_parameters=parameters,
@@ -98,62 +134,103 @@ def generate_hf_qa_records(
                 record.id,
             )
         else:
-            generated_record = process_hf_qa_record(
-                record=record,
-                dataset_id=dataset_id,
-                llm_client=llm_client,
-                revision=revision,
-                cache_dir=cache_dir,
-                token=token,
-                top_k=top_k,
-                max_chars=max_chars,
-                overlap=overlap,
-                retriever=retriever,
-                document_loader=document_loader,
-                max_iterations=max_iterations,
-            )
-            _validate_generated_record(generated_record, record)
-            _write_checkpoint(
-                checkpoint_path=checkpoint_path,
-                parameters=parameters,
-                generated_record=generated_record,
-            )
-            processed_count += 1
-            LOGGER.info(
-                "Processed row %s/%s (%s)",
-                row_index + 1,
-                len(dataset),
-                record.id,
-            )
+            started_at = time.monotonic()
+            try:
+                generated_record = process_hf_qa_record(
+                    record=record,
+                    dataset_id=dataset_id,
+                    llm_client=llm_client,
+                    revision=revision,
+                    cache_dir=cache_dir,
+                    token=token,
+                    top_k=top_k,
+                    max_chars=max_chars,
+                    overlap=overlap,
+                    retriever=retriever,
+                    document_loader=document_loader,
+                    max_iterations=max_iterations,
+                    verify_answers=verify_answers,
+                )
+            except Exception as exc:  # noqa: BLE001 - row-level isolation is deliberate
+                # A genuine LLM/pipeline failure on one row (e.g. the model
+                # exhausting its empty-response retries) must not abort the
+                # whole batch - it becomes a visible placeholder instead, and
+                # is left uncheckpointed so --resume retries it fresh (it
+                # might have been transient; temperature > 0 means a retry
+                # can actually diverge from the same failure).
+                duration_seconds = time.monotonic() - started_at
+                LOGGER.error(
+                    "Row %s/%s (%s) failed after %.2fs: %s",
+                    row_index + 1,
+                    len(dataset),
+                    record.id,
+                    duration_seconds,
+                    exc,
+                    exc_info=True,
+                )
+                generated_record = _failed_record(record, exc)
+                failed_count += 1
+            else:
+                duration_seconds = time.monotonic() - started_at
+                _validate_generated_record(generated_record, record)
+                _write_checkpoint(
+                    checkpoint_path=checkpoint_path,
+                    parameters=parameters,
+                    generated_record=generated_record,
+                    duration_seconds=duration_seconds,
+                )
+                processed_count += 1
+                LOGGER.info(
+                    "Processed row %s/%s (%s) in %.2fs",
+                    row_index + 1,
+                    len(dataset),
+                    record.id,
+                    duration_seconds,
+                )
 
         records.append(generated_record)
+        durations.append(duration_seconds)
 
     return BatchGenerationResult(
         records=tuple(records),
         processed_count=processed_count,
         resumed_count=resumed_count,
+        failed_count=failed_count,
+        durations_seconds=tuple(durations),
+    )
+
+
+def _failed_record(record: QADatasetRecord, exc: Exception) -> GeneratedQARecord:
+    return GeneratedQARecord(
+        id=record.id,
+        question=record.question,
+        doc_ids=record.doc_ids,
+        answer_model=f"[GENERATION FAILED: {exc}]",
+        contexts=(),
+        answer=record.answer,
     )
 
 
 def _create_cached_document_loader() -> DocumentLoader:
-    cache: dict[Path, Document] = {}
+    cache: dict[str, Document] = {}
 
     def load_cached_documents(file_paths: list[str | Path]) -> list[Document]:
         documents: list[Document] = []
 
         for file_path in file_paths:
             source_path = Path(file_path)
-            cache_key = source_path.resolve()
+            # Content hash, not resolved path: some HF datasets store a
+            # separate per-question copy of the same source document (e.g.
+            # q0001/report.pdf, q0002/report.pdf - distinct Hub blobs, byte-
+            # identical content), which gave every row its own path and made
+            # a path-keyed cache miss every single time.
+            cache_key = hashlib.sha256(source_path.read_bytes()).hexdigest()
             cached_document = cache.get(cache_key)
             if cached_document is None:
-                # Hugging Face snapshot files are symlinks to extensionless blob
-                # paths. Use the resolved path only as the cache identity and
-                # keep the original filename so parser selection still sees
-                # extensions such as .pdf and .docx.
                 cached_document = load_documents([source_path])[0]
                 cache[cache_key] = cached_document
             else:
-                LOGGER.info("Reusing parsed document from batch cache: %s", cache_key)
+                LOGGER.info("Reusing parsed document from batch cache: %s", source_path.name)
 
             # HF processing adds row-specific dataset metadata to every block.
             # Return an isolated copy so one question cannot mutate the cached
@@ -174,6 +251,7 @@ def build_generation_parameters(
     max_chars: int,
     overlap: int,
     max_iterations: int = MAX_ITERATIONS_DEFAULT,
+    verify_answers: bool = True,
 ) -> dict[str, Any]:
     prompt_template = build_qa_prompt(
         question="{question}",
@@ -189,6 +267,7 @@ def build_generation_parameters(
         "rag_pipeline_version": RAG_PIPELINE_VERSION,
         "agent_pipeline_version": AGENT_PIPELINE_VERSION,
         "max_iterations": max_iterations,
+        "verify_answers": verify_answers,
         "tool_names": list(ALL_TOOL_NAMES),
         "embedding_model": os.getenv("EMBEDDING_MODEL") or DEFAULT_SEMANTIC_MODEL_NAME,
         "ocr_engine": os.getenv("OCR_ENGINE", "easyocr").strip().lower(),
@@ -265,11 +344,15 @@ def _write_checkpoint(
     checkpoint_path: Path,
     parameters: dict[str, Any],
     generated_record: GeneratedQARecord,
+    duration_seconds: float,
 ) -> None:
     payload = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "parameters": parameters,
         "result": generated_record.to_dict(),
+        # Sibling to "result", not part of it or CHECKPOINT_SCHEMA_VERSION -
+        # purely-additive run metadata, not part of the answer's own shape.
+        "duration_seconds": round(duration_seconds, 3),
     }
     temporary_path = checkpoint_path.with_suffix(".json.tmp")
     temporary_path.write_text(
@@ -283,7 +366,7 @@ def _load_checkpoint(
     checkpoint_path: Path,
     source_record: QADatasetRecord,
     expected_parameters: dict[str, Any],
-) -> GeneratedQARecord:
+) -> tuple[GeneratedQARecord, float | None]:
     try:
         payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -302,7 +385,14 @@ def _load_checkpoint(
 
     generated_record = GeneratedQARecord.from_dict(result_value)
     _validate_generated_record(generated_record, source_record)
-    return generated_record
+
+    # None for checkpoints written before this field existed (or otherwise
+    # malformed) - unknown timing, not zero, so it's excluded from stats
+    # rather than skewing the average down.
+    duration_value = payload.get("duration_seconds")
+    is_number = isinstance(duration_value, (int, float)) and not isinstance(duration_value, bool)
+    duration_seconds = duration_value if is_number else None
+    return generated_record, duration_seconds
 
 
 def _validate_generated_record(

@@ -142,6 +142,7 @@ def process_hf_qa_record(
     retriever: Retriever | None = None,
     document_loader: DocumentLoader | None = None,
     max_iterations: int = MAX_ITERATIONS_DEFAULT,
+    verify_answers: bool = True,
 ) -> GeneratedQARecord:
     document_paths = download_record_documents(
         record=record,
@@ -160,6 +161,7 @@ def process_hf_qa_record(
         retriever=retriever,
         document_loader=document_loader,
         max_iterations=max_iterations,
+        verify_answers=verify_answers,
     )
 
 
@@ -173,6 +175,7 @@ def process_qa_record(
     retriever: Retriever | None = None,
     document_loader: DocumentLoader | None = None,
     max_iterations: int = MAX_ITERATIONS_DEFAULT,
+    verify_answers: bool = True,
 ) -> GeneratedQARecord:
     if len(document_paths) != len(record.doc_ids):
         raise ValueError("document_paths count must match record.doc_ids count")
@@ -205,6 +208,7 @@ def process_qa_record(
                 llm_client=llm_client,
                 tools=tools,
                 max_iterations=max_iterations,
+                verify_answer=verify_answers,
             )
             contexts = serialize_search_results(response.sources)
             finish_trace(output=response.answer)

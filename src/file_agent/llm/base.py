@@ -13,6 +13,8 @@ class ToolCall:
 class ToolCallResponse:
     content: str | None
     tool_calls: list[ToolCall]
+    reasoning: str | None = None
+    usage: dict[str, int] | None = None
 
 
 class LLMClient(Protocol):

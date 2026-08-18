@@ -8,6 +8,7 @@ from file_agent.document import BlockType, Document
 from file_agent.parsers.docling_parser import DoclingParser
 from file_agent.parsers.enhancer import DocumentEnhancer
 from file_agent.parsers.html_parser import HTMLParser
+from file_agent.parsers.image_parser import ImageParser
 from file_agent.parsers.md_parser import MarkdownParser
 from file_agent.parsers.pdf_parser import PDFParser
 from file_agent.parsers.pptx_parser import PPTXParser
@@ -21,8 +22,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# When more than this share of pages need OCR, treat the document as a full scan
-# and OCR every page instead of only the bitmap regions.
+
 FULL_SCAN_RATIO = 0.6
 
 OcrMode = Literal["auto", "on", "off"]
@@ -33,16 +33,7 @@ def parse_file(
     enable_vlm: bool | None = None,
     enable_ocr: OcrMode = "auto",
 ) -> Document:
-    """Parse any supported file into a structured :class:`Document`.
 
-    :param enable_vlm: when True, figures/diagrams in PDFs are described by a VLM.
-        The default (None) defers to configuration: the ``VLM_BACKEND`` env var
-        selects a backend (``off`` / ``smolvlm`` / ``openai``), so the whole app
-        gains figure understanding without any code changes.
-    :param enable_ocr: OCR policy for PDFs — ``"auto"`` lets the pipeline decide
-        per page (see :mod:`file_agent.parsers.routing`), ``"on"`` forces OCR,
-        ``"off"`` disables it. Ignored for formats that carry their own text.
-    """
     path = Path(file_path)
     suffix = path.suffix.lower()
 
@@ -74,10 +65,12 @@ def _parse_by_suffix(
         return HTMLParser().parse(path)
     if suffix == ".xlsx":
         return XLSXParser().parse(path)
+    if suffix in {".jpg", ".jpeg", ".png"}:
+        return ImageParser().parse(path)
     if suffix == ".pptx":
         document = PPTXParser().parse(path)
-        if enable_vlm is not False:
-            _enhance_with_vlm(document, path, forced=enable_vlm is True)
+        if enable_vlm is True:
+            _enhance_with_vlm(document, path)
         return document
 
     raise ValueError(f"Unsupported file type: {suffix or '<no extension>'}")
@@ -86,8 +79,6 @@ def _parse_by_suffix(
 def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) -> Document:
     do_ocr, ocr_full_page, analysis = _resolve_ocr_policy(path, enable_ocr)
 
-    # Make the decision observable: without this there is no way to tell whether
-    # OCR ran, since a document with a full text layer never starts an engine.
     if do_ocr:
         pages = analysis.ocr_page_numbers if analysis else []
         logger.info(
@@ -115,8 +106,8 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
     if analysis is not None:
         document.metadata["page_analysis"] = analysis.summary()
 
-    if enable_vlm is not False:
-        _enhance_with_vlm(document, path, forced=enable_vlm is True)
+    if enable_vlm is True:
+        _enhance_with_vlm(document, path)
 
     return document
 
@@ -124,7 +115,6 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
 def _resolve_ocr_policy(path: Path, enable_ocr: OcrMode):
     """Decide whether to run OCR and return (do_ocr, ocr_full_page, analysis)."""
     if path.suffix.lower() != ".pdf":
-        # Routing analysis only applies to PDFs; DOCX has its own text layer.
         return (enable_ocr == "on"), False, None
 
     analysis = None
@@ -144,7 +134,8 @@ def _resolve_ocr_policy(path: Path, enable_ocr: OcrMode):
     return analysis.needs_ocr, analysis.scanned_ratio >= FULL_SCAN_RATIO, analysis
 
 
-def _enhance_with_vlm(document: Document, path: Path, forced: bool) -> None:
+def _enhance_with_vlm(document: Document, path: Path) -> None:
+
     if path.suffix.lower() not in {".pdf", ".pptx"}:
         return
 
@@ -157,11 +148,10 @@ def _enhance_with_vlm(document: Document, path: Path, forced: bool) -> None:
 
     vlm_client = create_vlm_client()
     if vlm_client is None:
-        if forced:
-            logger.warning(
-                "VLM requested but no backend configured; set VLM_BACKEND to "
-                "'smolvlm' (local, free) or 'openai' (endpoint via VLM_BASE_URL)."
-            )
+        logger.warning(
+            "VLM requested but no backend configured; set VLM_BACKEND to "
+            "'smolvlm' (local, free) or 'openai' (endpoint via VLM_BASE_URL)."
+        )
         return
 
     logger.info("VLM enhancement: describing figures in %s", path.name)
