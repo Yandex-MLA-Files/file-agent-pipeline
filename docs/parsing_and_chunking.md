@@ -21,6 +21,73 @@ available, and how the changes were measured with the project's LLM-as-judge
 
 ## 2. What the pipeline does now
 
+### 2.0 The contract everything else is built on
+
+One dataclass carries a document from the parser to the index, and every
+decision downstream reads it rather than the file:
+
+```python
+Block(
+    id, text, type,                # stable interface (legacy consumers use it)
+    metadata,                      # source_file, caption, note_type, enrichment, …
+    block_type=BlockType.TABLE,    # heading | text | list | table | figure |
+                                   # image | formula | code
+    page_number=7,                 # page, slide or sheet index — what a citation needs
+    bbox=(x0, y0, x1, y1),         # top-left origin, used to crop the region again
+    vlm_description="a bar chart", # filled by the figure describer
+    image_bytes=b"\x89PNG…",       # DOCX/PPTX media, never serialised
+)
+```
+
+Three properties of that contract matter more than they look:
+
+- **`block_type` decides how a block is split.** Prose is cut on sentences, a
+  list on items, a table on rows, code on lines. A parser that returns
+  untyped text still works — it simply gets the character-window behaviour.
+- **`page_number` and `bbox` are what let a later pass go back to the pixels.**
+  Formula enrichment, table repair and figure description all re-render the
+  region from the original PDF instead of guessing from text.
+- **Metadata travels.** Anything a parser records (a footnote's id, a table's
+  caption, `nested_in_table`, `enrichment`) ends up in the chunk metadata and
+  therefore in the prompt header the model sees.
+
+`Document` adds the file name, the file type, the block list, a table of
+contents built from the headings, and a metadata dictionary with the parsing
+method, the title, per-format counters (figures, tables, footnotes, formulas,
+text boxes) and — when they ran — the OCR and enrichment statistics. Those
+counters are how the audit tool notices that a document arrived without its
+formulas.
+
+#### The order things happen in, for a PDF
+
+The PDF path is the one with the most moving parts; it runs in this order,
+and each step is guarded so that its failure cannot take the document down:
+
+1. **Routing** (`parsers/routing.py`, PyMuPDF only, no models). Per page:
+   characters in the text layer, raster coverage, vector-drawing count →
+   `needs_ocr` and a reason. This is what keeps OCR off born-digital files.
+2. **Page transcription** for the pages that need it (`parsers/vlm_ocr.py`) —
+   concurrent, validated, cached, with EasyOCR as the per-page fallback.
+3. **Layout parsing** (Docling): reading order, headings, tables
+   (TableFormer ACCURATE), figures, formula/code *regions*.
+4. **Formula and code enrichment** (`parsers/formula_enrichment.py`): the
+   regions from step 3 are cropped and transcribed, concurrently and cached.
+5. **Post-processing** (`docling_parser.py`): list items merged, run
+   fragments rejoined, split headings stitched, hyphenation repaired, running
+   headers dropped, two-column order repaired when the evidence is
+   unambiguous.
+6. **OCR merge**: transcript blocks replace the placeholder blocks of the
+   pages that were transcribed, in reading order; the document title is
+   recomputed, because a scanned first page usually carries the real one.
+7. **Table repair** (`parsers/table_repair.py`): only tables that came out
+   degenerate are re-read from the page image, and only a repair with *more*
+   structure than the original is accepted.
+8. **Figure description** (`parsers/enhancer.py`): the largest figures, with a
+   budget that scales with the document.
+
+Non-PDF formats skip 1–7: they carry their own structure, so the parser reads
+it directly and only step 8 applies.
+
 ### 2.1 Structured parsers (`PARSER_PROFILE=structured`, default)
 
 Every parser produces the same `Document`/`Block` contract: typed blocks
@@ -360,6 +427,159 @@ and adds:
 
 `CHUNKING_STRATEGY=legacy` runs the original chunker (`chunking_legacy.py`).
 
+#### How the chunker actually walks a document
+
+The order below is the whole algorithm; the subtleties are in the conditions,
+not in the shape.
+
+**1. Sections.** Blocks are grouped into *leaf* sections: a heading opens one,
+everything until the next heading of the same or a shallower level belongs to
+it, and the headings above it are remembered as its `path`. A document without
+headings is one section; a document that is only headings still produces
+chunks (there is an explicit fallback for it).
+
+**2. Packing.** Sections are accumulated into a buffer while they fit the
+budget. The buffer is flushed when adding the next section would exceed the
+limit, when it is already at least a third of the budget (`minimum`), or when
+the next section comes from a different branch of the outline and the buffer
+is at least a sixth of the budget. The last rule is what stops two unrelated
+subsections from sharing a chunk just because both are short.
+
+**3. Oversized sections** are packed block by block instead. A table or any
+block larger than the limit is emitted on its own (and split by its own type
+rules); everything else accumulates until the limit. Each piece keeps a
+*parent window* — the section text around it, grown in both directions up to
+4000 characters, opened by the heading path.
+
+**4. Type-specific splitting.**
+
+| Block | Cut on | Kept together |
+|---|---|---|
+| prose | sentence boundaries (`т.е.`, `рис.`, `e.g.` protected) | sentence overlap between neighbours |
+| list | items | the marker with its item |
+| code | lines | blank lines |
+| table | rows | caption + header repeated on every piece; a row too wide for one piece is cut on cell boundaries |
+
+**5. The breadcrumb.** Every chunk opens with `Doc title > Chapter > Section`,
+capped at 20 % of the budget: the deepest crumbs are dropped first, each crumb
+is shortened to 80 characters, and the crumb is *not* repeated when the chunk
+body already starts with that heading. It is prepended to the text (so both
+BM25 and the encoder see it) and stored in `metadata["heading_path"]`.
+
+**6. Emission guarantees.** `_emit` is the only place a chunk is created, and
+it enforces four things: a chunk never exceeds the encoder budget (a final
+window pass re-splits anything that slipped through, keeping the breadcrumb on
+every window); a piece with no letter or digit is never emitted; the parent
+passage is attached only when it is genuinely larger than the piece itself;
+and the id ties the chunk back to the block it came from
+(`block-3cce0d0c-chunk-21`).
+
+**7. Extra representations.** After the windows, tables are indexed a second
+and third time — one record per row, and one automatic summary per table
+(§2.3 above). They carry `representation` = `row` / `profile` in metadata, so
+retrieval evaluation and the UI can tell them apart from window chunks.
+
+#### The budget is counted in the encoder's own tokens
+
+With a tokenizer (the default path) the limit is
+`min(model_max_length, CHUNK_TARGET_TOKENS=384)`, the minimum is a third of
+it, and the overlap keeps the caller's *ratio* rather than its absolute value
+(100 of 1000 characters → 10 % of the token budget). Sizes are memoised, and
+the cache is cleared past 4096 entries so a large corpus cannot grow it
+without bound.
+
+Without a tokenizer the same code counts characters, and the character-window
+fallback always advances by at least half a window. That is not a detail: the
+original chunker could step one character at a time on a table row denser in
+tokens than the window, which is the failure that made one DOCX unprocessable
+in the baseline run.
+
+#### What a chunk carries
+
+```python
+Chunk(
+    id="block-3cce0d0c-chunk-21",
+    text="Doc > Chapter > Section\n\n…the passage…",
+    metadata={
+        "source_file": "Конспект ОВиТМ.pdf", "file_type": "pdf",
+        "block_ids": [...], "block_type": "text", "block_types": ["text"],
+        "doc_title": "…", "section": "…", "sections": [...],
+        "heading_path": ["…", "…"],
+        "page_number": 12, "page_numbers": [12, 13], "bbox": (...),
+        "context": "…the parent passage the model reads…",
+        "representation": "row",          # row records / profiles only
+        "row_index": 7, "table_profile": True,
+        "caption": "…", "note_type": "footnote", "enrichment": "vlm",
+    },
+)
+```
+
+Per-block parser internals (`docling_label`, `hierarchy_level`, `style`,
+`figure_index`, …) are deliberately dropped at this boundary: they are useful
+while parsing and only noise in a prompt.
+
+### 2.3a Caches, determinism and what they cost
+
+Two passes in the pipeline call a generative model, and both are now cached by
+**the pixels they read** (SHA-1 of the rendered PNG plus the prompt version):
+
+| Cache | Key | Cold | Warm | Invalidated by |
+|---|---|---|---|---|
+| page transcripts (`vlm_ocr.py`) | page render at `OCR_DPI` | ~33 s per page | 0 | `OCR_PROMPT_VERSION` |
+| formula/code crops (`formula_enrichment.py`) | region crop at `PDF_ENRICHMENT_DPI` | 486 ms per region | 0 | `PROMPT_VERSION` |
+
+Both live under `~/.cache/file_agent/` by default and are disabled with
+`PDF_ENRICHMENT_CACHE=off`. Only *validated* output is stored, so a rejected
+transcript is never served back.
+
+The point is not only speed. A model on vLLM is not deterministic under
+batching, so before the cache the same scanned deck produced slightly
+different text on every ingestion — which moved the five questions about it by
+±0.4 between runs of *identical code* and made small differences impossible to
+measure. With the cache, a re-ingestion produces the same document, and the
+only remaining variance in an evaluation is the judge's own.
+
+### 2.3b Failure modes and the guard that catches each
+
+Every one of these was observed on the project's own corpus, not imagined:
+
+| Failure | Where it shows | Guard |
+|---|---|---|
+| The endpoint is down / the model is text-only | every page or region would time out in turn | the first page and the first crop are sent alone; on failure the rest are skipped and the classic engine takes over |
+| The model describes the image instead of transcribing it | "На изображении представлена формула…" indexed as a formula | prose/refusal detection, retry, then the region is left empty |
+| A decoding loop | one line repeated to the token limit | repetition check on lines and on short fragments |
+| Output cut off mid-formula | unbalanced braces | retry with double the budget; the better of the two answers wins |
+| Docling swallows a CUDA OOM in enrichment | the document parses *faster* and arrives with **no** formulas | empty-region counter + warning; the batch is sized from free GPU memory |
+| A wide table loses its header | rows of numbers with no column names | abbreviated header repeated on every piece |
+| A running header becomes a section | identical contentless chunks | a body-less heading is dropped only when the document repeats it |
+| A blank page invites invention | a page of nothing gets "text" | ink ratio below 5·10⁻⁵ → the page never reaches the model |
+| python-docx has no numbering part | `NotImplementedError` aborts the parse | numbering is optional; without it items are plain bullets |
+| A document with thousands of formula regions | an hour of ingestion | `PDF_ENRICHMENT_MAX_REGIONS` (1500) with a warning naming what was skipped |
+
+### 2.3c Configuration reference (ingestion)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `PARSER_PROFILE` | `structured` | format-aware parsers, or `legacy` for the original flat ones |
+| `CHUNKING_STRATEGY` | `structured` | section packing with breadcrumbs, or `legacy` |
+| `CHUNK_TARGET_TOKENS` | `384` | token budget per chunk, capped by the encoder window |
+| `TABLE_ROW_RECORDS` | `true` | index every table row as `Column: value` as well |
+| `CHUNK_SEMANTIC_SPLIT` | `false` | cut long unstructured prose at topic boundaries |
+| `FORMULA_INDEXING` | `inline` | embed standalone formulas; `context` shows them only through the parent |
+| `OCR_ENGINE` | `auto` | validated model transcription with an EasyOCR fallback; `vlm`, `easyocr`, `rapidocr`, `off` |
+| `OCR_DPI` / `OCR_LANGS` | `150` / `ru,en` | page render resolution, classic-engine languages |
+| `VLM_OCR_CONCURRENCY` | `4` | page transcriptions in flight |
+| `PDF_ENRICHMENT` | `auto` | read formula/code regions at all |
+| `PDF_ENRICHMENT_ENGINE` | `auto` | the serving model when one is configured, else Docling's CodeFormulaV2 |
+| `PDF_ENRICHMENT_CONCURRENCY` | `8` | formula requests in flight (16 is ~27 % faster) |
+| `PDF_ENRICHMENT_DPI` | `200` | crop resolution for those requests |
+| `PDF_ENRICHMENT_BATCH` | `auto` | Docling-engine batch, sized from free GPU memory |
+| `PDF_ENRICHMENT_MAX_REGIONS` | `1500` | ingestion budget per document |
+| `PDF_ENRICHMENT_CACHE` | `~/.cache/file_agent/formula_enrichment` | transcript cache, `off` disables |
+| `PDF_TABLE_VLM` | `auto` | re-read degenerate tables from the page image |
+| `DOCLING_PDF_BACKEND` | auto | `docling` (default, better cells) or `pypdfium` (Windows fallback) |
+| `VLM_BACKEND` / `VLM_MAX_FIGURES` | `llm` / scaled | figure description backend and budget |
+
 ### 2.4 Retrieval and answering
 
 - Dense embeddings default to `BAAI/bge-m3` (8192-token window, strong on
@@ -431,6 +651,7 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | `pc-v11-noenrich-127` | v10 with `PDF_ENRICHMENT=off` — the control that prices what the formulas cost this dataset. |
 | `pc-v12-formula-context-127` (**current default**) | v10 with formulas kept out of the embedded chunk text (`FORMULA_INDEXING=context`), Word equations read as LaTeX, and the enrichment batch sized from free GPU memory. |
 | `pc-v13-final-127` | The same code as v12, run a second time (and populating the new page-OCR cache): the pair measures how much this table moves when nothing changes. |
+| `pc-v14-inline-127` (**current default**) | v12 with `FORMULA_INDEXING=inline`, the value the retrieval A/B chose. Confirms the final configuration end to end; the page-OCR cache makes its scanned-deck answers identical to v13's. |
 
 ### 3.1a Auditing the ingestion itself (`tools/audit_ingestion.py`)
 
@@ -481,8 +702,9 @@ this run does not OCR.
 | v9 = v8 + VLM enrichment + chunking fixes | 127 | 0 | 0.959 | 0.565 | 0.824 | 0.752 | 0.852 | 14.9 |
 | v10 = v9 + the two corrections | 127 | 0 | 0.954 | 0.577 | 0.823 | 0.762 | 0.843 | 15.1 |
 | v11 = v10 with enrichment off (control) | 127 | 0 | 0.965 | 0.592 | 0.823 | 0.762 | 0.852 | 13.3 |
-| **v12 = v10 + formulas in context + Word equations** | 127 | 0 | 0.958 | 0.584 | 0.832 | 0.755 | 0.844 | **13.3** |
+| v12 = v10 + formulas in context + Word equations | 127 | 0 | 0.958 | 0.584 | 0.832 | 0.755 | 0.844 | 13.3 |
 | v13 = v12 + OCR page cache (same code, second sample) | 127 | 0 | 0.952 | 0.568 | 0.824 | 0.751 | 0.843 | 13.4 |
+| **v14 = v12 with formulas indexed (current default)** | 127 | 0 | 0.957 | 0.578 | 0.823 | 0.754 | 0.848 | **12.4** |
 
 Means over successfully processed rows only differ for the baseline (0.715 /
 0.429 / 0.560 / 0.570 / 0.630 over 122 rows).
@@ -498,13 +720,19 @@ than that is not a result. (Both sources are now closed: page transcripts are
 cached by their pixels from v13 on, exactly like formula crops, so a
 re-ingestion produces the same text — the remaining variance is the judge's.)
 
-Against that floor, **v12 is level with v5, the configuration it replaces**:
-−0.021 correctness, +0.001 relevancy, −0.021 recall, and on the 49 answers
-that are byte-identical between the two runs v12 scores **higher** (0.628 →
-0.648). What it adds is content v5 never indexed — formulas, footnotes,
-equations from Word, real list numbers, column names on wide tables — at
-**13.3 s per question against 18.5** and 2.6× faster ingestion of a
-formula-dense document.
+Against that floor, **the current default (v14) is level with v5, the
+configuration it replaces**: −0.027 correctness, −0.008 relevancy, −0.017
+recall — and on the answers that are byte-identical between runs the new
+pipeline scores *higher* (v12 against v5: 0.628 → 0.648). What it adds is
+content v5 never indexed — formulas, footnotes, equations from Word, real list
+numbers, column names on wide tables — at **12.4 s per question against 18.5**
+(−33 %) and 2.6× faster ingestion of a formula-dense document.
+
+The `inline`/`context` pair is the clearest illustration of the floor: v12 and
+v13 (`context`) scored 0.584 and 0.568, v14 (`inline`) 0.578 — the judge
+cannot separate them, while the retrieval measurement separates them cleanly
+(formula hit@5 1.000 against 0.567). When a design question is about
+*retrieval*, measure retrieval.
 
 **v10 against v8, read properly.** 108 of the 127 answers are *byte-identical*
 to v8's, and on those rows the judge gives 0.607 → 0.605 — that is the
