@@ -5,8 +5,8 @@ embedding budget, a chunk that is only a breadcrumb, a table piece that lost
 its header, a duplicated chunk, a lost page number, mojibake — plus an
 end-to-end check that sentences of the source survive into the chunks.
 
-    python tools/audit_ingestion.py ~/testdocs
-    python tools/audit_ingestion.py ~/testdocs --coverage 40
+    python audit_ingestion.py ~/testdocs
+    python audit_ingestion.py ~/testdocs --coverage 40
 
 Written for a real corpus: it found the wide-table header loss and the
 contentless heading chunks that §2.3 of docs/parsing_and_chunking.md describes.
@@ -18,7 +18,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from file_agent.chunking import chunk_document, get_embedding_tokenizer  # noqa: E402
 from file_agent.document import BlockType  # noqa: E402

@@ -662,10 +662,10 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | `pc-v13-final-127` | The same code as v12, run a second time (and populating the new page-OCR cache): the pair measures how much this table moves when nothing changes. |
 | `pc-v14-inline-127` (**current default**) | v12 with `FORMULA_INDEXING=inline`, the value the retrieval A/B chose. Confirms the final configuration end to end; the page-OCR cache makes its scanned-deck answers identical to v13's. |
 
-### 3.1a Auditing the ingestion itself (`tools/audit_ingestion.py`)
+### 3.1a Auditing the ingestion itself (`audit_ingestion.py`)
 
 The judged runs measure answers; they say nothing about a chunk that quietly
-lost its table header. `tools/audit_ingestion.py` parses and chunks a folder
+lost its table header. `audit_ingestion.py` parses and chunks a folder
 and checks structural invariants — empty blocks, chunks over the encoder
 budget, table pieces without a header, contentless or duplicated chunks, lost
 page numbers, mojibake — and with `--coverage N` samples sentences from an
@@ -685,7 +685,7 @@ after the fixes:
 Content survival, with OCR and figure description switched off so that only
 parsing and chunking are measured
 (`VLM_BACKEND=off OCR_ENGINE=off PDF_ENRICHMENT=off python
-tools/audit_ingestion.py ~/testdocs --coverage 40`): **640 of 651 sampled
+audit_ingestion.py ~/testdocs --coverage 40`): **640 of 651 sampled
 sentences**, and the losses are all of two kinds — a table-of-contents line
 with dot leaders (`1.3 Эпидемиология … 8`), and text that lives inside a
 figure and therefore reaches the index through the description pass this run
