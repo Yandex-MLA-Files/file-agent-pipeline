@@ -57,6 +57,9 @@ DEFAULT_CONCURRENCY = 8
 # small sub/superscripts better with more pixels, and a formula crop is tiny.
 DEFAULT_DPI = 200
 DEFAULT_MAX_TOKENS = 512
+# Ingestion budget: a document with more formula regions than this is read up
+# to the limit and says so, instead of holding the pipeline for an hour.
+DEFAULT_MAX_REGIONS = 1500
 # The layout box is tight around the glyphs, and a cut-off subscript is
 # unreadable for any model; Docling pads by the same fraction.
 EXPANSION = 0.18
@@ -198,6 +201,7 @@ class FormulaEnricher:
         self.max_tokens = max_tokens or int(
             os.getenv("PDF_ENRICHMENT_MAX_TOKENS", DEFAULT_MAX_TOKENS)
         )
+        self.max_regions = int(os.getenv("PDF_ENRICHMENT_MAX_REGIONS", DEFAULT_MAX_REGIONS))
         self.cache = cache
         self.stats: dict[str, int] = {}
         self._render_lock = threading.Lock()
@@ -210,6 +214,18 @@ class FormulaEnricher:
         regions = _pending_regions(document)
         if not regions:
             return {}
+        if len(regions) > self.max_regions:
+            # A thousand-page book of formulas would otherwise hold ingestion
+            # for an hour; say what was skipped instead of quietly truncating.
+            logger.warning(
+                "%s has %d formula/code regions; reading the first %d "
+                "(raise PDF_ENRICHMENT_MAX_REGIONS to read them all).",
+                Path(file_path).name,
+                len(regions),
+                self.max_regions,
+            )
+            self._count("skipped_over_budget", len(regions) - self.max_regions)
+            regions = regions[: self.max_regions]
 
         path = Path(file_path)
         with tracer.start_as_current_span("file_agent.formula_enrichment") as span:
