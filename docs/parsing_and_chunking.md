@@ -41,6 +41,32 @@ coordinates and a document title.
 The original parsers are kept unchanged in `parsers/legacy/` and selected
 with `PARSER_PROFILE=legacy` (for DOCX that means Docling).
 
+#### Did the per-format parsers really replace Docling?
+
+Docling still does the PDFs; for DOCX, PPTX, XLSX and HTML the project parses
+the file itself. That trade was measured in both directions on the corpus
+(`parser_vs_docling.py`): sentences Docling finds and we do not, and sentences
+we find and Docling does not.
+
+| | ours | Docling | sentences only Docling has | sentences only we have |
+|---|---|---|---|---|
+| 4 DOCX | 2 403 blocks, 600 078 chars | 5 293 items, 599 722 chars | **0 of 240** | 3 of 240 |
+| 1 PPTX | 52 blocks, 2 546 chars | 49 items, 2 512 chars | **0 of 26** | 0 of 26 |
+| 3 XLSX | 16 blocks, 63 526 chars | 53 items, **78 chars** | 0 (nothing to compare) | 177 of 180 |
+
+Nothing Docling extracts is lost, and three things are gained. Spreadsheets:
+Docling's XLSX backend returns table structure with no text at all, so the
+data of `inventory-data.xlsx` and `sales-data.xlsx` would not be indexed.
+Tables in Word: Docling found 1 table in the MongoDB manual where the OOXML
+has 23. Structure: 27 headings against 1 in the philosophy course, and whole
+paragraphs instead of formatting runs (17 blocks against 198 for the exam
+programme) — which is what the chunker needs to cut on sentence boundaries.
+
+The one thing Docling did better was **Word equations**, and that gap is now
+closed (above): its OMML→LaTeX converter is reused, and the placement — inline
+equations inside their sentence, display equations as their own block, and
+equations inside table cells, which `cell.text` never returns — is ours.
+
 ### 2.2 OCR and VLM through the chat model (`VLM_BACKEND=llm`, `OCR_ENGINE=auto`)
 
 The answering model served for the project (Qwen3.5-27B on vLLM) is
@@ -55,7 +81,11 @@ multimodal, so by default the **same endpoint** is used for vision:
   reading order. Pages are transcribed **concurrently**
   (`VLM_OCR_CONCURRENCY`, default 4), blank pages never reach the model, and
   a page the model reports as empty is left to Docling so its picture can
-  still be described.
+  still be described. A validated transcript is **cached by the pixels of the
+  render**: a scanned deck costs its 16 minutes once, and — because the model
+  is not deterministic under batching — a re-ingestion now produces the *same*
+  text instead of a fresh sample, which is what makes two evaluation runs
+  comparable at all.
 - **Validation and fallback (`OCR_ENGINE=auto`).** A generative transcriber
   fails in ways a classic engine cannot, so every transcript is checked:
   empty output on a page full of ink, a repetition loop, a refusal, foreign
@@ -385,7 +415,10 @@ temperature 0, top-k 5) both as the answering model and as the judge
 | `pc-v5-rejudge` | The v5 run judged a second time, unchanged, to measure how much of a difference between runs is the judge's own variance. |
 | `pc-v8-parsing3-127` | v5 defaults plus the third round of parsing work: formula/code enrichment for PDF, DOCX footnotes, text frames, nested tables and real list numbers, HTML merged cells, and the two-column reading-order repair. (Hyperlink targets landed after the run started and are the one item it does not cover.) |
 | `pc-v9-vlmenrich-127` | v8 with formulas read by the serving model instead of Docling's, plus the chunking fixes the ingestion audit produced (abbreviated headers on wide tables, no contentless chunks, summaries trimmed to one chunk). |
-| `pc-v10-enrich-fixes-127` (**current default**) | v9 with the two corrections its own numbers demanded: an empty heading is dropped only when the document *repeats* it, and enriched formulas are stored without their typesetting macros. |
+| `pc-v10-enrich-fixes-127` | v9 with the two corrections its own numbers demanded: an empty heading is dropped only when the document *repeats* it, and enriched formulas are stored without their typesetting macros. |
+| `pc-v11-noenrich-127` | v10 with `PDF_ENRICHMENT=off` — the control that prices what the formulas cost this dataset. |
+| `pc-v12-formula-context-127` (**current default**) | v10 with formulas kept out of the embedded chunk text (`FORMULA_INDEXING=context`), Word equations read as LaTeX, and the enrichment batch sized from free GPU memory. |
+| `pc-v13-final-127` | The same code as v12, run a second time (and populating the new page-OCR cache): the pair measures how much this table moves when nothing changes. |
 
 ### 3.1a Auditing the ingestion itself (`tools/audit_ingestion.py`)
 
@@ -434,10 +467,32 @@ this run does not OCR.
 | v5 + top-k 8 | 127 | 0 | 0.962 | 0.598 | 0.846 | 0.744 | 0.875 | 14.1 |
 | v8 = v5 + parsing round 3 | 127 | 0 | 0.950 | 0.597 | 0.822 | 0.767 | 0.847 | 18.3 |
 | v9 = v8 + VLM enrichment + chunking fixes | 127 | 0 | 0.959 | 0.565 | 0.824 | 0.752 | 0.852 | 14.9 |
-| **v10 = v9 + the two corrections (current default)** | 127 | 0 | 0.954 | 0.577 | 0.823 | 0.762 | 0.843 | **15.1** |
+| v10 = v9 + the two corrections | 127 | 0 | 0.954 | 0.577 | 0.823 | 0.762 | 0.843 | 15.1 |
+| v11 = v10 with enrichment off (control) | 127 | 0 | 0.965 | 0.592 | 0.823 | 0.762 | 0.852 | 13.3 |
+| **v12 = v10 + formulas in context + Word equations** | 127 | 0 | 0.958 | 0.584 | 0.832 | 0.755 | 0.844 | **13.3** |
+| v13 = v12 + OCR page cache (same code, second sample) | 127 | 0 | 0.952 | 0.568 | 0.824 | 0.751 | 0.843 | 13.4 |
 
 Means over successfully processed rows only differ for the baseline (0.715 /
 0.429 / 0.560 / 0.570 / 0.630 over 122 rows).
+
+**The measurement floor of this table is ±0.016 on `answer_correctness`,
+measured.** v12 and v13 run the *same code* on the *same questions*: 118 of
+127 answers come out byte-identical, and the mean still moves 0.584 → 0.568.
+On the identical-answer rows alone it moves 0.580 → 0.566, so that part is the
+judge re-reading the same text in a new session; the nine answers that differ
+are the scanned A/B deck, whose 29 pages are transcribed afresh by a model
+that is not deterministic under batching. Any difference in this table smaller
+than that is not a result. (Both sources are now closed: page transcripts are
+cached by their pixels from v13 on, exactly like formula crops, so a
+re-ingestion produces the same text — the remaining variance is the judge's.)
+
+Against that floor, **v12 is level with v5, the configuration it replaces**:
+−0.021 correctness, +0.001 relevancy, −0.021 recall, and on the 49 answers
+that are byte-identical between the two runs v12 scores **higher** (0.628 →
+0.648). What it adds is content v5 never indexed — formulas, footnotes,
+equations from Word, real list numbers, column names on wide tables — at
+**13.3 s per question against 18.5** and 2.6× faster ingestion of a
+formula-dense document.
 
 **v10 against v8, read properly.** 108 of the 127 answers are *byte-identical*
 to v8's, and on those rows the judge gives 0.607 → 0.605 — that is the
