@@ -375,6 +375,7 @@ class FormulaEnricher:
 # -- validation ---------------------------------------------------------------
 
 _FENCE = re.compile(r"^```[a-zA-Z]*\n?|```$", re.MULTILINE)
+_SPACING_RUN = re.compile(r"(\\(?:qquad|quad|;|:|,|!))(?:\s*\\(?:qquad|quad|;|:|,|!)){2,}")
 _REFUSAL = re.compile(
     r"^(i (?:cannot|can't|am unable)|sorry|unable to|as an ai|извин|я не мог|не могу)",
     re.IGNORECASE,
@@ -396,6 +397,10 @@ MAX_BRACE_IMBALANCE = 6
 def clean_transcript(text: str) -> str:
     """Strip the wrappers models add around a transcription."""
     cleaned = _FENCE.sub("", text or "").strip()
+    # Models pad a right-aligned equation number with a run of spacing macros
+    # ("\qquad \qquad \qquad ..."); they carry nothing and cost tokens in every
+    # chunk the formula lands in.
+    cleaned = _SPACING_RUN.sub(lambda match: match.group(1), cleaned)
     for opening, closing in (("$$", "$$"), ("\\[", "\\]"), ("$", "$")):
         if (
             cleaned.startswith(opening)

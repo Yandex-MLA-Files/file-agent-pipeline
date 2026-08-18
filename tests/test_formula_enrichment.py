@@ -102,6 +102,15 @@ def test_transcript_wrappers_are_stripped():
     assert clean_transcript("$x$") == "x"
 
 
+def test_a_run_of_spacing_macros_is_collapsed():
+    """Models pad a right-aligned equation number with a wall of \\qquad."""
+    padded = r"(A \cap P). \qquad \qquad \qquad \qquad \qquad (3.14)"
+
+    assert clean_transcript(padded) == r"(A \cap P). \qquad (3.14)"
+    # Two of them are ordinary spacing and stay as they are.
+    assert clean_transcript(r"x \quad \quad y") == r"x \quad \quad y"
+
+
 def test_a_description_of_the_image_is_not_a_transcription():
     for answer in (
         "The image shows the formula for conditional probability.",
