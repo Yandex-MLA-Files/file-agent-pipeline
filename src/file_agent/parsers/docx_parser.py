@@ -174,6 +174,13 @@ class _BodyWalker:
     # -- paragraphs -------------------------------------------------------------
 
     def _handle_paragraph(self, paragraph: Paragraph) -> None:
+        # Word counts *every* paragraph that carries a numId, including the
+        # numbered headings a list is nested under: the sub-items of the
+        # second section read "2.1, 2.2" precisely because the heading
+        # advanced level 0. Counting only the paragraphs that end up in a list
+        # block would renumber them "1.1, 1.2". The counter is therefore
+        # advanced here, in document order, before any branch can return.
+        marker = self._advance_numbering(paragraph)
         images = self._paragraph_images(paragraph)
         text = clean_text(self._paragraph_text(paragraph))
         text = self._append_link_targets(paragraph, text)
@@ -209,6 +216,11 @@ class _BodyWalker:
         if level is not None:
             self._flush_list()
             self._last_figure = None
+            if marker and not _repeats_marker(text, marker):
+                # "Цель и содержание" is displayed as "2. Цель и содержание";
+                # without the number the heading cannot be found by it, and the
+                # breadcrumb of every chunk below it loses the section number.
+                text = f"{marker} {text}"
             if self.title is None and level == 1:
                 self.title = text
             self.factory.heading(text, level, metadata={"style": style_name})
@@ -224,12 +236,12 @@ class _BodyWalker:
 
         list_indent = self._list_indent(paragraph, style_name)
         if list_indent is not None:
-            marker = self._list_marker(paragraph, list_indent)
             item = strip_bullet(text)
             if marker:
                 # Word computes "8." from numbering.xml and never stores it in
                 # the text; without it the item reads as an anonymous bullet.
-                item = f"{marker} {item}".strip()
+                if not _repeats_marker(item, marker):
+                    item = f"{marker} {item}".strip()
                 if not self._pending_list:
                     self._pending_list_ordered = False
             elif not self._pending_list:
@@ -473,14 +485,20 @@ class _BodyWalker:
             return 0
         return None
 
-    def _list_marker(self, paragraph: Paragraph, ilvl: int) -> str:
-        """The number Word would render for this list paragraph ("8.", "1.2.")."""
+    def _advance_numbering(self, paragraph: Paragraph) -> str:
+        """Advance this paragraph's list counter and return its marker.
+
+        Empty for a paragraph that carries no numbering, for bullets, and for
+        definitions the numbering module cannot resolve.
+        """
         if not self._numbering.available:
             return ""
         num_pr = paragraph._p.pPr.numPr if paragraph._p.pPr is not None else None
         if num_pr is None or num_pr.numId is None or num_pr.numId.val is None:
             return ""
-        return self._numbering.marker(str(num_pr.numId.val), ilvl)
+        ilvl = num_pr.ilvl
+        level = int(ilvl.val) if ilvl is not None and ilvl.val is not None else 0
+        return self._numbering.marker(str(num_pr.numId.val), level)
 
     @staticmethod
     def _list_is_ordered(paragraph: Paragraph) -> bool:
@@ -583,6 +601,24 @@ class _BodyWalker:
             for child in cell.iterchildren(qn("w:tbl")):
                 nested.append(Table(child, self.docx))
         return nested
+
+
+def _repeats_marker(text: str, marker: str) -> bool:
+    """Whether the text already opens with the number Word would render.
+
+    Authors regularly type "1.2" into a paragraph that *also* carries automatic
+    numbering (usually after pasting from another document). Prefixing the
+    computed marker there would produce "1.2 1.2 Установка".
+    """
+    digits = marker.strip(" .)")
+    if not digits:
+        return False
+    head = text.lstrip()[: len(digits) + 1]
+    if not head.startswith(digits):
+        return False
+    # "1" must not match the start of "1996 год": a real marker is followed by
+    # its punctuation or by the space before the text.
+    return len(head) == len(digits) or head[len(digits)] in " .)"
 
 
 def _collect_notes(docx: Any) -> dict[tuple[str, str], str]:

@@ -103,15 +103,48 @@ DOC_RELS = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </Relationships>"""
 
 
-def write_fixture(out: Path) -> Path:
-    """Write the fixture document to ``out`` and return the path."""
+# A manual (lab-report style) document: numbered *headings* with numbered
+# sub-items under them, which is how Word documents nest section numbering.
+NUMBERED_SECTION = """
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/>
+      <w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+      <w:r><w:t>{title}</w:t></w:r></w:p>
+    <w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr>
+      <w:r><w:t>{first}</w:t></w:r></w:p>
+    <w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr>
+      <w:r><w:t>{second}</w:t></w:r></w:p>
+"""
+
+_SECTIONS = NUMBERED_SECTION.format(
+    title="Цель и содержание", first="Изучить MongoDB", second="Установить Compass"
+) + NUMBERED_SECTION.format(
+    title="Порядок выполнения", first="Создать базу", second="Проверить запросы"
+)
+
+NUMBERED_HEADINGS = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="{W}" xmlns:r="{R}">
+  <w:body>{_SECTIONS}</w:body>
+</w:document>"""
+
+
+def _write(out: Path, document: str) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as package:
         package.writestr("[Content_Types].xml", CONTENT_TYPES)
         package.writestr("_rels/.rels", ROOT_RELS)
-        package.writestr("word/document.xml", DOCUMENT)
+        package.writestr("word/document.xml", document)
         package.writestr("word/_rels/document.xml.rels", DOC_RELS)
         package.writestr("word/styles.xml", STYLES)
         package.writestr("word/numbering.xml", NUMBERING)
         package.writestr("word/footnotes.xml", FOOTNOTES)
     return out
+
+
+def write_fixture(out: Path) -> Path:
+    """Write the fixture document to ``out`` and return the path."""
+    return _write(out, DOCUMENT)
+
+
+def write_numbered_headings(out: Path) -> Path:
+    """Write a document whose sections are numbered by ``numbering.xml``."""
+    return _write(out, NUMBERED_HEADINGS)

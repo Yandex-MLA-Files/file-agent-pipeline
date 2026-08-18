@@ -122,6 +122,36 @@ def test_list_items_carry_the_numbers_word_computes(tmp_path):
     ]
 
 
+def test_numbered_headings_number_themselves_and_their_sub_items(tmp_path):
+    """A numbered heading advances the same counter its sub-items continue.
+
+    Counting only list paragraphs would number the second section's items
+    "1.1, 1.2" — Word shows "2.1, 2.2".
+    """
+    from tests._docx_fixture import write_numbered_headings
+
+    document = DOCXParser().parse(write_numbered_headings(tmp_path / "lab.docx"))
+    headings = [b.text for b in document.blocks if b.block_type == BlockType.HEADING]
+    lists = [b.text.splitlines() for b in document.blocks if b.block_type == BlockType.LIST]
+
+    assert headings == ["1. Цель и содержание", "2. Порядок выполнения"]
+    assert lists == [
+        ["  1.1. Изучить MongoDB", "  1.2. Установить Compass"],
+        ["  2.1. Создать базу", "  2.2. Проверить запросы"],
+    ]
+
+
+def test_a_number_already_typed_into_the_text_is_not_repeated(tmp_path):
+    from file_agent.parsers.docx_parser import _repeats_marker
+
+    assert _repeats_marker("1.2 Установка", "1.2.")
+    assert _repeats_marker("8. Унифицированная система", "8.")
+    assert _repeats_marker("2)", "2)")
+    # A year, a quantity or a version opening the sentence is not a marker.
+    assert not _repeats_marker("1996 год стал переломным", "1.")
+    assert not _repeats_marker("Установка MongoDB", "3.")
+
+
 def test_text_frame_becomes_its_own_block_and_leaves_the_host_paragraph_alone(tmp_path):
     document = _rich_document(tmp_path)
     frame = next(b for b in document.blocks if b.metadata.get("text_box"))
