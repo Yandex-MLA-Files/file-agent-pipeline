@@ -390,12 +390,16 @@ after the fixes:
 | duplicated chunk | 11 | 9 (rows repeated verbatim in the source table) |
 | automatic summaries split over several chunks (the report) | 69 pieces for 34 tables | 14 |
 
-Content survival, with OCR and figure description switched off so only parsing
-and chunking are measured: **641 of 651 sampled sentences** (DOCX 160/160,
-Markdown 80/80, PPTX 10/10, TXT 80/80, XLSX 1/1, PDF 310/320). Every one of
-the ten misses is a table-of-contents line with dot leaders, or text that
-lives inside a figure and therefore reaches the index through the description
-pass that this probe disables.
+Content survival, with OCR and figure description switched off so that only
+parsing and chunking are measured
+(`VLM_BACKEND=off OCR_ENGINE=off PDF_ENRICHMENT=off python
+tools/audit_ingestion.py ~/testdocs --coverage 40`): **640 of 651 sampled
+sentences**, and the losses are all of two kinds — a table-of-contents line
+with dot leaders (`1.3 Эпидемиология … 8`), and text that lives inside a
+figure and therefore reaches the index through the description pass this run
+disables. DOCX, Markdown, TXT, PPTX and XLSX are at 100 %; the PDFs lose those
+eleven sentences between them, five of them in the scanned deck whose pages
+this run does not OCR.
 
 ### 3.2 Results (ragas, judge = Qwen3.5-27B without thinking; pipeline failures scored 0)
 
