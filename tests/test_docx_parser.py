@@ -245,11 +245,11 @@ def test_an_equation_inside_a_table_cell_is_kept(tmp_path):
         CONTENT_TYPES,
         DOC_RELS,
         FOOTNOTES,
-        M,
         NUMBERING,
-        R,
         ROOT_RELS,
         STYLES,
+        M,
+        R,
         W,
     )
 
