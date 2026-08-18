@@ -169,3 +169,40 @@ def test_merge_ocr_blocks_replaces_pages_in_reading_order():
 def test_merge_ocr_blocks_without_transcripts_is_identity():
     blocks = [Block(id="a", text="x", type="text", block_type=BlockType.TEXT, page_number=1)]
     assert merge_ocr_blocks(blocks, {}) is blocks
+
+
+def test_page_transcripts_are_cached_by_their_pixels(tmp_path):
+    """A scanned deck costs 16 minutes once, and the same text on every re-run."""
+    import fitz
+
+    from file_agent.parsers.formula_enrichment import TranscriptCache
+    from file_agent.parsers.vlm_ocr import VLMPageOCR
+
+    pdf_path = tmp_path / "scan.pdf"
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 100), "Отчет о продажах за квартал", fontsize=18)
+    document.save(pdf_path)
+    document.close()
+
+    class CountingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def describe_image(self, image, prompt, max_tokens=None):
+            return self.describe_image_verbose(image, prompt, max_tokens)[0]
+
+        def describe_image_verbose(self, image, prompt, max_tokens=None, max_image_side=None):
+            self.calls += 1
+            return "# Отчет о продажах\n\nВыручка выросла на 12 %.", None
+
+    cache = TranscriptCache(tmp_path / "cache")
+    client = CountingClient()
+
+    first = VLMPageOCR(client, fallback=None, cache=cache).transcribe(pdf_path, [1])
+    second_ocr = VLMPageOCR(client, fallback=None, cache=cache)
+    second = second_ocr.transcribe(pdf_path, [1])
+
+    assert client.calls == 1
+    assert [b.text for b in first[1]] == [b.text for b in second[1]]
+    assert second_ocr.stats["cached"] == 1

@@ -531,9 +531,14 @@ def _drop_empty(document: Document) -> None:
     document.blocks = kept
 
 
-def _cache_key(image: Image.Image, kind: str) -> str:
+def cache_key(image: Image.Image, kind: str, version: str = PROMPT_VERSION) -> str:
+    """Key for a transcript: the pixels it was read from, plus what was asked."""
     buffer = io.BytesIO()
     image.convert("RGB").save(buffer, format="PNG")
     digest = hashlib.sha1(buffer.getvalue())  # noqa: S324 - a cache key, not a signature
-    digest.update(f"|{kind}|{PROMPT_VERSION}".encode())
+    digest.update(f"|{kind}|{version}".encode())
     return digest.hexdigest()
+
+
+def _cache_key(image: Image.Image, kind: str) -> str:
+    return cache_key(image, kind)

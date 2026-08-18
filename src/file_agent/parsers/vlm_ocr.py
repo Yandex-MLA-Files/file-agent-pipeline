@@ -46,6 +46,7 @@ import fitz  # PyMuPDF
 from PIL import Image
 
 from file_agent.document import Block, BlockType
+from file_agent.parsers.formula_enrichment import TranscriptCache, cache_key
 from file_agent.parsers.local_ocr import LocalPageOCR, render_page
 from file_agent.parsers.md_parser import parse_markdown_blocks
 from file_agent.telemetry import tracer
@@ -54,6 +55,9 @@ from file_agent.vlm.base import VLMClient
 logger = logging.getLogger(__name__)
 
 PAGE_RENDER_DPI = 150
+# Bump when the prompt or the post-processing changes, so cached transcripts of
+# the old version are ignored instead of served.
+OCR_PROMPT_VERSION = "p1"
 NO_TEXT_MARKER = "[no text]"
 # A dense A4 page is ~1000-1500 tokens of Markdown; leave headroom for tables.
 DEFAULT_PAGE_MAX_TOKENS = 2500
@@ -106,6 +110,7 @@ class VLMPageOCR:
         max_tokens: int | None = None,
         concurrency: int | None = None,
         fallback: LocalPageOCR | None = None,
+        cache: TranscriptCache | None = None,
     ) -> None:
         self.vlm_client = vlm_client
         self.dpi = dpi or int(os.getenv("OCR_DPI", PAGE_RENDER_DPI))
@@ -116,6 +121,11 @@ class VLMPageOCR:
             1, concurrency or int(os.getenv("VLM_OCR_CONCURRENCY", DEFAULT_OCR_CONCURRENCY))
         )
         self.fallback = fallback
+        # Page transcripts are cached by the pixels of the render: a scanned
+        # deck costs 16 minutes the first time and nothing afterwards, and —
+        # just as important for measurement — a re-ingestion produces the *same*
+        # text instead of a fresh sample from a non-deterministic model.
+        self.cache = cache
         self.stats: dict[str, int] = {}
         self._render_lock = threading.Lock()
         self._stats_lock = threading.Lock()
@@ -185,6 +195,13 @@ class VLMPageOCR:
             self._count("blank_skipped")
             return []
 
+        key = cache_key(image, "page", OCR_PROMPT_VERSION) if self.cache else ""
+        if key:
+            cached = self.cache.get(key)
+            if cached is not None:
+                self._count("cached")
+                return self._to_blocks(cached, path.name, page_number)
+
         markdown, finish_reason = self._describe(image, self.max_tokens)
         check = validate_transcript(markdown, ink=ink, image=image)
 
@@ -213,6 +230,9 @@ class VLMPageOCR:
             self._count("kept_suspect_transcript")
         else:
             self._count("vlm_ok")
+            if key:
+                # Only a transcript that passed validation is worth keeping.
+                self.cache.put(key, markdown)
         return self._to_blocks(markdown, path.name, page_number)
 
     def _describe(self, image: Image.Image, max_tokens: int) -> tuple[str, str | None]:

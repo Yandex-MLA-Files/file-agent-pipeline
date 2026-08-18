@@ -322,7 +322,7 @@ def _vlm_ocr_client() -> VLMPageOCR | None:
     if fallback is not None and not fallback.available:
         logger.info("EasyOCR is not installed; VLM transcripts will be used without a fallback.")
         fallback = None
-    return VLMPageOCR(client, fallback=fallback)
+    return VLMPageOCR(client, fallback=fallback, cache=resolve_enrichment_cache())
 
 
 def _pages_to_ocr(path: Path, analysis, enable_ocr: OcrMode) -> list[int]:
