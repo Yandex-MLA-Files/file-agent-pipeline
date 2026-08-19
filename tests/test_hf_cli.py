@@ -150,6 +150,7 @@ def test_run_hf_dataset_generation_orchestrates_limited_run_and_writes_manifest(
         "total_count": 1,
         "processed_count": 1,
         "resumed_count": 0,
+        "failed_count": 0,
     }
     assert manifest["artifacts"] == {
         "parquet": "answers.parquet",
