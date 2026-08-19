@@ -148,7 +148,7 @@ class MultiQueryExpander:
 
     def _expand(self, question: str) -> list[str]:
         variants: list[str] = []
-        paraphrases = self.count if self.mode == "paraphrase" else self.count - 1
+        paraphrases = {"paraphrase": self.count, "mixed": self.count - 1, "hyde": 0}[self.mode]
         if paraphrases > 0:
             raw = self._generate(_PARAPHRASE_PROMPT.format(count=paraphrases, question=question))
             variants.extend(parse_variants(raw, question, limit=paraphrases))

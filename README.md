@@ -16,6 +16,12 @@ per page and transcribed by the multimodal chat model (Qwen3.5); figures in
 PDF/DOCX/PPTX are described by the same model. Design and evaluation results:
 [docs/parsing_and_chunking.md](docs/parsing_and_chunking.md).
 
+Retrieval is hybrid (BM25 over a lemmatised Russian view + BGE-M3 dense,
+reciprocal-rank fusion), optionally widened with model-written formulations of
+the question (multi-query / HyDE), re-scored by a cross-encoder and cut to
+distinct passages. Stages, switches, the retrieval-level benchmark and an audit
+of the judge: [docs/retrieval.md](docs/retrieval.md).
+
 ## Setup
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).

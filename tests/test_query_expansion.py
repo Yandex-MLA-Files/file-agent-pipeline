@@ -129,3 +129,12 @@ def test_cache_key_includes_the_mode_and_count(tmp_path):
     assert two("Q?") == ["A", "B"]
     assert one("Q?") == ["C"]
     assert len({p.name for p in Path(tmp_path).rglob("*.json")}) == 2
+
+
+def test_hyde_mode_ignores_the_count_and_never_paraphrases():
+    llm = ScriptedLLM(["Пассаж в стиле документа."])
+    expander = MultiQueryExpander(llm, mode="hyde", count=3, cache_dir=None)
+
+    assert expander("Вопрос?") == ["Пассаж в стиле документа."]
+    assert len(llm.prompts) == 1
+    assert "alternative formulations" not in llm.prompts[0]
