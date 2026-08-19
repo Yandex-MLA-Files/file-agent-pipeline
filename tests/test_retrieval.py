@@ -1,3 +1,5 @@
+import pytest
+
 from file_agent.chunking import Chunk
 from file_agent.lancedb_retriever import LanceDBRetriever
 
@@ -274,3 +276,171 @@ def test_document_diversification_can_be_disabled(monkeypatch):
     results = retriever.search("python code", top_k=2)
 
     assert {result.chunk.metadata["source_file"] for result in results} == {"a.md"}
+
+
+class FakeExpander:
+    def __init__(self, variants):
+        self.variants = variants
+        self.calls = []
+
+    def __call__(self, question):
+        self.calls.append(question)
+        return list(self.variants)
+
+
+def test_bm25_matches_through_yo_folding_and_lemmas():
+    pytest.importorskip("pymorphy3")
+    chunks = [
+        Chunk(id="yo", text="Ещё один учёт затрат ведётся людьми"),
+        Chunk(id="other", text="Совсем посторонний текст"),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "Ещё один учёт затрат ведётся людьми": [0.0, 1.0],
+            "Совсем посторонний текст": [1.0, 0.0],
+            "еще учет человек": [0.0, -1.0],  # dense side deliberately useless
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+    results = retriever.search("еще учет человек")
+
+    assert [result.chunk.id for result in results] == ["yo"]
+
+
+def test_quoted_phrase_ranks_the_passages_that_contain_it_first():
+    chunks = [
+        Chunk(id="words", text="компании увеличили выручку и прибыль"),
+        Chunk(id="phrase", text="выручка компании выросла в отчётном году"),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            # The dense side prefers the passage that merely shares the words.
+            "компании увеличили выручку и прибыль": [1.0, 0.0],
+            "выручка компании выросла в отчётном году": [0.8, 0.6],
+            '"выручка компании" выросла': [1.0, 0.0],
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+    results = retriever.search('"выручка компании" выросла')
+
+    # Both are still returned (the dense side knows nothing about quotes),
+    # but the one that carries the phrase comes first.
+    assert [result.chunk.id for result in results] == ["phrase", "words"]
+
+
+def test_multi_query_variants_are_fused_with_the_original(monkeypatch):
+    monkeypatch.setenv("RETRIEVAL_UNIQUE_PASSAGES", "false")
+    chunks = [
+        Chunk(id="revenue", text="выручка компании за год"),
+        Chunk(id="income", text="доходы организации за период"),
+        Chunk(id="noise", text="погода в апреле"),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "выручка компании за год": [1.0, 0.0],
+            "доходы организации за период": [0.0, 1.0],
+            "погода в апреле": [-1.0, 0.0],
+            "сколько заработала компания": [1.0, 0.0],
+            "доходы организации": [0.0, 1.0],
+        }
+    )
+    expander = FakeExpander(["доходы организации", "сколько заработала компания"])
+    retriever = LanceDBRetriever(embedding_model=model, query_expander=expander)
+
+    retriever.index(chunks)
+    results = retriever.search("сколько заработала компания", top_k=2)
+
+    assert expander.calls == ["сколько заработала компания"]
+    # The variant that says "доходы организации" pulls in a passage the
+    # original wording alone would never rank; both relevant chunks are on top.
+    assert {result.chunk.id for result in results} == {"revenue", "income"}
+    # The duplicate of the original question is not searched twice.
+    assert len(model.calls) == 1 + 2  # index call + two distinct query encodes
+
+
+def test_multi_query_expander_failure_degrades_to_the_single_query():
+    chunks = [Chunk(id="a", text="python code")]
+    model = FakeEmbeddingModel({"python code": [1.0, 0.0], "python": [1.0, 0.0]})
+
+    def broken(question):
+        raise RuntimeError("endpoint down")
+
+    retriever = LanceDBRetriever(embedding_model=model, query_expander=broken)
+    retriever.index(chunks)
+
+    with pytest.raises(RuntimeError):
+        # A raw callable that raises is the caller's bug; the shipped expander
+        # (MultiQueryExpander) swallows its own errors — see test_query_expansion.
+        retriever.search("python")
+
+
+def test_top_k_is_filled_with_distinct_passages(monkeypatch):
+    monkeypatch.setenv("RETRIEVAL_UNIQUE_PASSAGES", "true")
+    parent = "the whole section text"
+    chunks = [
+        Chunk(id="s1", text="python code one", metadata={"context": parent}),
+        Chunk(id="s2", text="python code two", metadata={"context": parent}),
+        Chunk(id="s3", text="python code three", metadata={"context": parent}),
+        Chunk(id="other", text="python notes", metadata={"context": "another section"}),
+    ]
+    model = FakeEmbeddingModel(
+        {
+            "python code one": [1.0, 0.0],
+            "python code two": [1.0, 0.0],
+            "python code three": [1.0, 0.0],
+            "python notes": [0.9, 0.1],
+            "python code": [1.0, 0.0],
+        }
+    )
+    retriever = LanceDBRetriever(embedding_model=model)
+
+    retriever.index(chunks)
+    results = retriever.search("python code", top_k=2)
+
+    passages = [result.chunk.metadata["context"] for result in results]
+    assert passages == [parent, "another section"]
+
+    monkeypatch.setenv("RETRIEVAL_UNIQUE_PASSAGES", "false")
+    results = retriever.search("python code", top_k=2)
+    assert [result.chunk.metadata["context"] for result in results] == [parent, parent]
+
+
+class BatchAwareReranker(FakeReranker):
+    def predict(self, pairs, batch_size=None):
+        self.batch_sizes = getattr(self, "batch_sizes", []) + [batch_size]
+        return super().predict(pairs)
+
+
+def test_reranker_receives_the_configured_batch_size(monkeypatch):
+    monkeypatch.setenv("RERANKER_BATCH_SIZE", "7")
+    chunks = [Chunk(id="a", text="python code"), Chunk(id="b", text="python automobile")]
+    model = FakeEmbeddingModel(
+        {"python code": [1.0, 0.0], "python automobile": [1.0, 0.0], "python": [1.0, 0.0]}
+    )
+    reranker = BatchAwareReranker({"python code": 0.1, "python automobile": 0.9})
+    retriever = LanceDBRetriever(embedding_model=model, reranker=reranker)
+
+    retriever.index(chunks)
+    results = retriever.search("python", top_k=2)
+
+    assert reranker.batch_sizes == [7]
+    assert [result.chunk.id for result in results] == ["b", "a"]
+
+
+def test_reranker_blend_can_pull_the_first_stage_order_back(monkeypatch):
+    chunks = [Chunk(id="a", text="python code"), Chunk(id="b", text="python automobile")]
+    model = FakeEmbeddingModel({"python code": [1.0, 0.0], "python automobile": [0.6, 0.8]})
+    # The cross-encoder mildly prefers "b"; the first stage strongly prefers "a".
+    reranker = FakeReranker({"python code": 0.49, "python automobile": 0.51})
+    retriever = LanceDBRetriever(embedding_model=model, reranker=reranker)
+    retriever.index(chunks)
+
+    monkeypatch.setenv("RERANKER_BLEND", "0")
+    assert [r.chunk.id for r in retriever.search("python code", top_k=2)] == ["b", "a"]
+
+    monkeypatch.setenv("RERANKER_BLEND", "0.5")
+    assert [r.chunk.id for r in retriever.search("python code", top_k=2)] == ["a", "b"]

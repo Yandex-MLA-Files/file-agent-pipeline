@@ -30,6 +30,8 @@ dependencies = [
     # platforms keep the default resolution.
     "torch==2.6.0; sys_platform == 'linux'",
     "torchvision==0.21.0; sys_platform == 'linux'",
+    "pymorphy3>=2.0.6",
+    "pymorphy3-dicts-ru>=2.4.417150.4580142",
 ]
 
 [dependency-groups]

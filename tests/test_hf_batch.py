@@ -108,7 +108,7 @@ def test_generate_hf_qa_records_processes_in_order_and_writes_checkpoints(
     assert first_checkpoint["parameters"]["model_id"] == "fake/model"
     assert (
         first_checkpoint["parameters"]["rag_pipeline_version"]
-        == "structured-parsers-row-records-v3"
+        == "structured-parsers-multi-query-v4"
     )
     assert first_checkpoint["parameters"]["embedding_model"]
     assert first_checkpoint["parameters"]["top_k"] == 3
