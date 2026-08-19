@@ -187,8 +187,11 @@ ask questions in the chat box — follow-ups keep the dialog. Every answer
 stays in the conversation with its citations, an expandable account of the
 agent's steps (tool calls, observations, per-step timings) and the cited
 passages as source cards; the library above the chat shows each document's
-structure, parsing details and a text preview. For dataset generation add
-`--answer-mode agent` (see `docs/hf_dataset_generation.md`).
+structure, parsing details and a text preview. Finished dialogs are kept in
+`logs/chats/` and listed under "History" in the sidebar — a stored chat can
+be reopened after a page reload or an app restart and continued against the
+currently uploaded documents. For dataset generation add `--answer-mode
+agent` (see `docs/hf_dataset_generation.md`).
 
 Programmatic use:
 

@@ -8,6 +8,7 @@ the collapsible library above the chat.
 """
 
 import hashlib
+import json
 import sys
 import tempfile
 import time
@@ -18,6 +19,7 @@ import streamlit as st
 
 PROJECT_ROOT = Path(__file__).parent
 SRC_PATH = PROJECT_ROOT / "src"
+CHATS_DIR = PROJECT_ROOT / "logs" / "chats"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
@@ -104,10 +106,86 @@ def _clear_retrieval_state() -> None:
 
 
 def _reset_dialog() -> None:
+    """Start a fresh chat; the finished one stays on disk in the history."""
     st.session_state["conversation"] = []
+    st.session_state.pop("chat_id", None)
     session = st.session_state.get("agent_session")
     if session is not None:
         session.clear()
+
+
+# ---------------------------------------------------------------------------
+# chat history (persisted across page reloads and app restarts)
+# ---------------------------------------------------------------------------
+
+
+def _persist_conversation() -> None:
+    """Write the current chat to disk after every turn."""
+    conversation = st.session_state.get("conversation") or []
+    if not conversation:
+        return
+    chat_id = st.session_state.get("chat_id")
+    if not chat_id:
+        chat_id = (
+            time.strftime("%Y%m%d-%H%M%S")
+            + "-"
+            + hashlib.sha1(conversation[0]["content"].encode("utf-8")).hexdigest()[:6]
+        )
+        st.session_state["chat_id"] = chat_id
+    documents = st.session_state.get("indexed_documents") or []
+    record = {
+        "id": chat_id,
+        "updated": time.strftime("%Y-%m-%d %H:%M"),
+        "files": [document.file_name for document in documents],
+        "messages": conversation,
+    }
+    try:
+        CHATS_DIR.mkdir(parents=True, exist_ok=True)
+        (CHATS_DIR / f"{chat_id}.json").write_text(
+            json.dumps(record, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass  # history is a convenience; never break answering over it
+
+
+def _list_chats() -> list[dict[str, Any]]:
+    if not CHATS_DIR.exists():
+        return []
+    chats = []
+    for path in sorted(CHATS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        first_question = next(
+            (m["content"] for m in record.get("messages", []) if m.get("role") == "user"), ""
+        )
+        chats.append(
+            {
+                "id": record.get("id") or path.stem,
+                "path": path,
+                "title": " ".join(first_question.split())[:70] or "(empty)",
+                "updated": record.get("updated", ""),
+                "files": record.get("files", []),
+                "messages": record.get("messages", []),
+            }
+        )
+    return chats
+
+
+def _load_chat(chat: dict[str, Any]) -> None:
+    """Open a stored chat and continue it against the current documents."""
+    st.session_state["conversation"] = list(chat["messages"])
+    st.session_state["chat_id"] = chat["id"]
+    session = AgentSession()
+    question = None
+    for message in chat["messages"]:
+        if message["role"] == "user":
+            question = message["content"]
+        elif question is not None and not message.get("error"):
+            session.record(question, message.get("content", ""))
+            question = None
+    st.session_state["agent_session"] = session
 
 
 def _ingest(uploaded_files, files_fingerprint: str) -> None:
@@ -427,6 +505,29 @@ with st.sidebar:
             _reset_dialog()
             st.rerun()
 
+    stored_chats = [chat for chat in _list_chats() if chat["id"] != st.session_state.get("chat_id")]
+    if stored_chats:
+        st.divider()
+        st.subheader("History")
+        for chat in stored_chats[:15]:
+            open_column, delete_column = st.columns([5, 1])
+            files_hint = ", ".join(chat["files"]) or "no files recorded"
+            if open_column.button(
+                chat["title"],
+                key=f"chat-open-{chat['id']}",
+                help=f"{chat['updated']} · {files_hint}",
+                use_container_width=True,
+            ):
+                _load_chat(chat)
+                st.rerun()
+            if delete_column.button(
+                "🗑",
+                key=f"chat-del-{chat['id']}",
+                help="Delete this chat from the history",
+            ):
+                chat["path"].unlink(missing_ok=True)
+                st.rerun()
+
 # ---------------------------------------------------------------------------
 # main area
 # ---------------------------------------------------------------------------
@@ -477,6 +578,7 @@ if prompt and prompt.strip():
         _render_assistant(entry, len(conversation) + 1)
     conversation.append({"role": "user", "content": question})
     conversation.append(entry)
+    _persist_conversation()
     # Re-render from state so the sidebar dialog counter and the "New dialog"
     # button pick up this turn immediately.
     st.rerun()
