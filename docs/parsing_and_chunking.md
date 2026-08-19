@@ -714,6 +714,7 @@ this run does not OCR.
 | v12 = v10 + formulas in context + Word equations | 127 | 0 | 0.958 | 0.584 | 0.832 | 0.755 | 0.844 | 13.3 |
 | v13 = v12 + OCR page cache (same code, second sample) | 127 | 0 | 0.952 | 0.568 | 0.824 | 0.751 | 0.843 | 13.4 |
 | **v14 = v12 with formulas indexed (current default)** | 127 | 0 | 0.957 | 0.578 | 0.823 | 0.754 | 0.848 | **12.4** |
+| v15 = v14 + retrieval branch (lemmatised BM25, distinct passages, HyDE multi-query; see [retrieval.md](retrieval.md)) | 127 | 0 | 0.956 | 0.585 | 0.844 | 0.752 | 0.876 | 13.3 |
 
 Means over successfully processed rows only differ for the baseline (0.715 /
 0.429 / 0.560 / 0.570 / 0.630 over 122 rows).

@@ -268,7 +268,42 @@ deployment; `.env.example` ships it on.
 
 ### 3.3 Judged runs (ragas, judge = Qwen3.5-27B without thinking)
 
-JUDGED_PLACEHOLDER
+Two runs, same 127 questions, same documents, same answering model; the
+only difference is the retrieval configuration. Pipeline failures score 0
+(there were none). `s/q` is wall-clock per question over the run; v15's
+formulations came from the benchmark's cache, a cold question adds ~4 s.
+
+| run | faithfulness | answer_correctness | reference coverage | answer_relevancy | context_precision | context_recall | s/q |
+|---|---|---|---|---|---|---|---|
+| v14 — ingestion branch as merged (candidates 20, chunks, single query) | 0.957 | 0.578 | 0.716 | 0.823 | 0.754 | 0.848 | 12.4 |
+| **v15 — this branch** (lemmatised BM25, distinct passages, candidates 30, multi-query HyDE) | 0.956 | 0.585 | 0.727 | **0.844** | 0.752 | **0.876** | 13.3 |
+
+Read against the measured floors — ±0.004 on the context metrics, ±0.016 on
+answer_correctness (§5) — the context_recall gain of **+0.028** and the
+answer_relevancy gain of **+0.021** are real; faithfulness, precision and
+correctness did not move. Row by row: 76 questions saw a different set of
+passages, 58 a different answer, and on those 58 the change is where it should
+be —
+
+| on the 58 questions whose answer changed | v14 | v15 |
+|---|---|---|
+| context_recall | 0.750 | **0.810** |
+| answer_relevancy | 0.785 | **0.832** |
+| context_precision | 0.693 | 0.709 |
+| faithfulness | 0.939 | 0.933 |
+| answer_correctness | 0.580 | 0.582 |
+
+— and the model read 5.00 distinct passages per question instead of 4.48.
+The recall gain concentrates on the documents where the answer is spread over
+several sections (the RZD financial report +0.20, the A/B lecture +0.20, the
+chess rating workbook +0.14); the one document group that lost (A/B + Agentic
+Memory, −0.125 over four questions) is the two-file comparison type where the
+HyDE passage steers toward one of the two files.
+
+This is the highest context_recall of any run so far except `v7` (top-k 8,
+0.875), and unlike v7 it does not pay for it in precision (v7: 0.744, v15:
+0.752): the extra evidence comes from filling the same five slots better,
+not from adding slots.
 
 ## 4. Configuration reference (retrieval)
 
