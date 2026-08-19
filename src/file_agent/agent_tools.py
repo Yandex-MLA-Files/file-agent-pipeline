@@ -1,5 +1,7 @@
+import hashlib
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from decimal import Decimal, DecimalException, InvalidOperation
@@ -33,8 +35,12 @@ MAX_VISUAL_CONTEXT_LENGTH = 2000
 MAX_VISUAL_DESCRIPTION_LENGTH = 500
 MAX_VISUAL_PIXELS = 1_500_000
 VISUAL_CROP_PADDING = 12.0
+MAX_OCCURRENCE_QUERY_LENGTH = 500
+MAX_OCCURRENCE_EXAMPLES = 20
+MAX_OCCURRENCE_CONTEXT_LENGTH = 320
 DEFAULT_HISTORY_TURNS = 6
 LLM_CONTEXT_METADATA_KEY = "_llm_context"
+WORD_PATTERN = re.compile(r"\b[\w]+(?:[\u2019'\-][\w]+)*\b", flags=re.UNICODE)
 
 VISUAL_ANALYSIS_PROMPT = """Analyze this visual from an uploaded document and answer
 the user's question using only information visible in the image. Identify the visual
@@ -65,6 +71,14 @@ directive names, not only a prose description. Use list_documents and
 get_document_outline to
 navigate available files. Use read_document for a complete overview or an exhaustive
 question about a short or unstructured file, following next_offset when necessary.
+For document-level metadata and exact statistics such as PDF page count, file size,
+title, author, or extracted word count, use get_document_metadata instead of
+estimating from retrieved chunks. For exact mention counts and questions asking on
+which pages a term or phrase occurs, use count_document_occurrences. That tool scans
+the complete extracted document; search_documents only returns top-ranked passages
+and must never be used to estimate a whole-document count. Use whole_word matching
+for standalone words, names, abbreviations, and phrases; use substring only when the
+question explicitly asks about a character sequence or partial term.
 When a question compares or combines multiple named documents, collect the evidence
 needed from every relevant document before answering. Use source-filtered tool calls,
 and request independent files in parallel when the calls do not depend on each other.
@@ -122,6 +136,11 @@ get_document_outline, then call analyze_document_visual. Prefer visual_id for a
 precise crop; use page_number only when the visual was not detected as a block.
 Existing indexed image descriptions help locate a visual but do not replace a fresh
 analyze_document_visual call for claims about what the visual shows.
+If the requested figure has no indexed description, search for its title, caption,
+or nearby section text and analyze the returned page as a whole-page fallback. For
+an image-only or poorly OCR'd PDF page, use get_document_metadata to inspect OCR/page
+information and analyze the relevant full page even when the question itself does
+not explicitly say "image" or "figure".
 
 Conversation history is provided only to understand follow-up references such as
 "and in the second quarter?", "what about penalties there?", or "compare it with
@@ -317,6 +336,230 @@ def get_document_outline(
         },
         ensure_ascii=False,
         default=str,
+    )
+
+
+@tool
+def get_document_metadata(
+    source_file: str,
+    runtime: ToolRuntime[Any, dict],
+    page_number: int | None = None,
+) -> Command:
+    """Return exact document properties, structure counts, and text statistics.
+
+    Use this for document-level questions about PDF page count, file size, title,
+    author, creation metadata, or word/character counts. Word counts prefer the
+    native PDF text layer and fall back to parsed/OCR text on image-only pages.
+    Statistics cover the complete document or one requested page and exclude
+    VLM-generated image descriptions.
+
+    Args:
+        source_file: Exact file name returned by list_documents.
+        page_number: Optional one-indexed PDF/DOCX page for page-level text counts.
+    """
+    document = _find_document(runtime.context.documents, source_file)
+    total_pages = _document_total_pages(document)
+    if page_number is not None:
+        if not isinstance(page_number, int) or isinstance(page_number, bool) or page_number <= 0:
+            raise ValueError("page_number must be a positive integer")
+        if total_pages and page_number > total_pages:
+            raise ValueError(f"page_number exceeds document page count: {total_pages}")
+        statistic_blocks = [
+            block for block in document.blocks if _block_page_number(block) == page_number
+        ]
+    else:
+        statistic_blocks = document.blocks
+    text = _blocks_extracted_text(statistic_blocks)
+    word_statistics = _word_statistics(document, statistic_blocks, page_number)
+    pages = sorted(
+        {page for block in document.blocks if (page := _block_page_number(block)) is not None}
+    )
+    slides = _integer_metadata_values(document.blocks, "slide_number")
+    sheets = _unique_metadata_values(document.blocks, "sheet_name")
+    pdf_metadata = document.metadata.get("pdf_metadata")
+    if not isinstance(pdf_metadata, dict):
+        pdf_metadata = {}
+
+    payload = {
+        "source_file": document.file_name,
+        "file_type": document.file_type,
+        "file_size_bytes": _non_negative_metadata_int(document.metadata.get("file_size_bytes")),
+        "total_pages": total_pages,
+        "page_numbering": "1-indexed physical PDF/DOCX pages",
+        "total_slides": max(slides, default=None),
+        "sheets": sheets,
+        "structure": {
+            "blocks": len(document.blocks),
+            "non_empty_blocks": sum(
+                1 for block in document.blocks if _original_block_text(block).strip()
+            ),
+            "headings": len(_document_outline(document)),
+            "tables": len(_document_tables(document)),
+            "visuals": len(_document_visuals(document)),
+            "pages_with_extracted_blocks": pages,
+        },
+        "text_statistics": {
+            "scope": "full_document" if page_number is None else "page",
+            "page_number": page_number,
+            **word_statistics,
+            "character_count_with_spaces": len(text),
+            "character_count_without_whitespace": len(re.sub(r"\s", "", text)),
+            "non_empty_line_count": sum(1 for line in text.splitlines() if line.strip()),
+            "counting_method": (
+                "native PDF text-layer words when available; Unicode parsed/OCR "
+                "word fallback on zero-text pages; VLM image descriptions excluded"
+            ),
+        },
+        "pdf_metadata": {
+            str(key): value
+            for key, value in pdf_metadata.items()
+            if value not in (None, "", [], {})
+        },
+        "processing": {
+            "parsing_method": document.metadata.get("parsing_method"),
+            "ocr_engine": document.metadata.get("ocr_engine"),
+            "page_analysis": document.metadata.get("page_analysis"),
+            "vlm_described_figures": document.metadata.get("vlm_described_figures", 0),
+        },
+    }
+    source_metadata = _document_level_source_metadata(document)
+    source_metadata.update({"evidence_type": "document_metadata"})
+    if page_number is not None:
+        source_metadata["page_number"] = page_number
+        source_metadata["page_numbers"] = [page_number]
+    evidence_text = json.dumps(payload, ensure_ascii=False, default=str)
+    return _evidence_command(
+        payload,
+        runtime,
+        evidence_id=f"metadata:{document.file_name}",
+        text=evidence_text,
+        metadata=source_metadata,
+    )
+
+
+@tool
+def count_document_occurrences(
+    source_file: str,
+    query: str,
+    runtime: ToolRuntime[Any, dict],
+    match_mode: Literal["whole_word", "substring"] = "whole_word",
+    case_sensitive: bool = False,
+    page_number: int | None = None,
+    max_examples: int = 10,
+) -> Command:
+    """Exhaustively count a literal term or phrase in an extracted document.
+
+    Unlike semantic retrieval, this scans every parsed block and returns the exact
+    non-overlapping count, all matched PDF/DOCX pages, and bounded context examples.
+    VLM-generated image descriptions are excluded so they cannot inflate counts.
+
+    Args:
+        source_file: Exact file name returned by list_documents.
+        query: Literal term or phrase to count, up to 500 characters.
+        match_mode: whole_word for standalone word/phrase matches; substring for
+            matches inside longer words or exact character sequences.
+        case_sensitive: Whether letter case must match exactly.
+        page_number: Optional one-indexed PDF/DOCX page to restrict the count to.
+        max_examples: Number of matching contexts to return, from 1 to 20.
+    """
+    document = _find_document(runtime.context.documents, source_file)
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise ValueError("query must not be empty")
+    if len(normalized_query) > MAX_OCCURRENCE_QUERY_LENGTH:
+        raise ValueError(f"query must not exceed {MAX_OCCURRENCE_QUERY_LENGTH} characters")
+    if not isinstance(case_sensitive, bool):
+        raise ValueError("case_sensitive must be a boolean")
+    if page_number is not None:
+        if not isinstance(page_number, int) or isinstance(page_number, bool) or page_number <= 0:
+            raise ValueError("page_number must be a positive integer")
+        total_pages = _document_total_pages(document)
+        if total_pages and page_number > total_pages:
+            raise ValueError(f"page_number exceeds document page count: {total_pages}")
+    if not isinstance(max_examples, int) or isinstance(max_examples, bool):
+        raise ValueError("max_examples must be an integer")
+    bounded_examples = max(1, min(max_examples, MAX_OCCURRENCE_EXAMPLES))
+    pattern = _occurrence_pattern(normalized_query, match_mode, case_sensitive)
+
+    total_occurrences = 0
+    matched_blocks: list[Block] = []
+    matched_block_ids: set[str] = set()
+    matched_pages: set[int] = set()
+    examples: list[dict[str, Any]] = []
+    searched_blocks = 0
+    for block in document.blocks:
+        block_page = _block_page_number(block)
+        if page_number is not None and block_page != page_number:
+            continue
+        text = _original_block_text(block)
+        if not text:
+            continue
+        searched_blocks += 1
+        matches = list(pattern.finditer(text))
+        if not matches:
+            continue
+        if block.id not in matched_block_ids:
+            matched_block_ids.add(block.id)
+            matched_blocks.append(block)
+        if block_page is not None:
+            matched_pages.add(block_page)
+        total_occurrences += len(matches)
+        for match in matches:
+            if len(examples) >= bounded_examples:
+                break
+            examples.append(
+                {
+                    "block_id": block.id,
+                    "page_number": block_page,
+                    "matched_text": match.group(0),
+                    "context": _match_context(text, match.start(), match.end()),
+                }
+            )
+
+    payload = {
+        "source_file": document.file_name,
+        "query": normalized_query,
+        "match_mode": match_mode,
+        "case_sensitive": case_sensitive,
+        "page_number_filter": page_number,
+        "total_occurrences": total_occurrences,
+        "matched_blocks": len(matched_blocks),
+        "matched_pages": sorted(matched_pages),
+        "searched_blocks": searched_blocks,
+        "examples": examples,
+        "examples_truncated": total_occurrences > len(examples),
+        "counting_method": (
+            "complete parsed document; non-overlapping literal matches; flexible "
+            "whitespace for whole_word phrases; VLM descriptions excluded"
+        ),
+    }
+    source_metadata = _document_level_source_metadata(document)
+    source_metadata.update(
+        {
+            "evidence_type": "document_occurrence_count",
+            "query": normalized_query,
+            "match_mode": match_mode,
+            "case_sensitive": case_sensitive,
+            "total_occurrences": total_occurrences,
+        }
+    )
+    if page_number is not None:
+        source_metadata["page_number"] = page_number
+        source_metadata["page_numbers"] = [page_number]
+    elif matched_pages:
+        source_metadata["page_number"] = min(matched_pages)
+        source_metadata["page_numbers"] = sorted(matched_pages)
+    digest = hashlib.sha256(
+        f"{document.file_name}\0{normalized_query}\0{match_mode}\0"
+        f"{case_sensitive}\0{page_number}".encode()
+    ).hexdigest()[:12]
+    evidence_text = json.dumps(payload, ensure_ascii=False, default=str)
+    return _evidence_command(
+        payload,
+        runtime,
+        evidence_id=f"occurrences:{document.file_name}:{digest}",
+        text=evidence_text,
+        metadata=source_metadata,
     )
 
 
@@ -801,16 +1044,17 @@ def analyze_document_visual(
         resolved_page_number = page_number
         target = "whole PDF page"
 
+    max_visual_pixels = _resolve_max_visual_pixels()
     image = extract_image_from_pdf_bytes(
         asset_store.get_bytes(document.file_name),
         page_number=resolved_page_number,
         bbox=bbox,
         padding=VISUAL_CROP_PADDING if bbox is not None else 0.0,
-        max_pixels=MAX_VISUAL_PIXELS,
+        max_pixels=max_visual_pixels,
     )
     if image is None:
         raise ValueError("the selected PDF visual could not be rendered")
-    image = _limit_image_pixels(image, MAX_VISUAL_PIXELS)
+    image = _limit_image_pixels(image, max_visual_pixels)
 
     relevant_blocks = (
         [selected_block]
@@ -867,6 +1111,8 @@ DOCUMENT_TOOLS: list[BaseTool] = [
     search_documents,
     read_source_context,
     list_documents,
+    get_document_metadata,
+    count_document_occurrences,
     get_document_outline,
     read_document,
     read_document_section,
@@ -1610,6 +1856,156 @@ def _source_metadata(document: Document, blocks: list[Block]) -> dict[str, Any]:
     return metadata
 
 
+def _document_level_source_metadata(document: Document) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "source_file": document.file_name,
+        "file_type": document.file_type,
+    }
+    dataset_doc_ids = _unique_metadata_values(document.blocks, "dataset_doc_id")
+    dataset_record_ids = _unique_metadata_values(document.blocks, "dataset_record_id")
+    if len(dataset_doc_ids) == 1:
+        metadata["dataset_doc_id"] = dataset_doc_ids[0]
+    if len(dataset_record_ids) == 1:
+        metadata["dataset_record_id"] = dataset_record_ids[0]
+    return metadata
+
+
+def _document_total_pages(document: Document) -> int:
+    configured = _non_negative_metadata_int(document.metadata.get("total_pages"))
+    if configured is not None:
+        return configured
+    return max(
+        (page for block in document.blocks if (page := _block_page_number(block)) is not None),
+        default=0,
+    )
+
+
+def _non_negative_metadata_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+def _original_block_text(block: Block) -> str:
+    """Return source-extracted text without generated visual descriptions."""
+    text = block.text or ""
+    if block.block_type in (BlockType.FIGURE, BlockType.IMAGE) and block.vlm_description:
+        generated = f"[Image description]: {block.vlm_description}"
+        position = text.rfind(generated)
+        if position >= 0 and not text[position + len(generated) :].strip():
+            text = text[:position].rstrip()
+    return text
+
+
+def _blocks_extracted_text(blocks: list[Block]) -> str:
+    return "\n".join(text for block in blocks if (text := _original_block_text(block).strip()))
+
+
+def _word_statistics(
+    document: Document,
+    blocks: list[Block],
+    page_number: int | None,
+) -> dict[str, Any]:
+    extracted_word_count = sum(
+        len(WORD_PATTERN.findall(text))
+        for block in blocks
+        if (text := _original_block_text(block).strip())
+    )
+    raw_native_counts = document.metadata.get("native_pdf_word_counts_by_page")
+    if not (
+        isinstance(raw_native_counts, list)
+        and all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in raw_native_counts
+        )
+    ):
+        return {
+            "word_count": extracted_word_count,
+            "extracted_word_count": extracted_word_count,
+            "native_pdf_text_layer_word_count": None,
+            "word_count_source": "parsed_document",
+            "native_zero_text_pages_using_parsed_fallback": [],
+        }
+
+    native_counts: list[int] = raw_native_counts
+    if page_number is not None:
+        native_count = native_counts[page_number - 1] if page_number <= len(native_counts) else 0
+        use_extracted = native_count == 0 and extracted_word_count > 0
+        return {
+            "word_count": extracted_word_count if use_extracted else native_count,
+            "extracted_word_count": extracted_word_count,
+            "native_pdf_text_layer_word_count": native_count,
+            "word_count_source": (
+                "parsed_document_fallback" if use_extracted else "native_pdf_text_layer"
+            ),
+            "native_zero_text_pages_using_parsed_fallback": (
+                [page_number] if use_extracted else []
+            ),
+        }
+
+    extracted_by_page: dict[int, int] = {}
+    unpaged_word_count = 0
+    for block in blocks:
+        count = len(WORD_PATTERN.findall(_original_block_text(block)))
+        block_page = _block_page_number(block)
+        if block_page is None:
+            unpaged_word_count += count
+        else:
+            extracted_by_page[block_page] = extracted_by_page.get(block_page, 0) + count
+
+    effective_count = unpaged_word_count
+    fallback_pages: list[int] = []
+    last_page = max(len(native_counts), max(extracted_by_page, default=0))
+    for current_page in range(1, last_page + 1):
+        native_count = native_counts[current_page - 1] if current_page <= len(native_counts) else 0
+        extracted_count = extracted_by_page.get(current_page, 0)
+        if native_count > 0 or extracted_count == 0:
+            effective_count += native_count
+        else:
+            effective_count += extracted_count
+            fallback_pages.append(current_page)
+
+    return {
+        "word_count": effective_count,
+        "extracted_word_count": extracted_word_count,
+        "native_pdf_text_layer_word_count": sum(native_counts),
+        "word_count_source": "native_pdf_text_layer_with_parsed_fallback",
+        "native_zero_text_pages_using_parsed_fallback": fallback_pages,
+    }
+
+
+def _occurrence_pattern(
+    query: str,
+    match_mode: Literal["whole_word", "substring"],
+    case_sensitive: bool,
+) -> re.Pattern[str]:
+    if match_mode == "whole_word":
+        escaped = r"\s+".join(re.escape(part) for part in query.split())
+        prefix = r"(?<!\w)" if query[0].isalnum() or query[0] == "_" else ""
+        suffix = r"(?!\w)" if query[-1].isalnum() or query[-1] == "_" else ""
+        expression = f"{prefix}{escaped}{suffix}"
+    elif match_mode == "substring":
+        expression = re.escape(query)
+    else:
+        raise ValueError(f"unsupported match_mode: {match_mode}")
+    flags = 0 if case_sensitive else re.IGNORECASE
+    return re.compile(expression, flags=flags)
+
+
+def _match_context(text: str, start: int, end: int) -> str:
+    radius = MAX_OCCURRENCE_CONTEXT_LENGTH // 2
+    excerpt_start = max(0, start - radius)
+    excerpt_end = min(len(text), end + radius)
+    excerpt = " ".join(text[excerpt_start:excerpt_end].split())
+    if excerpt_start > 0:
+        excerpt = "..." + excerpt
+    if excerpt_end < len(text):
+        excerpt += "..."
+    return excerpt
+
+
 def _visual_nearby_text(
     document: Document,
     page_number: int,
@@ -1640,10 +2036,21 @@ def _limit_image_pixels(image: Image.Image, max_pixels: int) -> Image.Image:
         return image
     scale = math.sqrt(max_pixels / pixels)
     size = (
-        max(1, round(image.width * scale)),
-        max(1, round(image.height * scale)),
+        max(1, math.floor(image.width * scale)),
+        max(1, math.floor(image.height * scale)),
     )
     return image.resize(size, Image.Resampling.LANCZOS)
+
+
+def _resolve_max_visual_pixels() -> int:
+    raw_value = os.getenv("VLM_MAX_VISUAL_PIXELS", str(MAX_VISUAL_PIXELS))
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError("VLM_MAX_VISUAL_PIXELS must be an integer") from exc
+    if value < 1:
+        raise ValueError("VLM_MAX_VISUAL_PIXELS must be greater than zero")
+    return value
 
 
 def _integer_metadata_values(blocks: list[Block], key: str) -> list[int]:

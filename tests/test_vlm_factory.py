@@ -40,6 +40,7 @@ def test_factory_configures_openai_visual_analysis(monkeypatch):
     monkeypatch.setenv("VLM_MAX_TOKENS", "1200")
     monkeypatch.setenv("VLM_TEMPERATURE", "0.3")
     monkeypatch.setenv("VLM_TIMEOUT_SECONDS", "180")
+    monkeypatch.setenv("VLM_MAX_RETRIES", "2")
     monkeypatch.setenv("VLM_ENABLE_THINKING", "false")
 
     client = create_vlm_client()
@@ -48,6 +49,7 @@ def test_factory_configures_openai_visual_analysis(monkeypatch):
     assert client.model == "Qwen/Qwen3.5-27B"
     assert client.max_tokens == 1200
     assert client.temperature == 0.3
+    assert client.max_retries == 2
     assert client.enable_thinking is False
 
 

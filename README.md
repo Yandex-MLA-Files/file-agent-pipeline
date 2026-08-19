@@ -35,6 +35,11 @@ one source file, and navigate uploaded documents without accessing arbitrary
 filesystem paths. Its read-only tools can:
 
 - list documents and inspect their sections and tables;
+- inspect exact document properties and full-document text statistics, including
+  PDF page count, file size, native title/author metadata, and word counts from the
+  native PDF text layer with parsed/OCR fallback for image-only pages;
+- exhaustively count a literal word or phrase across every parsed block and return
+  all matching page numbers without estimating from retrieval top-k;
 - read a complete document sequentially in bounded pages for exhaustive analysis
   or unstructured files;
 - read the surrounding context of a previously found chunk;
@@ -92,6 +97,11 @@ visual discovery. The on-demand tool performs a fresh, question-specific visual
 analysis before the agent makes claims about a chart or diagram. Visual tool
 analysis currently supports PDF files; other document tools and standard text
 RAG behavior are unchanged.
+
+`VLM_MAX_VISUAL_PIXELS` bounds the rendered image sent by the on-demand visual
+tool (default `1500000`); a higher value can preserve small labels at the cost of
+larger requests. `VLM_MAX_RETRIES` configures retries for transient failures of an
+OpenAI-compatible VLM endpoint.
 
 The LLM and VLM can point at the same multimodal vLLM deployment. For example:
 

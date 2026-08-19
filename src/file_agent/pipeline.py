@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from typing import Literal
 
+import fitz
 from dotenv import load_dotenv
 
 from file_agent.document import BlockType, Document
@@ -26,6 +27,19 @@ logger = logging.getLogger(__name__)
 FULL_SCAN_RATIO = 0.6
 
 OcrMode = Literal["auto", "on", "off"]
+
+PDF_METADATA_KEYS = {
+    "format": "format",
+    "title": "title",
+    "author": "author",
+    "subject": "subject",
+    "keywords": "keywords",
+    "creator": "creator",
+    "producer": "producer",
+    "creationDate": "creation_date",
+    "modDate": "modification_date",
+    "encryption": "encryption",
+}
 
 
 def parse_file(
@@ -52,6 +66,7 @@ def parse_file(
         logger.info("Parsing file %s", path.name)
 
         document = _parse_by_suffix(path, suffix, enable_vlm=enable_vlm, enable_ocr=enable_ocr)
+        _attach_file_metadata(document, path)
 
         span.set_attribute("file_agent.block_count", len(document.blocks))
         logger.info("Parsed %s into %d block(s)", path.name, len(document.blocks))
@@ -78,6 +93,34 @@ def _parse_by_suffix(
         return PPTXParser().parse(path)
 
     raise ValueError(f"Unsupported file type: {suffix or '<no extension>'}")
+
+
+def _attach_file_metadata(document: Document, path: Path) -> None:
+    """Attach deterministic file properties needed by document-level tools."""
+    try:
+        document.metadata["file_size_bytes"] = path.stat().st_size
+    except OSError:
+        logger.warning("Could not read file size for %s", path.name, exc_info=True)
+
+    if path.suffix.lower() != ".pdf":
+        return
+
+    try:
+        with fitz.open(path) as pdf:
+            document.metadata["total_pages"] = pdf.page_count
+            native_word_counts = [len(page.get_text("words") or []) for page in pdf]
+            document.metadata["native_pdf_word_counts_by_page"] = native_word_counts
+            document.metadata["native_pdf_word_count"] = sum(native_word_counts)
+            raw_metadata = pdf.metadata or {}
+            pdf_metadata = {
+                output_key: raw_metadata.get(input_key)
+                for input_key, output_key in PDF_METADATA_KEYS.items()
+                if raw_metadata.get(input_key) not in (None, "")
+            }
+            if pdf_metadata:
+                document.metadata["pdf_metadata"] = pdf_metadata
+    except Exception:
+        logger.warning("Could not read native PDF metadata for %s", path.name, exc_info=True)
 
 
 def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) -> Document:

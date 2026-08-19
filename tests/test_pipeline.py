@@ -68,6 +68,34 @@ def test_parse_file_parses_pdf(tmp_path):
     assert any("Hello from PDF" in block.text for block in document.blocks)
 
 
+def test_parse_file_preserves_exact_pdf_file_and_native_metadata(tmp_path):
+    file_path = tmp_path / "metadata.pdf"
+    pdf = fitz.open()
+    first_page = pdf.new_page()
+    first_page.insert_text((72, 72), "Metadata test")
+    pdf.new_page()
+    pdf.new_page()
+    pdf.set_metadata(
+        {
+            "title": "DocBench Annual Report",
+            "author": "Ada Lovelace",
+            "subject": "Benchmark metadata",
+        }
+    )
+    pdf.save(file_path)
+    pdf.close()
+
+    document = parse_file(file_path, enable_vlm=False, enable_ocr="off")
+
+    assert document.metadata["total_pages"] == 3
+    assert document.metadata["file_size_bytes"] == file_path.stat().st_size
+    assert document.metadata["native_pdf_word_counts_by_page"] == [2, 0, 0]
+    assert document.metadata["native_pdf_word_count"] == 2
+    assert document.metadata["pdf_metadata"]["title"] == "DocBench Annual Report"
+    assert document.metadata["pdf_metadata"]["author"] == "Ada Lovelace"
+    assert document.metadata["pdf_metadata"]["subject"] == "Benchmark metadata"
+
+
 def test_parse_file_uses_html_parser(tmp_path):
     file_path = tmp_path / "example.html"
     file_path.write_text("<p>Hello from HTML</p>", encoding="utf-8")

@@ -13,6 +13,7 @@ DEFAULT_VLM_BACKEND = "off"
 DEFAULT_VLM_MAX_TOKENS = 1000
 DEFAULT_VLM_TEMPERATURE = 0.2
 DEFAULT_VLM_TIMEOUT_SECONDS = 120.0
+DEFAULT_VLM_MAX_RETRIES = 0
 
 
 def create_vlm_client() -> VLMClient | None:
@@ -53,6 +54,10 @@ def create_vlm_client() -> VLMClient | None:
                 "VLM_TIMEOUT_SECONDS",
                 DEFAULT_VLM_TIMEOUT_SECONDS,
             ),
+            max_retries=_get_non_negative_int(
+                "VLM_MAX_RETRIES",
+                DEFAULT_VLM_MAX_RETRIES,
+            ),
             enable_thinking=_get_optional_bool("VLM_ENABLE_THINKING"),
         )
 
@@ -68,6 +73,17 @@ def _get_positive_int(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer") from exc
     if value < 1:
         raise ValueError(f"{name} must be greater than zero")
+    return value
+
+
+def _get_non_negative_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name, str(default))
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative")
     return value
 
 

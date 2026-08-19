@@ -22,10 +22,10 @@ class FakeOpenAI:
         self.chat = SimpleNamespace(completions=self.completions)
 
 
-def _response(content="Visible chart"):
+def _response(content="Visible chart", usage=None):
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
-        usage=None,
+        usage=usage,
     )
 
 
@@ -70,3 +70,21 @@ def test_openai_vlm_rejects_empty_response(response):
 
     with pytest.raises(ValueError, match="empty response"):
         client.describe_image(Image.new("RGB", (10, 10)), "Analyze")
+
+
+def test_openai_vlm_records_request_and_token_usage():
+    usage = SimpleNamespace(prompt_tokens=120, completion_tokens=30, total_tokens=150)
+    client = OpenAICompatibleVLMClient(
+        base_url="http://unused/v1",
+        model="test-vlm",
+        max_retries=2,
+    )
+    client.client = FakeOpenAI(_response("Chart result", usage=usage))
+
+    client.describe_image(Image.new("RGB", (10, 10)), "Analyze")
+
+    assert client.max_retries == 2
+    assert client.request_count == 1
+    assert client.prompt_tokens == 120
+    assert client.completion_tokens == 30
+    assert client.total_tokens == 150
