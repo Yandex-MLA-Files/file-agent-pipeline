@@ -3,34 +3,66 @@
 The agent answers questions about uploaded documents with a multi-step
 think-act-observe loop instead of a single fixed retrieval. The LLM decides
 which tool to call, reads the observation, and iterates until it can answer
-(or the step budget runs out).
+(or the step budget runs out). Everything a tool shows the model is a
+labelled passage; the final answer names the passages it relies on, and those
+become the answer's sources.
 
 ```text
 question
   -> LLM plans a step
-  -> tool call (search / overview / read a section)
-  -> observation appended to the conversation
+  -> one or several tool calls (search / exact text / overview / read / compute)
+  -> observation: passages [P1], [P2], ... appended to the conversation
   -> ... repeat up to max_steps ...
-  -> final answer + collected sources
+  -> Final Answer + Sources: P2, P5
+  -> (optional) editor pass over the draft against the cited passages
+  -> answer + cited passages as sources
 ```
 
 ## Components
 
+- `src/file_agent/agent/agent.py` — `FileAgent`, the orchestration loop;
+  `AgentSettings` (environment-configurable knobs); `answer_with_agent(...)`,
+  the entry point used by the app and by `--answer-mode agent`, which wraps
+  the loop in a fallback to single-pass RAG.
 - `src/file_agent/agent/tools.py` — the toolset over an indexed document
-  collection:
-  - `search_documents(query, top_k)` — hybrid retrieval via the shared
-    `Retriever` interface; returns deduplicated parent passages with source
-    file, section and pages.
-  - `list_documents()` — file names, page counts and tables of contents.
-  - `read_section(file_name, section)` — a whole section by heading, for
-    summarization questions that retrieval handles poorly.
-- `src/file_agent/agent/agent.py` — `FileAgent`, the orchestration loop, and
-  `answer_with_agent(...)`, the convenience entry point used by the app.
+  collection (below).
+- `src/file_agent/agent/passages.py` — `PassageRegistry`: one id space per
+  run for everything the model has read; citation resolution.
+- `src/file_agent/agent/tables.py` — DataFrames out of spreadsheet sheets and
+  Markdown tables inside parsed documents (two-row headers merged, numeric
+  columns converted).
+- `src/file_agent/agent/sandbox.py` — guarded Python execution for
+  `query_table` / `calculate`: no imports, no private attributes, no pandas /
+  numpy I/O entry points, a builtin whitelist, a wall-clock limit and an output
+  cap. A guard against careless model code, not a security boundary — the
+  data it touches is the user's own upload, already in memory.
 
 Tools validate their arguments and raise `ToolError` with a message written
 for the model, so the agent can correct itself on the next step. Unknown
 tools, malformed replies and tool crashes are also fed back as observations
-instead of aborting the run.
+instead of aborting the run; an identical repeated call is refused with a
+note, and the model is warned one call before its budget ends. When the budget
+is exhausted an answer is demanded; a model that still replies with a tool
+call gets that one call (it is usually the last piece of a computation) and
+the demand is repeated, and a reply that is still not an answer yields no
+answer text rather than the model's notes.
+
+## Tools
+
+| tool | what it does | when the model is told to use it |
+|---|---|---|
+| `search_documents(query, queries?, top_k?, file_name?)` | hybrid retrieval through the shared `Retriever`; the main query plus up to three alternative formulations are searched separately and fused by reciprocal rank (`1/(60+rank)`), candidates optionally restricted to one document, parent passages deduplicated | first step for almost every question; `queries` carries synonyms, the document's own wording, the other language |
+| `find_text(pattern, file_name?, max_hits?)` | exact case-insensitive substring (ё/е-tolerant, flexible whitespace) or regular-expression search over every block; a hit in a short block (a DOCX paragraph, a list item) is shown with its neighbouring blocks, a hit in a spreadsheet returns the whole row under its header row | numbers, codes, identifiers, names, dates, rare terms, quoted phrases |
+| `list_documents()` | per document: type, pages/slides/sheets, sheet sizes with their first row, table of contents with page numbers, a short preview | structure questions, "how many sections / sheets", not knowing where to look |
+| `read_section(file_name, section, part?)` | a heading and its body up to the next same-or-higher heading, served in parts of 7 000 characters; headings match exactly, by substring, or by most of their words | summarising or enumerating a whole section |
+| `read_pages(file_name, pages)` | full text of pages (PDF/DOCX), slides (PPTX) or sheets by number (XLSX), one passage per page | the neighbourhood of a passage, a page the question names |
+| `read_document(file_name, part?)` | the whole document as Markdown, in parts | short documents, introduction/conclusion, last resort |
+| `query_table(file_name, code?, sheet?, header_row?)` | pandas code over `df` (the selected sheet/table), `sheets` (this document's) and `files[...]` (every other document's tables, for joins); empty code returns shape, columns, dtypes and the first rows | totals, counts, averages, maxima, unique values, joins across files, exact row lookups in large tables |
+| `calculate(expression)` | arithmetic / Python expression with `math` | ratios, percentages, differences |
+
+Every tool registers what it showed as a passage, so an answer built from a
+section, a grep hit or a computed total is grounded in exported contexts
+exactly like one built from retrieved chunks.
 
 ## Tool-call protocol
 
@@ -38,28 +70,56 @@ Tool calls are parsed on the client side from the model's reply:
 
 ```text
 Thought: <one sentence>
-Action: {"tool": "search_documents", "arguments": {"query": "..."}}
+Action: {"tool": "search_documents", "arguments": {"query": "...", "queries": ["...", "..."]}}
 ```
 
-or
+Up to `AGENT_MAX_PARALLEL_ACTIONS` independent calls may be issued at once as
+a JSON list (`Action: [{...}, {...}]`) — the usual case is one search per
+document of a two-document question. The final reply is
 
 ```text
 Thought: <one sentence>
 Final Answer: <answer in the language of the question>
+Sources: P2, P5
 ```
 
-Bare JSON tool calls without the `Action:` marker are accepted too, and a
-reply with neither marker is treated as the final answer, so smaller models
-degrade gracefully instead of looping on format reminders.
+The `Sources` line is stripped from the answer and resolved against the
+registry; the answer text itself must not carry file names, page or section
+numbers or passage ids. Those were the single largest loss of the previous
+agent version under an answer judge: 86 % of its answers named their source
+("раздел 3.2, стр. 19–20"), which the judge treats as claims it cannot verify
+against the contexts — faithfulness 0.739 on those answers against 0.824 on
+the rest. With citations the location lives in structured data (the UI lists
+the sources; the evaluation exports them as contexts) and the text stays pure.
+
+Bare JSON tool calls, fenced ```json blocks, `Actions:` lists and replies
+with neither marker (treated as the final answer) are accepted too, so
+smaller models degrade gracefully instead of looping on format reminders.
+Reasoning output (`<think>...</think>`) is stripped before parsing.
 
 Client-side parsing is a deliberate choice: it works with any
 OpenAI-compatible backend and does not depend on server-side tool-call
-parsing. In particular, vLLM 0.7.3 (the newest version that still runs on
-V100 GPUs — later versions pull in PyTorch builds without V100 support)
-cannot combine `--enable-auto-tool-choice` with `--enable-reasoning`, so
-native function calling plus reasoning is unavailable there. The agent needs
-neither flag: reasoning output (`<think>...</think>` blocks) is stripped
-before parsing, and the JSON action is extracted from the visible text.
+parsing (vLLM 0.7.3, the newest version that still runs on V100 GPUs, cannot
+combine `--enable-auto-tool-choice` with `--enable-reasoning`).
+
+## Sources and the editor pass
+
+`AgentResponse.sources` holds the cited passages in citation order; when the
+model cites nothing, everything it read (bounded to eight passages) is
+exported instead; `AGENT_CITED_SOURCES_ONLY=false` always exports cited
+passages first and the rest after them.
+
+`AGENT_VERIFY=true` adds one model call after the draft: the editor sees the
+question, the cited passages and the draft, and either replies `KEEP` or
+returns a corrected answer (unsupported statements removed, specifics the
+passages provide added, location remarks dropped). A reply much shorter than
+a long draft is treated as a misfire and ignored; an error keeps the draft.
+
+`AGENT_FALLBACK_TO_RAG=true` answers with the single-pass QA prompt over the
+collected passages (or a plain retrieval) when the loop raises or ends
+without an answer, so the caller always gets one. `AGENT_TRACE_DIR` appends
+one JSON line per question (steps, tool calls, observations, citations,
+timings) to `<dir>/agent_trace.jsonl` for audits.
 
 ## Sessions (follow-up questions)
 
@@ -83,6 +143,29 @@ answer_with_agent(question="Какая выручка в первом кварт
 answer_with_agent(question="А во втором?", session=session, ...)
 ```
 
+## Settings
+
+| variable | default | meaning |
+|---|---|---|
+| `AGENT_MAX_STEPS` | 8 | model turns before an answer is demanded |
+| `AGENT_VERIFY` | true | editor pass over the draft |
+| `AGENT_CITED_SOURCES_ONLY` | true | export only cited passages as sources |
+| `AGENT_FALLBACK_TO_RAG` | true | single-pass QA when the loop fails |
+| `AGENT_MAX_PARALLEL_ACTIONS` | 3 | tool calls accepted from one reply |
+| `AGENT_MAX_OBSERVATION_CHARS` | 14000 | hard cap on one observation |
+| `AGENT_TRACE_DIR` | unset | per-question JSONL trace |
+
+The settings and the prompt version are part of the generation fingerprint
+of `--answer-mode agent` runs, so a checkpoint from another configuration is
+never resumed. The LLM is the regular one from `.env` (`LLM_BACKEND`,
+`LLM_ENABLE_THINKING=false` for Qwen3.5 served with a reasoning parser, a
+generous `LLM_TIMEOUT_SECONDS` — one step may carry 30–40k characters of
+observations).
+
+## Evaluation
+
+RESULTS_PLACEHOLDER
+
 ## Why not MCP (yet)
 
 The toolset is deliberately plain Python behind the `Tool` dataclass. MCP
@@ -96,26 +179,16 @@ services), wrapping `build_default_tools()` in an MCP server is the
 natural next step — the `Tool` contract (name, description, parameters,
 run) maps one-to-one onto an MCP tool definition.
 
-## Limits and behavior
-
-- `max_steps` (default 6) bounds the number of LLM turns; when the budget is
-  exhausted the agent demands a final answer from the observations gathered
-  so far.
-- Observations are size-bounded at every level (`MAX_SECTION_CHARS`, capped
-  `top_k`, and a hard `MAX_OBSERVATION_CHARS` cut in the loop), so the
-  conversation stays inside the model's context window; the UI still sees
-  the full tool output via the step record.
-- Sources from every `search_documents` call are collected and deduplicated
-  by chunk id; the UI shows them like the single-pass RAG sources.
-- Every run is traced with OpenTelemetry: `file_agent.agent_run` wraps the
-  loop, `file_agent.agent_tool` wraps each tool call, and the usual
-  `file_agent.llm_generate` spans cover each model turn.
-
 ## Running
 
-In the Streamlit app, choose the "Agent (multi-step)" answer mode. The LLM
-backend is the regular one from `.env` (`LLM_BACKEND`, see
-`docs/local_inference.md` for local serving).
+The Streamlit app is a chat over the uploaded documents: upload files in the
+sidebar, pick the answer mode there ("Agent (multi-step)" by default), and
+ask questions in the chat box — follow-ups keep the dialog. Every answer
+stays in the conversation with its citations, an expandable account of the
+agent's steps (tool calls, observations, per-step timings) and the cited
+passages as source cards; the library above the chat shows each document's
+structure, parsing details and a text preview. For dataset generation add
+`--answer-mode agent` (see `docs/hf_dataset_generation.md`).
 
 Programmatic use:
 
@@ -125,17 +198,18 @@ from file_agent.lancedb_retriever import LanceDBRetriever
 from file_agent.llm.factory import create_llm_client
 from file_agent.rag import index_documents, load_documents
 
-documents = load_documents(["report.pdf"])
+documents = load_documents(["report.pdf", "sales.xlsx"])
 retriever = LanceDBRetriever()
 index_documents(documents, retriever)
 
 response = answer_with_agent(
-    question="О чем раздел с результатами?",
+    question="Какой регион принёс наибольшую выручку?",
     llm_client=create_llm_client(),
     retriever=retriever,
     documents=documents,
 )
 print(response.answer)
+print(response.citations)           # ["P3"]
 for step in response.steps:
     print(step.tool, step.arguments)
 ```
@@ -159,9 +233,9 @@ scanned PDFs, DOCX, large Markdown):
   table structure recognition is per-table model inference. It buys
   correctly ordered Markdown tables, which is what lets the LLM answer
   numeric questions reliably.
-- The agent adds LLM turns (typically 2-4 per question), not indexing
-  work: each question costs a few model calls against the already-built
-  index.
+- The agent adds LLM turns, not indexing work: each question costs a few
+  model calls against the already-built index (see the evaluation section
+  for the measured step counts and timings).
 
 Why OCR into the index instead of sending pages straight to a multimodal
 LLM: parsing happens once per document, while questions are many — an
