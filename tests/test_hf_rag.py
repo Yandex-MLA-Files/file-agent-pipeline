@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from file_agent.agent.tools import MIN_SEARCH_POOL
 from file_agent.chunking import Chunk
 from file_agent.hf_dataset import QADatasetRecord
 from file_agent.hf_rag import (
@@ -141,14 +142,14 @@ def test_process_qa_record_agent_mode_uses_agent_answer_and_sources(tmp_path):
 
     assert result.answer_model == "Agent answer"
     assert result.answer == "Gold answer"
-    # The agent decided the query itself; contexts come from its tool calls.
-    assert retriever.search_calls == [("contexts", 4)]
+    # The agent decided the query itself; contexts are the passages it cited.
+    assert retriever.search_calls == [("contexts", MIN_SEARCH_POOL)]
     assert [context.document_id for context in result.contexts] == [
         "q0001/first.txt",
         "q0001/second.txt",
     ]
     assert retriever.clear_calls == 1
-    assert len(llm_client.chat_calls) == 2
+    assert len(llm_client.chat_calls) == 3
 
 
 def test_process_qa_record_rejects_unknown_answer_mode(tmp_path):

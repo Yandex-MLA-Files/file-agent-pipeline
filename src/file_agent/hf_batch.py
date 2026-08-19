@@ -275,6 +275,13 @@ def build_generation_parameters(
         "overlap": overlap,
         "prompt_sha256": hashlib.sha256(prompt_template.encode("utf-8")).hexdigest(),
     }
+    if answer_mode == "agent":
+        # The agent's prompt and loop settings decide the answers as much as the
+        # QA prompt does for single-pass RAG; a checkpoint from another agent
+        # configuration must not be resumed into this run.
+        from file_agent.agent import AgentSettings
+
+        parameters["agent"] = AgentSettings.from_env().fingerprint()
     return parameters
 
 
