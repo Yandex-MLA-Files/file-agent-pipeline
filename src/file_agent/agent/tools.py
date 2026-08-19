@@ -43,6 +43,9 @@ DEFAULT_FIND_HITS = 8
 MAX_FIND_HITS = 25
 SNIPPET_CHARS = 350
 MAX_SNIPPETS_PER_BLOCK = 3
+# Hits in blocks shorter than this are shown with neighbouring blocks.
+SHORT_BLOCK_CHARS = 400
+NEIGHBOURHOOD_CHARS = 600
 
 _PAGE_SPEC = re.compile(r"^\s*(\d+)\s*(?:-\s*(\d+))?\s*$")
 
@@ -330,7 +333,7 @@ def _find_text(
     matched_files: set[str] = set()
     for document in scope:
         section: str | None = None
-        for block in document.blocks:
+        for index, block in enumerate(document.blocks):
             if block.block_type == BlockType.HEADING:
                 section = block.text.strip() or section
                 # A heading that matches is a hit too: it locates the topic.
@@ -341,7 +344,7 @@ def _find_text(
             matched_files.add(document.file_name)
             if len(passages) >= max_hits:
                 continue
-            for snippet in _snippets(block, matches):
+            for snippet in _snippets(block, matches, document.blocks, index):
                 metadata: dict[str, Any] = {}
                 if section and block.block_type != BlockType.HEADING:
                     metadata["section"] = section
@@ -415,11 +418,17 @@ def _literal_pattern(text: str) -> str:
     return re.sub(r"(?:\\s\+)+", r"\\s+", "".join(parts))
 
 
-def _snippets(block: Block, matches: list[re.Match[str]]) -> list[str]:
+def _snippets(
+    block: Block, matches: list[re.Match[str]], blocks: list[Block], index: int
+) -> list[str]:
     """Context windows around the matches, merged when they overlap."""
     text = block.text
     if block.type == "xlsx_sheet" or block.metadata.get("sheet_name"):
         return _row_snippets(text, matches)
+    if len(text) < SHORT_BLOCK_CHARS:
+        # Word processors yield one block per paragraph or list item; a hit in
+        # such a block is meaningless alone, so show its neighbourhood.
+        return [_block_neighbourhood(blocks, index)]
 
     windows: list[tuple[int, int]] = []
     for match in matches:
@@ -445,6 +454,34 @@ def _snippets(block: Block, matches: list[re.Match[str]]) -> list[str]:
         suffix = "..." if end < len(text) else ""
         snippets.append(f"{prefix}{text[start:end].strip()}{suffix}")
     return snippets
+
+
+def _block_neighbourhood(blocks: list[Block], index: int) -> str:
+    """The hit block with enough preceding and following blocks for context."""
+    before: list[str] = []
+    size = 0
+    for block in reversed(blocks[max(0, index - 12) : index]):
+        rendered = block.to_markdown().strip()
+        if not rendered or block.metadata.get("sheet_name"):
+            continue
+        before.insert(0, rendered)
+        size += len(rendered)
+        if size >= NEIGHBOURHOOD_CHARS or block.block_type == BlockType.HEADING:
+            break
+    after: list[str] = []
+    size = 0
+    for block in blocks[index + 1 : index + 13]:
+        if block.block_type == BlockType.HEADING or block.metadata.get("sheet_name"):
+            break
+        rendered = block.to_markdown().strip()
+        if not rendered:
+            continue
+        after.append(rendered)
+        size += len(rendered)
+        if size >= NEIGHBOURHOOD_CHARS:
+            break
+    hit = blocks[index].to_markdown().strip() or blocks[index].text.strip()
+    return "\n\n".join([*before, hit, *after])
 
 
 def _row_snippets(text: str, matches: list[re.Match[str]]) -> list[str]:

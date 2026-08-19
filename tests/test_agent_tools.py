@@ -470,3 +470,56 @@ def test_calculate_evaluates_expressions():
     assert result.sources[0].chunk.metadata["tool"] == "calculate"
     with pytest.raises(ToolError, match="calculate failed"):
         tool.run(expression="open('x')")
+
+
+def test_query_table_merges_two_row_headers():
+    sheet = (
+        "Chess.com\t\t\tFIDE\nBullet\tBlitz\tRapid\tRegular\n"
+        "1000\t1200\t1330\t1260\n1030\t1225\t1360\t1280"
+    )
+    document = Document(
+        file_name="chess.xlsx",
+        file_type="xlsx",
+        blocks=[
+            Block(
+                id="sheet-1",
+                text=sheet,
+                type="xlsx_sheet",
+                metadata={"source_file": "chess.xlsx", "sheet_name": "Comparisons"},
+            )
+        ],
+    )
+    tool = get_tool(build_default_tools(FakeRetriever(), [document]), "query_table")
+
+    preview = tool.run(file_name="chess.xlsx")
+    assert "Chess.com Bullet, Chess.com Blitz, Chess.com Rapid, FIDE Regular" in preview.output
+
+    result = tool.run(
+        file_name="chess.xlsx", code="df[df['FIDE Regular'] == 1260]['Chess.com Bullet'].iloc[0]"
+    )
+    assert "=>\n1000" in result.output
+
+
+def test_find_text_shows_the_neighbourhood_of_a_short_block():
+    document = Document(
+        file_name="lecture.docx",
+        file_type="docx",
+        blocks=[
+            heading("h1", "Parameters"),
+            paragraph("p1", "A parameter is set with the `define directive."),
+            paragraph("p2", "`define <name> <value>"),
+            paragraph("p3", "`define DATA_WIDTH 8"),
+            paragraph("p4", "Afterwards DATA_WIDTH is replaced by 8."),
+            heading("h2", "Next topic"),
+            paragraph("p5", "Unrelated."),
+        ],
+    )
+    tool = get_tool(build_default_tools(FakeRetriever(), [document]), "find_text")
+
+    result = tool.run(pattern="DATA_WIDTH 8")
+
+    passage = result.sources[0].chunk.text
+    assert "# Parameters" in passage
+    assert "`define <name> <value>" in passage
+    assert "Afterwards DATA_WIDTH" in passage
+    assert "Unrelated" not in passage

@@ -16,6 +16,10 @@ from file_agent.document import Block, BlockType, Document
 # Rows in a header position that are mostly empty are not headers: spreadsheet
 # exports often start with a title line above the real column names.
 _MIN_NAMED_HEADER_SHARE = 0.5
+# Share of a column's non-empty cells that must parse as numbers for the column
+# to become numeric (the rest turn into NaN).
+_MIN_NUMERIC_SHARE = 0.9
+_SUBHEADER_TEXT_SHARE = 0.75
 _MARKDOWN_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 
 
@@ -103,21 +107,64 @@ def _markdown_frame(pd: Any, text: str, header_row: int) -> Any | None:
 def _frame_from_rows(pd: Any, rows: list[list[str]], header_row: int) -> Any | None:
     if not rows:
         return None
+    width = max(len(row) for row in rows)
+    rows = [[*row, *[""] * (width - len(row))] for row in rows]
     header_row = max(0, min(header_row, len(rows) - 1))
     if header_row == 0:
         header_row = _detect_header_row(rows)
-    header = rows[header_row]
-    width = max(len(row) for row in rows)
-    header = _unique_names([*header, *[""] * (width - len(header))])
-    body = [[*row, *[""] * (width - len(row))] for row in rows[header_row + 1 :]]
-    frame = pd.DataFrame(body, columns=header)
+    header = list(rows[header_row])
+    body_start = header_row + 1
+    # A second header row (platform names above "Bullet / Blitz / Rapid", units
+    # under measure names) is merged into the column names instead of becoming
+    # a text row that turns every numeric column into strings.
+    if _is_subheader_row(rows, header_row):
+        filled = ""
+        merged: list[str] = []
+        for top, sub in zip(header, rows[header_row + 1], strict=True):
+            top = str(top).strip()
+            sub = str(sub).strip()
+            if top:
+                filled = top
+            merged.append(" ".join(part for part in (filled if top or sub else "", sub) if part))
+        header = merged
+        body_start = header_row + 2
+    header = _unique_names(header)
+    frame = pd.DataFrame(rows[body_start:], columns=header)
     frame = frame.replace({"": None})
-    # Numbers arrive as text from both sources; convert what converts.
+    # Numbers arrive as text from both sources; convert columns that are
+    # (almost) entirely numeric, so a stray label does not keep a column textual.
     for column in frame.columns:
+        present = frame[column].notna().sum()
+        if not present:
+            continue
         converted = pd.to_numeric(frame[column], errors="coerce")
-        if converted.notna().sum() and converted.notna().sum() >= frame[column].notna().sum():
+        if converted.notna().sum() >= max(1, _MIN_NUMERIC_SHARE * present):
             frame[column] = converted
     return frame
+
+
+def _is_subheader_row(rows: list[list[str]], header_row: int) -> bool:
+    if len(rows) < header_row + 3:
+        return False
+    candidate = [str(cell).strip() for cell in rows[header_row + 1]]
+    following = [str(cell).strip() for cell in rows[header_row + 2]]
+    present = [cell for cell in candidate if cell]
+    present_next = [cell for cell in following if cell]
+    if not present or not present_next:
+        return False
+    textual = sum(1 for cell in present if not _is_number(cell)) / len(present)
+    numeric_next = sum(1 for cell in present_next if _is_number(cell)) / len(present_next)
+    # A labels-only row followed by a numbers-only row is a second header line;
+    # a row with a name column and a number column is plain data.
+    return textual >= _SUBHEADER_TEXT_SHARE and numeric_next >= _SUBHEADER_TEXT_SHARE
+
+
+def _is_number(cell: str) -> bool:
+    try:
+        float(cell.replace(" ", "").replace(",", "."))
+    except ValueError:
+        return False
+    return True
 
 
 def _detect_header_row(rows: list[list[str]], lookahead: int = 5) -> int:
