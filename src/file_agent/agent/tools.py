@@ -180,10 +180,12 @@ def build_default_tools(
             description=(
                 "Run Python (pandas preloaded as pd, numpy as np, math, re) over the "
                 "tables of a document: spreadsheet sheets or tables inside PDF/DOCX. "
-                "'df' is the selected sheet/table, 'sheets' maps every sheet or table name "
-                "to its DataFrame. Use it for counts, sums, averages, maxima, filters, "
-                "group-bys, joins across files and any exact lookup in large tables. Call "
-                "it with empty code first to see the columns and sample rows."
+                "'df' is the selected sheet/table, 'sheets' maps this document's sheet or "
+                "table names to DataFrames, files['<other file>']['<sheet>'] reaches the "
+                "tables of the other documents. Use it for counts, sums, averages, maxima, "
+                "filters, group-bys, joins across files and any exact lookup in large "
+                "tables; print() results, never list hundreds of rows. Call it with empty "
+                "code first to see the columns and sample rows."
             ),
             parameters={
                 "file_name": "string, required - document file name",
@@ -916,17 +918,25 @@ def _query_table(
             "Now call query_table with 'code' (pandas on df; sheets['<name>'] for others)."
         )
     else:
+        # Other documents' tables are reachable too, so a join across files
+        # (inventory vs sales) is one call instead of two partial listings.
+        files: dict[str, dict[str, Any]] = {}
+        for other in documents:
+            other_views = views if other is document else document_tables(other)
+            if other_views:
+                files[other.file_name] = {item.name: item.frame for item in other_views}
         namespace = {
             "df": view.frame,
             "sheets": {item.name: item.frame for item in views},
             "tables": [item.frame for item in views],
+            "files": files,
         }
         try:
             result = run_code(code, namespace)
         except SandboxError as exc:
             raise ToolError(
                 f"query_table failed: {exc}\nAvailable: df (sheet '{view.name}': "
-                f"{_columns(view)}), sheets {names}."
+                f"{_columns(view)}), sheets {names}, files {sorted(files)}."
             ) from exc
         output = f"Python over '{document.file_name}' (sheet '{view.name}'):\n{code}\n=>\n{result}"
 

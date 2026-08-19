@@ -7,6 +7,7 @@ from file_agent.agent.agent import (
     FINAL_ANSWER_DEMAND,
     FORMAT_REMINDER,
     LAST_STEP_WARNING,
+    NO_ANSWER_MESSAGE,
     REPEATED_CALL_NOTE,
     VERIFY_KEEP_TOKEN,
     AgentResponse,
@@ -644,3 +645,38 @@ def test_agent_settings_read_the_environment(monkeypatch):
     assert settings.max_parallel_actions == 1
     assert settings.fingerprint()["max_steps"] == 3
     assert "prompt_version" in settings.fingerprint()
+
+
+def test_budget_exhaustion_grants_one_more_call_and_strips_protocol_from_a_bare_reply():
+    tool, calls = make_search_tool()
+    llm = ScriptedLLM(
+        [
+            action("search_documents", query="first"),
+            # Ignores the demand and asks for one more call: it is granted once.
+            "Thought: one more\n" + action("search_documents", query="second"),
+            "Thought: still thinking\n" + action("search_documents", query="third"),
+        ]
+    )
+
+    response = make_agent(llm, [tool], max_steps=1).run("Question?")
+
+    assert calls == [{"query": "first"}, {"query": "second"}]
+    # The second demand repeats after the granted call.
+    assert llm.calls[-1][-1]["content"].endswith(FINAL_ANSWER_DEMAND)
+    # A reply that is still a tool call yields no answer text.
+    assert response.answer == NO_ANSWER_MESSAGE
+    assert response.steps[-1].tool is None
+
+
+def test_final_demand_reply_without_marker_keeps_only_the_answer_text():
+    tool, _ = make_search_tool()
+    llm = ScriptedLLM(
+        [
+            action("search_documents", query="first"),
+            "Thought: I will answer now.\nThe revenue was 100.",
+        ]
+    )
+
+    response = make_agent(llm, [tool], max_steps=1).run("Question?")
+
+    assert response.answer == "The revenue was 100."

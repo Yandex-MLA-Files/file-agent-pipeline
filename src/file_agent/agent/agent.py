@@ -344,7 +344,6 @@ class FileAgent:
         ]
         steps: list[AgentStep] = []
         collected: list[Passage] = []
-        collected_keys: set[str] = set()
         executed: dict[str, int] = {}
         max_steps = self._settings.max_steps
 
@@ -362,42 +361,16 @@ class FileAgent:
                     step = AgentStep(response=reply, thought=parsed.thought)
                     step.elapsed_seconds = time.perf_counter() - started
                     steps.append(step)
-                    return self._finish(span, parsed.final, collected, steps, session, question)
+                    return self._finish(
+                        span, _strip_protocol(parsed.final), collected, steps, session, question
+                    )
 
                 step = AgentStep(response=reply, thought=parsed.thought)
                 if not parsed.actions:
                     step.observation = FORMAT_REMINDER
                     logger.info("Agent reply did not contain an action or a final answer")
                 else:
-                    actions = parsed.actions[: self._settings.max_parallel_actions]
-                    step.tool = str(actions[0].get("tool", ""))
-                    step.arguments = _arguments_of(actions[0])
-                    if len(actions) > 1:
-                        step.actions = actions
-                    observations: list[str] = []
-                    for position, action in enumerate(actions, start=1):
-                        tool_name = str(action.get("tool", ""))
-                        arguments = _arguments_of(action)
-                        signature = json.dumps(
-                            {"tool": tool_name, "arguments": arguments}, sort_keys=True, default=str
-                        )
-                        if signature in executed:
-                            observation = REPEATED_CALL_NOTE.format(
-                                tool=tool_name, step=executed[signature]
-                            )
-                        else:
-                            executed[signature] = step_index
-                            observation, result_passages = self._execute(tool_name, arguments)
-                            for passage in result_passages:
-                                if passage.id not in collected_keys:
-                                    collected_keys.add(passage.id)
-                                    collected.append(passage)
-                        if len(actions) > 1:
-                            observation = (
-                                f"Result of action {position} ({tool_name}):\n{observation}"
-                            )
-                        observations.append(observation)
-                    step.observation = "\n\n".join(observations)
+                    self._run_actions(parsed.actions, step, step_index, executed, collected)
 
                 step.elapsed_seconds = time.perf_counter() - started
                 steps.append(step)
@@ -410,20 +383,72 @@ class FileAgent:
                 messages.append({"role": "assistant", "content": reply})
                 messages.append({"role": "user", "content": f"Observation: {observation}"})
 
-            # Step budget exhausted: demand an answer from what was observed.
+            # Step budget exhausted: demand an answer from what was observed. A
+            # model that still replies with a tool call is usually one call away
+            # from the answer (the last piece of a computation), so it gets that
+            # one call and the demand is repeated.
             messages.append({"role": "user", "content": FINAL_ANSWER_DEMAND})
-            started = time.perf_counter()
-            reply = _visible_text(self._llm.chat(messages))
-            parsed = _parse_reply(reply)
-            steps.append(
-                AgentStep(
-                    response=reply,
-                    thought=parsed.thought,
-                    elapsed_seconds=time.perf_counter() - started,
-                )
+            for attempt in range(2):
+                started = time.perf_counter()
+                reply = _visible_text(self._llm.chat(messages))
+                parsed = _parse_reply(reply)
+                step = AgentStep(response=reply, thought=parsed.thought)
+                if parsed.final is None and parsed.actions and attempt == 0:
+                    self._run_actions(parsed.actions, step, max_steps + 1, executed, collected)
+                    step.elapsed_seconds = time.perf_counter() - started
+                    steps.append(step)
+                    observation = _bounded_observation(
+                        step.observation or "", self._settings.max_observation_chars
+                    )
+                    messages.append({"role": "assistant", "content": reply})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": f"Observation: {observation}\n\n{FINAL_ANSWER_DEMAND}",
+                        }
+                    )
+                    continue
+                step.elapsed_seconds = time.perf_counter() - started
+                steps.append(step)
+                answer = _strip_protocol(parsed.final if parsed.final is not None else reply)
+                return self._finish(span, answer, collected, steps, session, question)
+            raise AssertionError("unreachable")  # pragma: no cover
+
+    def _run_actions(
+        self,
+        actions: list[dict[str, Any]],
+        step: AgentStep,
+        step_index: int,
+        executed: dict[str, int],
+        collected: list[Passage],
+    ) -> None:
+        """Execute the reply's tool calls and record the observation on the step."""
+        actions = actions[: self._settings.max_parallel_actions]
+        step.tool = str(actions[0].get("tool", ""))
+        step.arguments = _arguments_of(actions[0])
+        if len(actions) > 1:
+            step.actions = actions
+        collected_ids = {passage.id for passage in collected}
+        observations: list[str] = []
+        for position, action in enumerate(actions, start=1):
+            tool_name = str(action.get("tool", ""))
+            arguments = _arguments_of(action)
+            signature = json.dumps(
+                {"tool": tool_name, "arguments": arguments}, sort_keys=True, default=str
             )
-            answer = parsed.final if parsed.final is not None else reply
-            return self._finish(span, answer or "", collected, steps, session, question)
+            if signature in executed:
+                observation = REPEATED_CALL_NOTE.format(tool=tool_name, step=executed[signature])
+            else:
+                executed[signature] = step_index
+                observation, result_passages = self._execute(tool_name, arguments)
+                for passage in result_passages:
+                    if passage.id not in collected_ids:
+                        collected_ids.add(passage.id)
+                        collected.append(passage)
+            if len(actions) > 1:
+                observation = f"Result of action {position} ({tool_name}):\n{observation}"
+            observations.append(observation)
+        step.observation = "\n\n".join(observations)
 
     def _finish(
         self,
@@ -717,6 +742,20 @@ def _split_citations(answer: str) -> tuple[str, list[str]]:
             if passage_id not in ordered:
                 ordered.append(passage_id)
     return text.strip(), ordered
+
+
+def _strip_protocol(reply: str) -> str:
+    """What is left of a reply once Thought lines and tool-call JSON are removed.
+
+    Used when the model ignores the final-answer demand: a bare "Thought: ..."
+    is not an answer, and returning it verbatim would hand the user the
+    model's notes. An empty result lets the caller fall back.
+    """
+    text = _THOUGHT_LINE.sub("", reply)
+    action_match = _ACTION_MARKER.search(text)
+    if action_match:
+        text = text[: action_match.start()]
+    return _strip_final_marker(text).strip()
 
 
 def _strip_final_marker(text: str) -> str:

@@ -523,3 +523,33 @@ def test_find_text_shows_the_neighbourhood_of_a_short_block():
     assert "`define <name> <value>" in passage
     assert "Afterwards DATA_WIDTH" in passage
     assert "Unrelated" not in passage
+
+
+def test_query_table_reaches_the_tables_of_other_documents():
+    sales = Document(
+        file_name="sales-data.xlsx",
+        file_type="xlsx",
+        blocks=[
+            Block(
+                id="sheet-1",
+                text="id\tproduct\tamount\n1\tLamp\t5.5\n2\tDesk\t7",
+                type="xlsx_sheet",
+                metadata={"source_file": "sales-data.xlsx", "sheet_name": "Sales"},
+            )
+        ],
+    )
+    tool = get_tool(
+        build_default_tools(FakeRetriever(), [make_sheet_document(), sales]), "query_table"
+    )
+
+    result = tool.run(
+        file_name="inventory-data.xlsx",
+        code=(
+            "common = set(df['product']) & set(files['sales-data.xlsx']['Sales']['product'])\n"
+            "print(sorted(common))"
+        ),
+    )
+
+    assert "['Lamp']" in result.output
+    with pytest.raises(ToolError, match="files \['inventory-data.xlsx', 'sales-data.xlsx'\]"):
+        tool.run(file_name="inventory-data.xlsx", code="files['missing.xlsx']")

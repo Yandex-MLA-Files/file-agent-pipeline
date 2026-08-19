@@ -243,9 +243,7 @@ def serialize_search_results(
         metadata.pop("context", None)
         # Retrieved chunks carry the dataset document id; passages the agent
         # built itself (a calculation, an overview) fall back to their file.
-        document_id = str(
-            metadata.get("dataset_doc_id") or metadata.get("source_file") or "agent"
-        )
+        document_id = str(metadata.get("dataset_doc_id") or metadata.get("source_file") or "agent")
         contexts.append(
             RetrievedContext(
                 rank=rank,
