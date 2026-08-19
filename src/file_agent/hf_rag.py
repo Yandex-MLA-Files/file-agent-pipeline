@@ -241,11 +241,16 @@ def serialize_search_results(
     for rank, (result, passage) in enumerate(select_context_passages(results), start=1):
         metadata = dict(result.chunk.metadata)
         metadata.pop("context", None)
+        # Retrieved chunks carry the dataset document id; passages the agent
+        # built itself (a calculation, an overview) fall back to their file.
+        document_id = str(
+            metadata.get("dataset_doc_id") or metadata.get("source_file") or "agent"
+        )
         contexts.append(
             RetrievedContext(
                 rank=rank,
                 chunk_id=result.chunk.id,
-                document_id=str(metadata.get("dataset_doc_id", "")),
+                document_id=document_id,
                 text=passage,
                 retrieval_text=result.chunk.text,
                 score=float(result.score),

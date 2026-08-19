@@ -12,6 +12,7 @@ pages=...]``; the Final Answer cites those ids.
 
 import logging
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -985,24 +986,30 @@ def _calculate(registry: PassageRegistry, expression: str = "", **extra: Any) ->
 
 
 def _find_document(documents: list[Document], file_name: Any) -> Document:
-    wanted = str(file_name or "").strip().casefold()
+    wanted = _fold_name(file_name)
     if not wanted:
         raise ToolError("A 'file_name' is required.")
-    for document in documents:
-        if document.file_name.casefold() == wanted:
+    names = [(_fold_name(document.file_name), document) for document in documents]
+    for name, document in names:
+        if name == wanted:
             return document
 
-    partial = [document for document in documents if wanted in document.file_name.casefold()]
+    partial = [document for name, document in names if wanted in name]
     if len(partial) == 1:
         return partial[0]
     # Tolerate a name given without its extension or with a different one.
     stem = wanted.rsplit(".", 1)[0]
-    by_stem = [d for d in documents if d.file_name.casefold().rsplit(".", 1)[0] == stem]
+    by_stem = [document for name, document in names if name.rsplit(".", 1)[0] == stem]
     if len(by_stem) == 1:
         return by_stem[0]
 
     available = ", ".join(document.file_name for document in documents) or "none"
     raise ToolError(f"Document '{file_name}' not found. Available documents: {available}.")
+
+
+def _fold_name(value: Any) -> str:
+    """Case- and Unicode-normalisation-insensitive form of a file name."""
+    return " ".join(unicodedata.normalize("NFC", str(value or "")).split()).casefold()
 
 
 def _find_heading(headings: list[Block], section: str, file_name: str) -> Block:
