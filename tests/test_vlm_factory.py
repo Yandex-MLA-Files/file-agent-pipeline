@@ -5,8 +5,29 @@ from file_agent.vlm.openai_compatible import OpenAICompatibleVLMClient
 from file_agent.vlm.smolvlm import SmolVLMClient
 
 
-def test_factory_disabled_by_default(monkeypatch):
+def test_factory_default_llm_backend_needs_the_chat_endpoint(monkeypatch):
     monkeypatch.delenv("VLM_BACKEND", raising=False)
+    for name in ("LOCAL_LLM_BASE_URL", "LOCAL_LLM_MODEL", "VLM_BASE_URL", "VLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+    # Default backend is the chat model's endpoint; without one, no VLM.
+    assert create_vlm_client() is None
+
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("LOCAL_LLM_MODEL", "Qwen/Qwen3.5-27B")
+    monkeypatch.delenv("VLM_ENABLE_THINKING", raising=False)
+
+    client = create_vlm_client()
+
+    assert isinstance(client, OpenAICompatibleVLMClient)
+    assert client.model == "Qwen/Qwen3.5-27B"
+    assert client.enable_thinking is False
+
+
+def test_factory_can_be_switched_off(monkeypatch):
+    monkeypatch.setenv("VLM_BACKEND", "off")
+    monkeypatch.setenv("LOCAL_LLM_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("LOCAL_LLM_MODEL", "Qwen/Qwen3.5-27B")
 
     assert create_vlm_client() is None
 

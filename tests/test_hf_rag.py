@@ -102,8 +102,10 @@ def test_process_qa_record_generates_answer_and_serializes_exact_contexts(tmp_pa
 
     prompt = llm_client.prompts[0]
     assert prompt.index(first_context.text) < prompt.index(second_context.text)
-    assert "dataset_doc_id=q0001/first.txt" in prompt
-    assert "dataset_doc_id=q0001/second.txt" in prompt
+    # The prompt names the source files; dataset bookkeeping ids stay in metadata_json.
+    assert "source_file=first.txt" in prompt
+    assert "source_file=second.txt" in prompt
+    assert "dataset_doc_id" in first_context.metadata_json
 
 
 def test_serialize_search_results_matches_small_to_big_llm_context():

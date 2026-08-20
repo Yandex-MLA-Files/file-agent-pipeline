@@ -17,6 +17,8 @@ class BlockType(StrEnum):
     FIGURE = "figure"
     IMAGE = "image"
     FORMULA = "formula"
+    LIST = "list"
+    CODE = "code"
     PDF_PAGE = "pdf_page"
 
 
@@ -24,6 +26,16 @@ class BlockType(StrEnum):
 # level is unknown or out of range.
 _MIN_HEADING_LEVEL = 1
 _MAX_HEADING_LEVEL = 6
+
+
+def heading_level(block: "Block", default: int = 1) -> int:
+    """Return the clamped heading level stored in ``metadata["hierarchy_level"]``."""
+    raw = block.metadata.get("hierarchy_level", default)
+    try:
+        level = int(raw)
+    except (TypeError, ValueError):
+        level = default
+    return max(_MIN_HEADING_LEVEL, min(level, _MAX_HEADING_LEVEL))
 
 
 @dataclass
@@ -47,18 +59,18 @@ class Block:
     page_number: int | None = None
     bbox: tuple[float, float, float, float] | None = None  # (x0, y0, x1, y1)
     vlm_description: str | None = None
+    # Raw image payload of figure blocks whose pixels come from the container
+    # (DOCX/PPTX media, Docling picture crops) rather than from a PDF page
+    # region. Lets the VLM enhancer describe figures in every format. Never
+    # serialized: ``to_dict`` only records whether an image is attached.
+    image_bytes: bytes | None = field(default=None, repr=False, compare=False)
 
     def to_markdown(self) -> str:
         """Render this block as Markdown based on its structural type."""
         text = self.text.strip()
 
         if self.block_type == BlockType.HEADING:
-            level = self.metadata.get("hierarchy_level", 1)
-            try:
-                level = int(level)
-            except (TypeError, ValueError):
-                level = 1
-            level = max(_MIN_HEADING_LEVEL, min(level, _MAX_HEADING_LEVEL))
+            level = heading_level(self)
             return f"{'#' * level} {text}" if text else ""
 
         if self.block_type in (BlockType.FIGURE, BlockType.IMAGE):
@@ -69,7 +81,13 @@ class Block:
         if self.block_type == BlockType.FORMULA and text:
             return f"$$\n{text}\n$$"
 
-        # TEXT, TABLE (already Markdown from Docling), PDF_PAGE and untyped blocks.
+        if self.block_type == BlockType.CODE and text:
+            language = str(self.metadata.get("language") or "")
+            if text.startswith("```"):
+                return text
+            return f"```{language}\n{text}\n```"
+
+        # TEXT, LIST, TABLE (already Markdown), PDF_PAGE and untyped blocks.
         return self.text
 
     def to_dict(self) -> dict[str, Any]:
@@ -82,6 +100,7 @@ class Block:
             "page_number": self.page_number,
             "bbox": self.bbox,
             "vlm_description": self.vlm_description,
+            "has_image": self.image_bytes is not None,
             "metadata": self.metadata,
         }
 
@@ -101,6 +120,17 @@ class Document:
             max((b.page_number or 0 for b in self.blocks), default=0),
         )
         self.metadata.setdefault("parsing_method", "unknown")
+
+    @property
+    def title(self) -> str | None:
+        """Best-effort document title: explicit metadata, else the first heading."""
+        explicit = self.metadata.get("title")
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip()
+        for block in self.blocks:
+            if block.block_type == BlockType.HEADING and block.text.strip():
+                return block.text.strip()
+        return None
 
     def build_table_of_contents(self) -> list[dict[str, Any]]:
         """Build a table of contents from heading blocks and cache it in metadata."""

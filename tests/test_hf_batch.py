@@ -106,7 +106,10 @@ def test_generate_hf_qa_records_processes_in_order_and_writes_checkpoints(
     assert first_checkpoint["parameters"]["dataset_id"] == "owner/rag-qa"
     assert first_checkpoint["parameters"]["revision"] == "commit-sha"
     assert first_checkpoint["parameters"]["model_id"] == "fake/model"
-    assert first_checkpoint["parameters"]["rag_pipeline_version"] == "section-token-small-to-big-v1"
+    assert (
+        first_checkpoint["parameters"]["rag_pipeline_version"]
+        == "structured-parsers-row-records-v3"
+    )
     assert first_checkpoint["parameters"]["embedding_model"]
     assert first_checkpoint["parameters"]["top_k"] == 3
     assert first_checkpoint["result"] == result.records[0].to_dict()
@@ -256,3 +259,74 @@ def test_generate_hf_qa_records_rejects_parameter_changes_on_resume(
             top_k=3,
             resume=True,
         )
+
+
+def test_generate_hf_qa_records_records_failures_when_continuing(monkeypatch, tmp_path):
+    from file_agent.hf_batch import PIPELINE_ERROR_MARKER, is_failed_record
+
+    calls = []
+    install_fake_processor(monkeypatch, calls, fail_on_id="q0001")
+
+    result = generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+        continue_on_error=True,
+    )
+
+    assert [record.id for record in result.records] == ["q0001", "q0002"]
+    assert result.failed_count == 1
+    assert result.processed_count == 2
+    failed, healthy = result.records
+    assert is_failed_record(failed)
+    assert failed.answer_model.startswith(f"{PIPELINE_ERROR_MARKER} RuntimeError: Failed on q0001")
+    assert failed.contexts == ()
+    assert failed.answer == "First gold answer"
+    assert not is_failed_record(healthy)
+    # The failure is checkpointed like any other row so a resume does not retry it.
+    checkpoint = json.loads((tmp_path / "checkpoints" / "000000.json").read_text("utf-8"))
+    assert checkpoint["result"]["answer_model"].startswith(PIPELINE_ERROR_MARKER)
+
+
+def test_generate_hf_qa_records_still_raises_by_default(monkeypatch, tmp_path):
+    calls = []
+    install_fake_processor(monkeypatch, calls, fail_on_id="q0001")
+
+    with pytest.raises(RuntimeError, match="Failed on q0001"):
+        generate_hf_qa_records(
+            dataset=make_dataset(),
+            dataset_id="owner/rag-qa",
+            llm_client=DummyLLM(),
+            output_dir=tmp_path,
+        )
+
+
+def test_record_timeout_is_not_swallowed_by_broad_except_blocks(monkeypatch, tmp_path):
+    import signal
+
+    from file_agent.hf_batch import RecordTimeoutError
+
+    if not hasattr(signal, "SIGALRM"):
+        pytest.skip("SIGALRM is unavailable on this platform")
+
+    def slow_process(**kwargs):
+        try:
+            while True:
+                pass  # a hot loop guarded like third-party code would guard it
+        except Exception:  # noqa: BLE001 - deliberately broad
+            return make_generated_record(kwargs["record"], "swallowed")
+
+    monkeypatch.setattr("file_agent.hf_batch.process_hf_qa_record", slow_process)
+
+    result = generate_hf_qa_records(
+        dataset=make_dataset(),
+        dataset_id="owner/rag-qa",
+        llm_client=DummyLLM(),
+        output_dir=tmp_path,
+        continue_on_error=True,
+        record_timeout=0.5,
+    )
+
+    assert result.failed_count == 2
+    assert all(RecordTimeoutError.__name__ in r.answer_model for r in result.records)

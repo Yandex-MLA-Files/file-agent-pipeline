@@ -22,24 +22,59 @@ Users can upload one or more documents, preview extracted text, find relevant ch
 - A shared `Document` / `Block` representation with optional structural
   annotations (`block_type`, `page_number`, `bbox`, `vlm_description`) and a
   `Document.to_markdown()` export.
-- Structured PDF and DOCX parsing via Docling (reading order, headings, tables,
-  figures, formulas), plus Markdown, HTML, XLSX, and PPTX parsers.
-- Automatic per-page OCR routing for PDFs (`parsers/routing.py`): OCR is enabled
-  only for scanned/image pages, decided locally with no network calls.
-- Optional VLM description of figures/diagrams in PDFs (off by default, with
-  graceful degradation when no VLM endpoint is reachable).
-- Section-aware, token-budgeted chunking: blocks are grouped by heading, then
-  whole sections are packed up to the retrieval encoder's token window (large
-  tables split by rows, continuation chunks keep their heading as a breadcrumb,
-  splits land on sentence boundaries), propagating section titles, page numbers
-  and other metadata.
+- Format-aware structured parsers (`PARSER_PROFILE=structured`, default) that
+  emit typed blocks (headings with levels, paragraphs, lists, Markdown tables,
+  figures with image bytes, code, formulas) for every format: PDF via Docling
+  (with heading-level inference, list grouping, caption attachment), DOCX via
+  python-docx (paragraph-faithful; Docling as fallback), PPTX (slide titles,
+  reading order, tables, charts, notes), XLSX (Markdown tables per data region
+  with header detection), HTML, Markdown and plain text (prose reflow,
+  transcript timestamps, encoding detection). The original flat parsers remain
+  available as `PARSER_PROFILE=legacy` (`parsers/legacy/`).
+- Automatic per-page OCR routing for PDFs (`parsers/routing.py`): OCR runs
+  only for scanned/image pages, decided locally with no network calls. The
+  default engine (`OCR_ENGINE=auto`) transcribes those pages concurrently with
+  the multimodal chat model (`parsers/vlm_ocr.py`) — measured at roughly a
+  third of EasyOCR's character error rate on scan-like pages, and the only
+  option that keeps tables and headings — validates every transcript
+  (repetition loops, refusals, truncation, empty output on an inked page) and
+  falls back to EasyOCR per page (`parsers/local_ocr.py`). `vlm` drops the
+  fallback, `easyocr`/`rapidocr` run the classic engines inside Docling.
+- PDF tables that the layout model returns broken (single column, header with
+  no body) are re-read from the page image by the VLM and replaced only when
+  the second reading has more structure (`parsers/table_repair.py`,
+  `PDF_TABLE_VLM`).
+- Formula and code regions of a PDF are re-read by Docling's enrichment models
+  (`PDF_ENRICHMENT`, on by default; the conversion silently repeats without
+  them if they cannot be loaded), and a page whose reading order crosses
+  between two columns is re-sorted column by column.
+- DOCX carries content a body walk never reaches: footnotes/endnotes, text
+  frames, tables nested inside cells, and list numbers that Word computes from
+  `numbering.xml` (`parsers/docx_numbering.py`).
+- VLM description of figures in every format through a selectable backend
+  (`VLM_BACKEND`: `llm` default — the answering model's own multimodal
+  endpoint —, `openai`, `smolvlm`, `off`) with a bounded per-document cost;
+  parsing degrades gracefully when no endpoint is reachable.
+- Structured chunking (`CHUNKING_STRATEGY=structured`, default): blocks are
+  grouped into leaf sections with their full heading path; whole sections are
+  packed up to the encoder's token budget (`CHUNK_TARGET_TOKENS`, 384 by
+  default); every chunk is prefixed with a "Title > Chapter > Section"
+  breadcrumb and carries `heading_path`; prose splits on sentences, lists on
+  items, tables on rows with the header repeated, code on lines. Every table
+  row is additionally indexed as a `Column: value` record
+  (`TABLE_ROW_RECORDS`), which is what answers lookups into wide tables, and
+  long unstructured prose can be cut at topic boundaries found with the
+  encoder (`CHUNK_SEMANTIC_SPLIT`, off by default). The original chunker is
+  `CHUNKING_STRATEGY=legacy` (`chunking_legacy.py`).
 - Small-to-big retrieval: chunks are sized for the encoder, while each chunk
-  carries its parent passage in `metadata["context"]`, which is what the QA
-  prompt feeds to the LLM (deduplicated across chunks).
-- Optional VLM figure description with a selectable backend (`VLM_BACKEND`:
-  `off` / `smolvlm` local / `openai` endpoint) and a bounded per-document cost.
+  carries a parent passage window in `metadata["context"]` (the surrounding
+  section, opened by its heading path), which is what the QA prompt feeds to
+  the LLM (deduplicated across chunks).
+- Dense retrieval with `BAAI/bge-m3` by default (`EMBEDDING_MODEL` to change).
 - In-memory LanceDB hybrid retrieval combining BM25 full-text search, semantic vector search, and reciprocal rank fusion (RRF).
-- A QA prompt layer and end-to-end RAG orchestration.
+- A QA prompt layer (grounded, complete answers with compact source headers;
+  `QA_PROMPT=v2` appends a source footer to the answer, `v1` is the original
+  prompt) and end-to-end RAG orchestration.
 - An `LLMClient` adapter built on the official OpenAI Python SDK.
 - Yandex AI Studio and local OpenAI-compatible LLM backends.
 - A Streamlit UI for multi-file upload, preview, search, and answer generation.
@@ -53,21 +88,30 @@ Supported extensions: `.md`, `.txt`, `.pdf`, `.docx`, `.html`, `.htm`, `.xlsx`, 
 app.py                         # Streamlit UI
 src/file_agent/
   document.py                 # Document and Block models
-  pipeline.py                 # Parser selection by extension
-  chunking.py                 # Document chunking
+  pipeline.py                 # Parser selection by extension, OCR/VLM policy
+  chunking.py                 # Structured chunker (default strategy)
+  chunking_legacy.py          # Original chunker (CHUNKING_STRATEGY=legacy)
   retrieval.py                # Shared Retriever interface and SearchResult
   lancedb_retriever.py        # In-memory LanceDB hybrid retrieval
   qa.py                       # Context assembly and QA prompt
   rag.py                      # End-to-end RAG orchestration
   parsers/                    # Supported file parsers
-    docling_parser.py         # Structured PDF/DOCX parsing (Docling)
+    common.py                 # Shared helpers (Markdown tables, heading levels, encodings)
+    docling_parser.py         # Structured PDF parsing (Docling) + block post-processing
+    docx_parser.py            # DOCX via python-docx
+    pptx_parser.py            # PPTX via python-pptx
+    xlsx_parser.py            # XLSX via openpyxl (tables per region)
+    html_parser.py, md_parser.py, txt_parser.py
+    legacy/                   # Original flat parsers (PARSER_PROFILE=legacy)
     routing.py                # Per-page OCR decision heuristics
+    vlm_ocr.py                # VLM transcription of scanned pages
     enhancer.py               # VLM description of figures/diagrams
   vlm/                        # VLM interface and OpenAI-compatible client
   utils/image_extractor.py    # Crop PDF page regions to images for the VLM
   llm/                        # LLM interface, adapter, and factory
 tests/                        # Pytest suite
 docs/local_inference.md       # Local LLM endpoint setup
+docs/parsing_and_chunking.md  # Parsing/chunking design and evaluation results
 ```
 
 ## Architecture rules
@@ -86,8 +130,10 @@ docs/local_inference.md       # Local LLM endpoint setup
   - `table_of_contents` and `page_analysis` on `Document.metadata`;
   - the source file name and other useful source coordinates.
 - Keep parser selection by extension in `src/file_agent/pipeline.py`.
-- Keep parsing offline by default: OCR is auto-routed locally and the VLM is
-  opt-in, so `parse_file(path)` must never require a network service.
+- Keep parsing usable offline: OCR routing is local, and when no VLM endpoint
+  is configured (`VLM_BACKEND=off` or no `LOCAL_LLM_BASE_URL`) figure
+  description is skipped and page OCR falls back to EasyOCR, so
+  `parse_file(path)` never *requires* a network service.
 - Keep chunk sizes aligned with the retrieval encoder's token window. Anything
   longer is silently truncated when embedded, so budget chunks with the encoder's
   tokenizer (see `get_embedding_tokenizer`) instead of raw character counts, and
@@ -110,15 +156,16 @@ docs/local_inference.md       # Local LLM endpoint setup
 Do not add the following without a separate task:
 
 - LangChain or LangGraph;
-- complex agent architecture;
+- an agent loop or agent tooling in this branch: the baseline stays
+  agent-free on purpose, because every teammate builds their own agent on
+  top of it and a shared `src/file_agent/agent/` would collide;
 - a standalone vector database or FAISS;
-- image analysis for PPTX files;
 - Excel formula evaluation.
 
-OCR and VLM support are implemented for PDF only: OCR via Docling with automatic
-per-page routing (engine via `OCR_ENGINE`: `easyocr` default, reads Cyrillic +
-Latin, or `rapidocr`; languages via `OCR_LANGS`, default `ru,en`), and VLM figure
-description via an OpenAI-compatible endpoint.
+OCR is implemented for PDF only (per-page routing; `OCR_ENGINE`: `auto`
+default, `vlm`, `easyocr`, `rapidocr`, `off`; `OCR_LANGS` for EasyOCR, default
+`ru,en`). VLM figure description works for PDF (page crops) and for DOCX/PPTX
+(embedded images).
 
 The XLSX parser uses `data_only=True`: it reads cached formula values but does not calculate formulas.
 

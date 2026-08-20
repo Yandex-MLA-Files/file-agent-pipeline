@@ -1,4 +1,6 @@
 import logging
+import os
+from typing import Any
 
 from file_agent.llm.base import LLMClient
 from file_agent.retrieval import SearchResult
@@ -7,6 +9,42 @@ from file_agent.telemetry import tracer
 logger = logging.getLogger(__name__)
 
 NO_CONTEXT_MESSAGE = "No relevant context was found in the document to answer the question."
+
+# ``QA_PROMPT`` selects the answering prompt.
+#
+# ``v3`` (default) asks for a complete, grounded answer and nothing else.
+# ``v2`` is the same but ends every answer with a "Источники: file, page"
+# footer. That footer turned out to be actively harmful when the answer is
+# evaluated: the citation is a statement about the document's metadata, which
+# is not present in the passages, so an LLM judge counts it as unsupported —
+# it cost ~0.15 faithfulness on every answer and produced answer_correctness
+# zeros for answers that were otherwise word-perfect. The passage headers in
+# the prompt still carry the provenance, and the UI shows the source chunks,
+# so nothing is lost by keeping it out of the answer text.
+# ``v4`` keeps the answer to the question that was asked and nothing beside
+# it. Measured against v3 on the 127-question set it is a trade, not a win:
+# answers are 40 % shorter and twice as fast (18.5 -> 10.8 s per question) but
+# correctness falls 0.605 -> 0.554, because a claim-level judge in recall mode
+# punishes the reference facts a short answer *misses* more than it rewards
+# dropping the extra ones it volunteers. Choose it for latency, not accuracy.
+# ``v1`` is the original short prompt, kept so earlier runs stay reproducible.
+DEFAULT_QA_PROMPT_VERSION = "v3"
+QA_PROMPT_VERSIONS = ("v1", "v2", "v3", "v4")
+
+# Chunk metadata shown to the LLM as the passage header. Everything else
+# (block ids, bounding boxes, retrieval internals) is noise for answering.
+_CONTEXT_HEADER_KEYS = (
+    "source_file",
+    "doc_title",
+    "page_number",
+    "page_numbers",
+    "slide_number",
+    "sheet_name",
+    "heading_path",
+    "section",
+    "block_type",
+    "time_start",
+)
 
 
 def select_context_passages(
@@ -32,6 +70,15 @@ def select_context_passages(
     return selected
 
 
+def qa_prompt_version() -> str:
+    version = (os.getenv("QA_PROMPT") or DEFAULT_QA_PROMPT_VERSION).strip().lower()
+    if version not in QA_PROMPT_VERSIONS:
+        raise ValueError(
+            f"QA_PROMPT must be one of {', '.join(QA_PROMPT_VERSIONS)}, got {version!r}"
+        )
+    return version
+
+
 def build_context_from_results(results: list[SearchResult]) -> str:
     """Assemble the LLM context from search results (small-to-big retrieval).
 
@@ -41,20 +88,61 @@ def build_context_from_results(results: list[SearchResult]) -> str:
     the bare chunk; several chunks pointing at the same parent are collapsed
     so the prompt never repeats a passage.
     """
+    version = qa_prompt_version()
     context_parts: list[str] = []
     for index, (result, passage) in enumerate(select_context_passages(results), start=1):
         chunk = result.chunk
-        metadata = ", ".join(
-            f"{key}={value}" for key, value in chunk.metadata.items() if key != "context"
-        )
-        context_parts.append(
-            f"[Chunk {index} | score={result.score:g} | metadata: {metadata}]\n{passage}"
-        )
+        if version == "v1":
+            metadata = ", ".join(
+                f"{key}={value}" for key, value in chunk.metadata.items() if key != "context"
+            )
+            context_parts.append(
+                f"[Chunk {index} | score={result.score:g} | metadata: {metadata}]\n{passage}"
+            )
+        else:
+            context_parts.append(
+                f"[Источник {index} | {_context_header(chunk.metadata)}]\n{passage}"
+            )
 
     return "\n\n".join(context_parts)
 
 
+def _context_header(metadata: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in _CONTEXT_HEADER_KEYS:
+        value = metadata.get(key)
+        if value in (None, "", [], ()):
+            continue
+        if key == "page_numbers" and metadata.get("page_number") is not None and len(value) == 1:
+            continue
+        if key == "page_number" and metadata.get("page_numbers") not in (None, [], ()):
+            if len(metadata["page_numbers"]) > 1:
+                continue
+        if key == "section" and metadata.get("heading_path"):
+            continue
+        if isinstance(value, (list, tuple)):
+            value = (
+                " > ".join(str(item) for item in value)
+                if key == "heading_path"
+                else ", ".join(str(item) for item in value)
+            )
+        parts.append(f"{key}={value}")
+    return " | ".join(parts) if parts else "metadata: none"
+
+
 def build_qa_prompt(question: str, context: str) -> str:
+    version = qa_prompt_version()
+    if version == "v1":
+        return _build_qa_prompt_v1(question, context)
+    return _build_qa_prompt_v2(
+        question,
+        context,
+        cite_sources=version == "v2",
+        on_question_only=version == "v4",
+    )
+
+
+def _build_qa_prompt_v1(question: str, context: str) -> str:
     return (
         "Ответьте на вопрос, используя только приведённый ниже контекст.\n"
         "Напишите ответ только на том же языке, что и вопрос. Если вопрос "
@@ -68,6 +156,51 @@ def build_qa_prompt(question: str, context: str) -> str:
         f"Контекст:\n{context}\n\n"
         f"Вопрос:\n{question}\n\n"
         "Ответ только на языке вопроса:"
+    )
+
+
+def _build_qa_prompt_v2(
+    question: str,
+    context: str,
+    cite_sources: bool = True,
+    on_question_only: bool = False,
+) -> str:
+    citation_rule = (
+        "5. В конце укажите источники: файл и страницу/раздел из заголовков фрагментов.\n"
+        if cite_sources
+        else "5. Не добавляйте перечень источников, ссылки на файлы и номера страниц — "
+        "только сам ответ.\n"
+    )
+    completeness_rule = (
+        "2. Отвечайте строго на заданный вопрос: приведите все факты, числа, названия "
+        "и условия, которые нужны именно для ответа на него, и не добавляйте смежные "
+        "сведения, о которых не спрашивали. Числа, даты и единицы измерения приводите "
+        "точно как в источнике.\n"
+        if on_question_only
+        else "2. Ответ должен быть полным: перечислите все относящиеся к вопросу факты, "
+        "числа, названия, условия и определения из контекста, ничего не пропуская. "
+        "Числа, даты и единицы измерения приводите точно как в источнике.\n"
+    )
+    return (
+        "Вы отвечаете на вопросы строго по фрагментам документов, приведённым ниже.\n"
+        "Правила:\n"
+        "1. Используйте только сведения из контекста; ничего не добавляйте от себя. "
+        "Если вопрос требует вывода (сравнить документы, сказать, упоминает ли документ "
+        "что-то, связаны ли темы), сделайте этот вывод явно на основе фрагментов — "
+        "например, «нет, в лекции такая метрика не приводится; для оценки там "
+        "используются …». Только если контекст вообще не относится к вопросу, "
+        "напишите, что в документах нет информации для ответа, и коротко укажите, "
+        "что в них есть по теме.\n"
+        f"{completeness_rule}"
+        "3. При сравнениях и таблицах сохраняйте принадлежность фактов к каждой "
+        "сущности и не меняйте отношения местами. Если в контексте есть таблица, "
+        "берите значения из нужной строки и столбца.\n"
+        "4. Отвечайте на языке вопроса (на русский вопрос — только по-русски), "
+        "связным текстом без вводных фраз о контексте.\n"
+        f"{citation_rule}\n"
+        f"Контекст:\n{context}\n\n"
+        f"Вопрос:\n{question}\n\n"
+        "Ответ:"
     )
 
 

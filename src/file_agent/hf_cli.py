@@ -40,6 +40,8 @@ class HFGenerationConfig:
     overlap: int = 100
     limit: int | None = None
     resume: bool = False
+    continue_on_error: bool = False
+    record_timeout: float | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty(self.dataset_id, "dataset_id")
@@ -58,6 +60,8 @@ class HFGenerationConfig:
             raise ValueError("overlap must be smaller than max_chars")
         if self.limit is not None and self.limit <= 0:
             raise ValueError("limit must be greater than 0")
+        if self.record_timeout is not None and self.record_timeout <= 0:
+            raise ValueError("record_timeout must be greater than 0")
 
 
 @dataclass(frozen=True)
@@ -105,7 +109,15 @@ def run_hf_dataset_generation(
         max_chars=config.max_chars,
         overlap=config.overlap,
         resume=config.resume,
+        continue_on_error=config.continue_on_error,
+        record_timeout=config.record_timeout,
     )
+    if batch_result.failed_count:
+        LOGGER.warning(
+            "%s of %s rows failed and were recorded as pipeline errors",
+            batch_result.failed_count,
+            batch_result.total_count,
+        )
     artifacts = save_generated_qa_dataset(
         source_dataset=selected_dataset,
         records=batch_result.records,
@@ -146,6 +158,18 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=_positive_int, help="Process only the first N rows")
     parser.add_argument("--resume", action="store_true", help="Reuse matching row checkpoints")
     parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Record rows that fail (parser crash, LLM outage, timeout) as pipeline errors "
+        "and keep going instead of aborting the run",
+    )
+    parser.add_argument(
+        "--record-timeout",
+        type=float,
+        help="Abort a single row after this many seconds (Linux/macOS); with "
+        "--continue-on-error the row is recorded as a pipeline error",
+    )
+    parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="INFO",
@@ -176,6 +200,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             overlap=args.overlap,
             limit=args.limit,
             resume=args.resume,
+            continue_on_error=args.continue_on_error,
+            record_timeout=args.record_timeout,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -248,6 +274,7 @@ def _build_manifest(
             "total_count": batch_result.total_count,
             "processed_count": batch_result.processed_count,
             "resumed_count": batch_result.resumed_count,
+            "failed_count": batch_result.failed_count,
         },
         "artifacts": {
             "parquet": artifacts.parquet_path.name,

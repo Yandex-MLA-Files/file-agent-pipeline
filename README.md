@@ -7,8 +7,14 @@ RAG pipeline for answering questions about documents:
 - retrieve relevant chunks with LanceDB;
 - generate an answer with an OpenAI-compatible LLM.
 
-PDF and DOCX parsing uses Docling. OCR is enabled automatically for scanned PDF
-pages. Optional VLM processing is disabled by default.
+Every format is parsed into typed blocks (headings with levels, paragraphs,
+lists, Markdown tables, figures, code): PDF via Docling, DOCX via python-docx,
+PPTX/XLSX/HTML/Markdown/TXT with dedicated structure-aware parsers. Chunks are
+section-coherent, prefixed with their heading path and budgeted in the
+retrieval encoder's tokens (BGE-M3 by default). Scanned PDF pages are detected
+per page and transcribed by the multimodal chat model (Qwen3.5); figures in
+PDF/DOCX/PPTX are described by the same model. Design and evaluation results:
+[docs/parsing_and_chunking.md](docs/parsing_and_chunking.md).
 
 ## Setup
 

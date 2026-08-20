@@ -1,11 +1,30 @@
+"""Retrieval chunking.
+
+Two strategies share one public entry point, :func:`chunk_document`:
+
+``structured`` (default)
+    Section-coherent packing driven by the typed blocks that the parsers emit,
+    with heading-path breadcrumbs, per-block-type splitting (prose by
+    sentences, lists by items, tables by rows with the header repeated, code by
+    lines) and small-to-big parent context windows. See :class:`_Chunker`.
+
+``legacy``
+    The original section-packing chunker, kept verbatim in
+    :mod:`file_agent.chunking_legacy` (``CHUNKING_STRATEGY=legacy``).
+
+Both budget chunk size in the retrieval encoder's own tokens when a tokenizer
+is available (see :func:`get_embedding_tokenizer`), characters otherwise.
+"""
+
 import logging
 import os
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
-from file_agent.document import Block, BlockType, Document
+from file_agent.document import Block, BlockType, Document, heading_level
+from file_agent.parsers.table_profile import profile_table
 from file_agent.telemetry import tracer
 
 logger = logging.getLogger(__name__)
@@ -17,10 +36,32 @@ DEFAULT_OVERLAP = 100
 # value (e.g. 1e30) as ``model_max_length``.
 MAX_AUTO_TOKENS = 512
 
+# Target token budget in token mode when the encoder allows more. Retrieval
+# precision is best with focused chunks (~250-400 tokens); the LLM still reads
+# the surrounding parent passage, so nothing is lost by keeping pieces small.
+DEFAULT_TARGET_TOKENS = 384
+
 _SEPARATOR = "\n\n"
 
-# Per-block Docling internals that are meaningless once blocks are packed together.
-_SKIP_BLOCK_METADATA = frozenset({"docling_label", "hierarchy_level"})
+# Per-block parser internals that are meaningless once blocks are packed
+# together (and never useful to the LLM or the UI).
+_SKIP_BLOCK_METADATA = frozenset(
+    {
+        "docling_label",
+        "docling_parent",
+        "docling_parent_label",
+        "hierarchy_level",
+        "block_type",
+        "style",
+        "item_count",
+        "row_count",
+        "figure_index",
+        "table_index",
+        "synthetic_title",
+        "slide_layout",
+        "language",
+    }
+)
 
 # Upper bound for the parent passage stored in chunk metadata (small-to-big
 # retrieval): small chunks give precise embeddings, but the LLM answers from the
@@ -30,10 +71,73 @@ PARENT_CONTEXT_MAX_CHARS = 4000
 # A table header is repeated on every piece only while it stays this small a
 # share of the budget; a huge header would crowd out the actual data rows.
 HEADER_REPEAT_MAX_RATIO = 0.25
+# When even that is too much, the column names are abbreviated: "Резерв
+# переоценки инструментов хеджирования" → "Резерв переоценки…", which still
+# tells the columns apart. The widths are tried in order, so a table with
+# fourteen columns gets shorter names than one with four.
+COMPACT_HEADER_CELL_CHARS = (18, 12, 8, 6)
 
-# Sentence boundary: end punctuation (Latin or Cyrillic text) followed by space,
-# or an explicit line break. Used to avoid cutting a chunk mid-sentence.
-_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+|\n+")
+# Row records (multi-representation indexing of tables). A table split into
+# row *windows* answers "show me this part of the table", but not "which row
+# has FIDE 1260" — the query words and the answer sit in different columns of
+# one row, and a window of fifteen rows dilutes them. Every row is therefore
+# indexed a second time as a self-describing record ("Column: value; ..."),
+# which is what BM25 and the encoder can actually match. The chunk still
+# carries the surrounding table as its parent passage, so the LLM reads the
+# table, not the record.
+DEFAULT_TABLE_ROW_RECORDS = True
+# Small tables already fit in one chunk; huge ones would flood the index.
+TABLE_ROW_RECORD_MIN_ROWS = 4
+TABLE_ROW_RECORD_MAX_ROWS = 600
+TABLE_ROW_RECORD_MAX_COLUMNS = 40
+# Rows of a table whose cells are prose (a two-column "term/definition" table)
+# are already good chunks; records would only duplicate them.
+TABLE_ROW_RECORD_MAX_CELL_CHARS = 300
+# Tables outside spreadsheets are summarised too (min/max per column with the
+# row it belongs to, sums, groups) — the same aggregates the XLSX parser
+# emits, computed from the Markdown a PDF/DOCX/HTML table was rendered into.
+DEFAULT_TABLE_PROFILES = True
+TABLE_PROFILE_MIN_ROWS = 4
+
+# Where a standalone formula block goes. "inline" embeds it with the prose
+# around it; "context" keeps it out of the embedded text and shows it to the
+# model only through the parent passage. Measured on the formula-dense lecture
+# (200 prose queries + 60 formula queries against two indexes built from the
+# same parse): keeping formulas out did *not* help prose retrieval (hit@1
+# 0.980 -> 0.965) and destroyed formula retrieval (hit@5 1.000 -> 0.567), so
+# the default is to index them.
+DEFAULT_FORMULA_INDEXING = "inline"
+
+# Semantic (topic-boundary) splitting of long unstructured prose. Structured
+# documents are already cut on their own headings, but a transcript or a
+# lecture with no subheadings is cut at the token budget, which lands mid-topic.
+# With CHUNK_SEMANTIC_SPLIT=on the sentences of such a section are embedded and
+# the cuts are placed where consecutive sentences are least similar. It costs an
+# encoder pass over the section, so it is opt-in.
+DEFAULT_SEMANTIC_SPLIT = False
+# Only sections this many times over the budget are worth the extra pass.
+SEMANTIC_SPLIT_MIN_RATIO = 3
+SEMANTIC_SPLIT_MIN_SENTENCES = 12
+# A boundary is a similarity drop below this percentile of all drops.
+SEMANTIC_SPLIT_PERCENTILE = 25
+
+# The breadcrumb ("Doc title > Chapter > Section") prepended to chunk text may
+# use at most this share of the budget; deeper crumbs are dropped first.
+BREADCRUMB_MAX_RATIO = 0.2
+BREADCRUMB_SEPARATOR = " > "
+BREADCRUMB_MAX_CRUMB_CHARS = 80
+
+# Sentence boundary for Latin/Cyrillic prose. Abbreviations that end with a
+# period but do not close a sentence are protected below.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])\s+(?=[^\sa-zа-яё])|\n+")
+_ABBREVIATIONS = re.compile(
+    r"\b(т|т\.е|т\.к|т\.д|т\.п|др|пр|см|стр|рис|табл|гл|п|пп|ст|г|гг|в|вв|тыс|млн|млрд|руб|коп"
+    r"|им|напр|ул|д|корп|e\.g|i\.e|etc|vs|fig|no|approx|dr|mr|mrs|ms|prof|vol|pp)\.\s",
+    re.IGNORECASE,
+)
+
+ChunkStrategy = Literal["structured", "legacy"]
+DEFAULT_CHUNK_STRATEGY: ChunkStrategy = "structured"
 
 
 class Tokenizer(Protocol):
@@ -57,16 +161,7 @@ class Chunk:
         }
 
 
-@dataclass
-class _Section:
-    """A heading and the blocks that belong to it (its reading-order body)."""
-
-    heading: str | None
-    blocks: list[Block]
-
-    @property
-    def text(self) -> str:
-        return _SEPARATOR.join(b.text for b in self.blocks if b.text)
+# -- budget ------------------------------------------------------------------------
 
 
 class _Budget:
@@ -84,6 +179,7 @@ class _Budget:
         self.minimum = minimum
         self.overlap = overlap
         self._tokenizer = tokenizer
+        self._cache: dict[str, int] = {}
 
     @property
     def unit(self) -> str:
@@ -92,17 +188,24 @@ class _Budget:
     def size(self, text: str) -> int:
         if self._tokenizer is None:
             return len(text)
+        cached = self._cache.get(text)
+        if cached is not None:
+            return cached
         try:
             # verbose=False silences the tokenizer's "sequence longer than the
             # model maximum" notice: measuring long text is exactly the point.
-            return len(self._tokenizer.encode(text, add_special_tokens=False, verbose=False))
+            size = len(self._tokenizer.encode(text, add_special_tokens=False, verbose=False))
         except TypeError:  # tokenizers that do not accept those keywords
             try:
-                return len(self._tokenizer.encode(text, add_special_tokens=False))
+                size = len(self._tokenizer.encode(text, add_special_tokens=False))
             except TypeError:
-                return len(self._tokenizer.encode(text))
-        except Exception:  # pragma: no cover - never fail chunking on tokenizer issues
-            return len(text)
+                size = len(self._tokenizer.encode(text))
+        except (ValueError, RuntimeError, OSError):  # pragma: no cover - tokenizer issues
+            size = len(text)
+        if len(self._cache) > 4096:
+            self._cache.clear()
+        self._cache[text] = size
+        return size
 
 
 def _build_budget(
@@ -117,7 +220,7 @@ def _build_budget(
         minimum = max(1, max_chars // 3) if min_chars is None else min(min_chars, max_chars)
         return _Budget(limit=limit, minimum=minimum, overlap=overlap, tokenizer=None)
 
-    limit = max_tokens or _tokenizer_limit(tokenizer)
+    limit = max_tokens or min(_tokenizer_limit(tokenizer), _target_tokens())
     # Keep the caller's overlap *ratio* when switching units, so the defaults
     # (100 of 1000 chars) stay a sensible 10% in token space too.
     scaled_overlap = round(limit * overlap / max_chars) if max_chars else 0
@@ -127,6 +230,16 @@ def _build_budget(
         overlap=max(0, min(scaled_overlap, limit - 1)),
         tokenizer=tokenizer,
     )
+
+
+def _target_tokens() -> int:
+    raw = os.getenv("CHUNK_TARGET_TOKENS")
+    if not raw:
+        return DEFAULT_TARGET_TOKENS
+    try:
+        return max(32, int(raw))
+    except ValueError:
+        return DEFAULT_TARGET_TOKENS
 
 
 def _tokenizer_limit(tokenizer: Tokenizer) -> int:
@@ -148,11 +261,12 @@ def get_embedding_tokenizer(model_name: str | None = None) -> Tokenizer | None:
     its window is silently dropped at index time. Loading is lazy and failures
     (offline environment, missing extra) degrade to character budgeting.
     """
-    name = model_name or os.getenv("EMBEDDING_MODEL")
-    if not name:
-        from file_agent.lancedb_retriever import DEFAULT_SEMANTIC_MODEL_NAME
+    if model_name:
+        name = model_name
+    else:
+        from file_agent.lancedb_retriever import resolve_embedding_model_name
 
-        name = DEFAULT_SEMANTIC_MODEL_NAME
+        name = resolve_embedding_model_name()
     try:
         from transformers import AutoTokenizer
 
@@ -182,6 +296,16 @@ def _sentence_transformers_limit(model_name: str) -> int | None:
         return None
 
 
+# -- public entry point ---------------------------------------------------------------
+
+
+def resolve_chunk_strategy(explicit: str | None = None) -> ChunkStrategy:
+    value = (explicit or os.getenv("CHUNKING_STRATEGY") or DEFAULT_CHUNK_STRATEGY).strip().lower()
+    if value not in ("structured", "legacy"):
+        raise ValueError(f"CHUNKING_STRATEGY must be 'structured' or 'legacy', got {value!r}")
+    return value  # type: ignore[return-value]
+
+
 def chunk_document(
     document: Document,
     max_chars: int = DEFAULT_MAX_CHARS,
@@ -189,10 +313,11 @@ def chunk_document(
     min_chars: int | None = None,
     max_tokens: int | None = None,
     tokenizer: Tokenizer | None = None,
+    strategy: ChunkStrategy | None = None,
 ) -> list[Chunk]:
     """Split a document into retrieval-sized, section-coherent chunks.
 
-    The chunker follows three principles used by production RAG stacks:
+    The structured chunker follows the principles used by production RAG stacks:
 
     1. **Structure first.** Blocks are grouped into sections (a heading plus its
        body), so a heading always opens a chunk and never dangles at the end of
@@ -200,18 +325,18 @@ def chunk_document(
        budget, which keeps small slides/paragraphs from becoming useless
        single-sentence chunks while never mixing a section into a chunk that is
        already large enough to stand on its own.
-    2. **Budget in the encoder's unit.** When ``tokenizer`` is provided, chunk
-       size is measured in tokens (default: the encoder's own window, see
-       :func:`get_embedding_tokenizer`) instead of characters, so nothing is
-       silently truncated at index time and Russian and English text are treated
-       consistently. Without a tokenizer the budget falls back to characters.
-    3. **Split on natural boundaries.** Oversized blocks are divided at sentence
-       boundaries (then words, then characters as a last resort) rather than
-       mid-word, tables are split by rows repeating the header, and continuation
-       chunks keep their section heading as a breadcrumb.
-
-    Each chunk records the section it starts under, all sections it covers, page
-    numbers, block ids and any VLM description for filtering and tracing.
+    2. **Context in every chunk.** Each chunk is prefixed with its heading path
+       ("Title > Chapter > Section") so the embedding and BM25 index know where
+       the passage sits, and the same path is stored in ``metadata["heading_path"]``.
+    3. **Budget in the encoder's unit.** When ``tokenizer`` is provided, chunk
+       size is measured in tokens instead of characters, so nothing is silently
+       truncated at index time and Russian and English are treated consistently.
+    4. **Split by content type.** Prose is cut at sentence boundaries with
+       sentence overlap, lists by items, tables by rows repeating the header,
+       code by lines; a piece never starts with a dangling heading.
+    5. **Small-to-big.** Pieces of a long section carry a parent passage
+       (``metadata["context"]``) — a window of the section around the piece —
+       which is what the LLM actually reads.
     """
     if max_chars <= 0:
         raise ValueError("max_chars must be greater than 0")
@@ -220,30 +345,118 @@ def chunk_document(
     if overlap >= max_chars:
         raise ValueError("overlap must be smaller than max_chars")
 
+    active = resolve_chunk_strategy(strategy)
+    if active == "legacy":
+        from file_agent.chunking_legacy import chunk_document_legacy
+
+        return chunk_document_legacy(
+            document,
+            max_chars=max_chars,
+            overlap=overlap,
+            min_chars=min_chars,
+            max_tokens=max_tokens,
+            tokenizer=tokenizer,
+        )
+
     with tracer.start_as_current_span("file_agent.chunk_document") as span:
         span.set_attribute("file_agent.block_count", len(document.blocks))
         span.set_attribute("file_agent.max_chars", max_chars)
         span.set_attribute("file_agent.overlap", overlap)
+        span.set_attribute("file_agent.strategy", active)
 
         budget = _build_budget(max_chars, overlap, min_chars, max_tokens, tokenizer)
-        chunker = _Chunker(document, budget)
-        for section in _group_sections(document.blocks):
-            chunker.add_section(section)
-        chunks = chunker.finish()
+        sections = _group_sections(document.blocks)
+        chunks = _run_chunker(document, budget, sections, skip_bodyless=True)
+        if not chunks and document.blocks:
+            # A document that is nothing but headings (an outline, a contents
+            # page) would otherwise vanish from the index.
+            chunks = _run_chunker(document, budget, sections, skip_bodyless=False)
 
         span.set_attribute("file_agent.chunk_count", len(chunks))
         logger.info("Chunked %d block(s) into %d chunk(s)", len(document.blocks), len(chunks))
         return chunks
 
 
+def _indexable(block: Block) -> bool:
+    """Whether a block's text belongs in what the retriever embeds.
+
+    A standalone formula is the one thing this is asked about, and the answer
+    is measured rather than argued: with ``FORMULA_INDEXING=context`` the
+    formulas leave the embedded text and travel only in the parent passage,
+    which on the formula-dense lecture cost formula retrieval almost entirely
+    (hit@5 1.000 -> 0.567) and did not buy the prose anything (hit@1 0.980 ->
+    0.965). The default therefore indexes them; the switch is kept because a
+    corpus of formula-free questions may prefer the smaller index.
+    """
+    if block.block_type != BlockType.FORMULA:
+        return True
+    return _formula_indexing() == "inline"
+
+
+def _formula_indexing() -> str:
+    mode = (os.getenv("FORMULA_INDEXING") or DEFAULT_FORMULA_INDEXING).strip().lower()
+    if mode not in ("context", "inline"):
+        raise ValueError(f"FORMULA_INDEXING must be 'context' or 'inline', got {mode!r}")
+    return mode
+
+
+def _run_chunker(
+    document: Document,
+    budget: "_Budget",
+    sections: list["_Section"],
+    skip_bodyless: bool,
+) -> list[Chunk]:
+    chunker = _Chunker(document, budget, skip_bodyless=skip_bodyless)
+    for section in sections:
+        chunker.add_section(section)
+    return chunker.finish(sections)
+
+
+# -- sections ------------------------------------------------------------------------
+
+
+@dataclass
+class _Section:
+    """A heading and the blocks that belong to it (its reading-order body)."""
+
+    heading: str | None
+    blocks: list[Block]
+    # Headings above this section, outermost first (excluding its own heading).
+    path: list[str] = field(default_factory=list)
+
+    @property
+    def text(self) -> str:
+        return _SEPARATOR.join(b.text for b in self.indexed_blocks if b.text)
+
+    @property
+    def indexed_blocks(self) -> list[Block]:
+        """Blocks whose text is embedded (see :func:`_indexable`)."""
+        indexed = [b for b in self.blocks if _indexable(b)]
+        # A section of nothing but formulas is still content: index it rather
+        # than drop it.
+        return indexed or self.blocks
+
+    @property
+    def body_blocks(self) -> list[Block]:
+        return [b for b in self.indexed_blocks if b.block_type != BlockType.HEADING]
+
+
 def _group_sections(blocks: list[Block]) -> list[_Section]:
+    """Split blocks into leaf sections and record the heading path of each."""
     sections: list[_Section] = []
-    current = _Section(heading=None, blocks=[])
+    stack: list[tuple[int, str]] = []  # (level, heading text)
+    current = _Section(heading=None, blocks=[], path=[])
     for block in blocks:
         if block.block_type == BlockType.HEADING and block.text.strip():
             if current.blocks:
                 sections.append(current)
-            current = _Section(heading=block.text.strip(), blocks=[block])
+            level = heading_level(block)
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            path = [text for _, text in stack]
+            title = " ".join(block.text.split())
+            stack.append((level, title))
+            current = _Section(heading=title, blocks=[block], path=path)
         else:
             current.blocks.append(block)
     if current.blocks:
@@ -251,15 +464,30 @@ def _group_sections(blocks: list[Block]) -> list[_Section]:
     return sections
 
 
+_NBSP = "\u00a0"
+
+
 def _split_sentences(text: str) -> list[str]:
-    parts = [part.strip() for part in _SENTENCE_BOUNDARY.split(text)]
+    # Glue abbreviations ("т.е. ", "стр. ", "e.g. ") to the next word with a
+    # non-breaking space so the boundary regex does not cut a sentence there.
+    protected = _ABBREVIATIONS.sub(lambda m: m.group(0)[:-1] + _NBSP, text)
+    parts = [part.replace(_NBSP, " ").strip() for part in _SENTENCE_BOUNDARY.split(protected)]
     return [part for part in parts if part]
 
 
+# -- chunker -----------------------------------------------------------------------
+
+
 class _Chunker:
-    def __init__(self, document: Document, budget: _Budget) -> None:
+    def __init__(self, document: Document, budget: _Budget, skip_bodyless: bool = True) -> None:
         self._document = document
         self._budget = budget
+        self._skip_bodyless = skip_bodyless
+        self._heading_counts: dict[str, int] = {}
+        for block in document.blocks:
+            if block.block_type == BlockType.HEADING and block.text.strip():
+                key = " ".join(block.text.split())
+                self._heading_counts[key] = self._heading_counts.get(key, 0) + 1
         # Packed pieces are joined by separators, which cost budget too.
         self._separator_size = budget.size(_SEPARATOR)
         self._line_size = budget.size("\n")
@@ -267,16 +495,18 @@ class _Chunker:
         self._index = 1
         self._buffer: list[_Section] = []
         self._buffer_size = 0
+        self._title = _document_title(document)
 
     def add_section(self, section: _Section) -> None:
         text = section.text
         if not text:
             return
 
-        size = self._budget.size(text)
+        crumb = self._breadcrumb(section.path)
+        size = self._budget.size(text) + self._crumb_size(crumb)
         if size > self._budget.limit:
             self._flush()
-            self._pack_blocks(section.blocks, section.heading)
+            self._pack_blocks(section)
             return
 
         addition = size + (self._separator_size if self._buffer else 0)
@@ -284,74 +514,122 @@ class _Chunker:
         if self._buffer and (self._buffer_size >= self._budget.minimum or would_exceed):
             self._flush()
             addition = size
+        # Sections packed together share one breadcrumb (that of the first);
+        # a section from a different branch of the outline starts a new chunk.
+        if self._buffer and self._buffer[0].path != section.path and self._buffer_size > 0:
+            if self._buffer_size >= self._budget.minimum // 2:
+                self._flush()
+                addition = size
 
         self._buffer.append(section)
         self._buffer_size += addition
 
-    def finish(self) -> list[Chunk]:
+    def finish(self, sections: list[_Section] | None = None) -> list[Chunk]:
         self._flush()
+        if sections and _row_records_enabled():
+            self._add_table_records(sections)
         return self._chunks
 
-    # -- internals ----------------------------------------------------------
+    # -- packing whole sections ------------------------------------------------------
 
     def _flush(self) -> None:
         if not self._buffer:
             return
         blocks = [block for section in self._buffer for block in section.blocks]
         headings = [section.heading for section in self._buffer if section.heading]
-        self._emit(blocks, section=headings[0] if headings else None, sections=headings)
+        path = self._buffer[0].path
+        if self._skip_bodyless and self._is_repeated_running_header(blocks):
+            # A heading with nothing under it, whose text repeats elsewhere in
+            # the document: the financial report of the corpus carries its
+            # company name as a section header on every page, and those chunks
+            # were identical, contentless and competing with the real ones. A
+            # *unique* empty heading is kept — it may be the only place a
+            # subject is named.
+            self._buffer = []
+            self._buffer_size = 0
+            return
+        indexed = [block for section in self._buffer for block in section.indexed_blocks]
+        # When the section holds blocks that are shown but not embedded (a
+        # formula), the chunk carries the full section as its parent passage.
+        parent = (
+            self._parent_window(blocks, 0, len(blocks), path)
+            if len(indexed) != len(blocks)
+            else None
+        )
+        self._emit(
+            indexed,
+            section=headings[0] if headings else (path[-1] if path else None),
+            sections=headings,
+            path=path,
+            parent=parent,
+        )
         self._buffer = []
         self._buffer_size = 0
 
-    def _reserved_limit(self, heading: str | None) -> int:
-        """Budget available for content once the breadcrumb heading is added."""
-        if not heading:
-            return self._budget.limit
-        reserve = self._budget.size(heading) + self._separator_size
-        return max(1, self._budget.limit - reserve)
+    def _is_repeated_running_header(self, blocks: list[Block]) -> bool:
+        """Heading-only content whose text the document repeats elsewhere."""
+        if any(block.text.strip() for block in blocks if block.block_type != BlockType.HEADING):
+            return False
+        headings = [block.text.strip() for block in blocks if block.text.strip()]
+        if not headings:
+            return True
+        return all(self._heading_counts.get(" ".join(text.split()), 0) > 1 for text in headings)
 
-    def _pack_blocks(self, blocks: list[Block], heading: str | None) -> None:
-        limit = self._reserved_limit(heading)
-        # Small-to-big retrieval: every piece of this oversized section links back
-        # to the whole section text, which is what the LLM will actually read.
-        parent = self._bound_parent(_SEPARATOR.join(b.text for b in blocks if b.text))
+    # -- splitting oversized sections -------------------------------------------------
+
+    def _pack_blocks(self, section: _Section) -> None:
+        heading = section.heading
+        # The heading itself travels in the breadcrumb of every piece; the body
+        # is what gets packed. A piece never consists of a heading alone.
+        blocks = section.body_blocks or section.indexed_blocks
+        window_blocks = [b for b in section.blocks if b.block_type != BlockType.HEADING]
+        path = section.path + ([heading] if heading else [])
+        limit = self._reserved_limit(path)
         buffer: list[Block] = []
         buffer_size = 0
+        # Positions of the pieces inside the section, for parent windows.
+        cursor = 0
 
-        def flush_buffer() -> None:
+        def flush_buffer(end_index: int) -> None:
             nonlocal buffer, buffer_size
             if not buffer:
                 return
+            parent = self._window_around(
+                window_blocks, blocks, end_index - len(buffer), end_index, path
+            )
             self._emit(
                 buffer,
                 section=heading,
                 sections=[heading] if heading else [],
-                prepend_heading=True,
+                path=path,
                 parent=parent,
             )
             buffer = self._overlap_seed(buffer)
             buffer_size = self._packed_size(buffer)
 
-        for block in blocks:
+        for index, block in enumerate(blocks):
             text = block.text
             if not text:
                 continue
 
             size = self._budget.size(text)
             if block.block_type == BlockType.TABLE or size > limit:
-                flush_buffer()
+                flush_buffer(index)
                 buffer, buffer_size = [], 0
-                self._emit_oversized(block, text, heading)
+                parent = self._window_around(window_blocks, blocks, index, index + 1, path)
+                self._emit_oversized(block, text, heading, path, parent)
+                cursor = index + 1
                 continue
 
             addition = size + (self._separator_size if buffer else 0)
             if buffer and buffer_size + addition > limit:
-                flush_buffer()
+                flush_buffer(index)
                 addition = size + (self._separator_size if buffer else 0)
             buffer.append(block)
             buffer_size += addition
+            cursor = index + 1
 
-        flush_buffer()
+        flush_buffer(cursor)
 
     def _packed_size(self, blocks: list[Block]) -> int:
         if not blocks:
@@ -374,9 +652,76 @@ class _Chunker:
             seed = seed[1:]
         return seed
 
-    def _emit_oversized(self, block: Block, text: str, heading: str | None) -> None:
+    def _window_around(
+        self,
+        window_blocks: list[Block],
+        packed: list[Block],
+        start: int,
+        end: int,
+        path: list[str],
+    ) -> str:
+        """Parent passage for ``packed[start:end]``, taken from the full section.
+
+        The packed list is what gets embedded and may leave blocks out (a
+        formula, see :func:`_indexable`); the passage the model reads must
+        still contain them, so positions are translated into the full list.
+        """
+        if window_blocks is packed or len(window_blocks) == len(packed):
+            return self._parent_window(window_blocks, start, end, path)
+        start = max(0, min(start, len(packed) - 1)) if packed else 0
+        end = max(start + 1, min(end, len(packed)))
+        first, last = packed[start], packed[end - 1]
+        try:
+            window_start = window_blocks.index(first)
+            window_end = window_blocks.index(last) + 1
+        except ValueError:  # pragma: no cover - packed always comes from blocks
+            return self._parent_window(packed, start, end, path)
+        return self._parent_window(window_blocks, window_start, window_end, path)
+
+    def _parent_window(self, blocks: list[Block], start: int, end: int, path: list[str]) -> str:
+        """Section text around ``blocks[start:end]``, grown both ways up to the cap.
+
+        The heading path opens the passage so the LLM knows which section it is
+        reading even when the window starts mid-section.
+        """
+        start = max(0, start)
+        end = max(start, min(end, len(blocks)))
+        text = _SEPARATOR.join(b.text for b in blocks[start:end] if b.text)
+        heading_line = BREADCRUMB_SEPARATOR.join(path)
+        cap = PARENT_CONTEXT_MAX_CHARS - (
+            len(heading_line) + len(_SEPARATOR) if heading_line else 0
+        )
+        if len(text) >= cap:
+            text = text[:cap] + " …"
+            return f"{heading_line}{_SEPARATOR}{text}" if heading_line else text
+        before, after = start - 1, end
+        while before >= 0 or after < len(blocks):
+            grew = False
+            if before >= 0:
+                candidate = blocks[before].text
+                if not candidate:
+                    grew = True
+                elif len(text) + len(candidate) + len(_SEPARATOR) <= cap:
+                    text = candidate + _SEPARATOR + text
+                    grew = True
+                before -= 1
+            if after < len(blocks):
+                candidate = blocks[after].text
+                if not candidate:
+                    grew = True
+                elif len(text) + len(candidate) + len(_SEPARATOR) <= cap:
+                    text = text + _SEPARATOR + candidate
+                    grew = True
+                after += 1
+            if not grew:
+                break
+        return f"{heading_line}{_SEPARATOR}{text}" if heading_line else text
+
+    def _emit_oversized(
+        self, block: Block, text: str, heading: str | None, path: list[str], parent: str
+    ) -> None:
         sections = [heading] if heading else []
-        limit = self._reserved_limit(heading)
+        limit = self._reserved_limit(path)
 
         if block.block_type == BlockType.TABLE:
             # Keep small tables whole; split large ones by rows so each piece fits
@@ -384,21 +729,29 @@ class _Chunker:
             pieces = self._split_table(text, limit)
         elif self._budget.size(text) <= limit:
             pieces = [text]
+        elif block.block_type == BlockType.LIST:
+            pieces = self._split_lines(text, limit, keep_blank_lines=False)
+        elif block.block_type == BlockType.CODE:
+            pieces = self._split_lines(text, limit, keep_blank_lines=True)
         else:
             pieces = self._split_text(text, limit)
 
         # Always offer the whole block as parent context; _emit drops it when the
         # piece already is the whole block, and keeps it when the safety net in
         # _enforce_limit splits the block further.
-        parent = self._bound_parent(text)
+        whole = self._bound_parent(text)
+        heading_line = BREADCRUMB_SEPARATOR.join(path)
+        if heading_line and len(pieces) > 1:
+            whole = f"{heading_line}{_SEPARATOR}{whole}"
+        block_parent = whole if len(whole) >= len(parent) or len(pieces) > 1 else parent
         for piece in pieces:
             self._emit(
                 [block],
                 section=heading,
                 sections=sections,
+                path=path,
                 text=piece,
-                prepend_heading=True,
-                parent=parent,
+                parent=block_parent,
             )
 
     @staticmethod
@@ -412,6 +765,10 @@ class _Chunker:
         sentences = _split_sentences(text)
         if not sentences:
             return self._hard_split(text, limit)
+
+        boundaries = self._semantic_boundaries(sentences, text, limit)
+        if boundaries:
+            return self._pack_sentences(sentences, limit, boundaries)
 
         pieces: list[str] = []
         current: list[str] = []
@@ -437,6 +794,68 @@ class _Chunker:
         if current:
             pieces.append(" ".join(current))
         return pieces
+
+    def _semantic_boundaries(self, sentences: list[str], text: str, limit: int) -> set[int] | None:
+        """Sentence indices where the topic shifts, or None when not applicable."""
+        if not _semantic_split_enabled():
+            return None
+        if len(sentences) < SEMANTIC_SPLIT_MIN_SENTENCES:
+            return None
+        if self._budget.size(text) < limit * SEMANTIC_SPLIT_MIN_RATIO:
+            return None
+        return topic_boundaries(sentences)
+
+    def _pack_sentences(self, sentences: list[str], limit: int, boundaries: set[int]) -> list[str]:
+        """Pack sentences up to the budget, preferring to close at a boundary."""
+        pieces: list[str] = []
+        current: list[str] = []
+        current_size = 0
+        for index, sentence in enumerate(sentences):
+            size = self._budget.size(sentence)
+            if size > limit:
+                if current:
+                    pieces.append(" ".join(current))
+                    current, current_size = [], 0
+                pieces.extend(self._hard_split(sentence, limit))
+                continue
+            starts_topic = index in boundaries and current_size >= self._budget.minimum
+            if current and (current_size + size > limit or starts_topic):
+                pieces.append(" ".join(current))
+                # A topic boundary is a real break: carrying the previous topic
+                # into the next chunk is what the overlap is there to avoid.
+                current, current_size = ([], 0) if starts_topic else self._sentence_overlap(current)
+            current.append(sentence)
+            current_size += size
+        if current:
+            pieces.append(" ".join(current))
+        return pieces
+
+    def _split_lines(self, text: str, limit: int, keep_blank_lines: bool) -> list[str]:
+        """Split lists/code on line boundaries (items are never cut in half)."""
+        lines = text.split("\n")
+        if not keep_blank_lines:
+            lines = [line for line in lines if line.strip()]
+        pieces: list[str] = []
+        current: list[str] = []
+        current_size = 0
+        for line in lines:
+            size = self._budget.size(line)
+            if size > limit:
+                if current:
+                    pieces.append("\n".join(current))
+                    current, current_size = [], 0
+                pieces.extend(self._split_text(line, limit))
+                continue
+            addition = size + (self._line_size if current else 0)
+            if current and current_size + addition > limit:
+                pieces.append("\n".join(current))
+                current, current_size = [], 0
+                addition = size
+            current.append(line)
+            current_size += addition
+        if current:
+            pieces.append("\n".join(current))
+        return pieces or [text]
 
     def _sentence_overlap(self, sentences: list[str]) -> tuple[list[str], int]:
         if self._budget.overlap == 0:
@@ -488,23 +907,47 @@ class _Chunker:
             else max(0, self._budget.overlap * 3)
         )
 
+    # -- tables --------------------------------------------------------------------
+
     def _split_table(self, text: str, limit: int) -> list[str]:
         if self._budget.size(text) <= limit:
             return [text]
 
-        header, rows = self._table_parts(text)
+        caption, header, rows = self._table_parts(text)
         if not rows:
             # Degenerate export (a header with no data rows, or one merged row):
             # splitting it can only produce header fragments, so keep it whole.
             # The parent context carries the full table to the LLM anyway.
             return [text]
 
-        header_size = (self._budget.size(header) + self._line_size) if header else 0
+        prefix_lines = [line for line in (caption, header) if line]
+        prefix = "\n".join(prefix_lines)
+        prefix_size = (self._budget.size(prefix) + self._line_size) if prefix else 0
         # Repeating a header that eats most of the budget leaves no room for data
         # rows — that is exactly how header-only fragments appear in wide tables.
-        repeat_header = bool(header) and header_size <= limit * HEADER_REPEAT_MAX_RATIO
-        prefix = header if repeat_header else ""
-        prefix_size = header_size if repeat_header else 0
+        repeat_prefix = bool(prefix) and prefix_size <= limit * HEADER_REPEAT_MAX_RATIO
+        if not repeat_prefix and caption and header:
+            # Try the header alone (captions can be long).
+            prefix = header
+            prefix_size = self._budget.size(prefix) + self._line_size
+            repeat_prefix = prefix_size <= limit * HEADER_REPEAT_MAX_RATIO
+        if not repeat_prefix and header:
+            # A financial statement has fourteen columns whose names are whole
+            # sentences: the header cannot be repeated verbatim, and without it
+            # the continuation pieces are rows of numbers with nothing to say
+            # which column each belongs to. Abbreviated column names keep that
+            # link at a fraction of the cost, shortened as far as the table is
+            # wide.
+            for cell_chars in COMPACT_HEADER_CELL_CHARS:
+                candidate = _compact_header(header, cell_chars)
+                if not candidate:
+                    break
+                size = self._budget.size(candidate) + self._line_size
+                if size <= limit * HEADER_REPEAT_MAX_RATIO:
+                    prefix, prefix_size, repeat_prefix = candidate, size, True
+                    break
+        if not repeat_prefix:
+            prefix, prefix_size = "", 0
         row_limit = max(1, limit - prefix_size)
 
         pieces: list[str] = []
@@ -532,15 +975,22 @@ class _Chunker:
             pieces.append(self._join_table(prefix, current))
 
         # Name the columns at least once when the header is too big to repeat.
-        if pieces and header and not repeat_header:
+        if pieces and header and not repeat_prefix:
             first = self._join_table(header, [pieces[0]])
             if self._budget.size(first) <= limit:
                 pieces[0] = first
         return pieces or [text]
 
-    def _table_parts(self, text: str) -> tuple[str, list[str]]:
-        """Return the Markdown header block and the rows that carry real data."""
+    def _table_parts(self, text: str) -> tuple[str, str, list[str]]:
+        """Return (caption lines, Markdown header block, data rows)."""
         lines = text.split("\n")
+        # Non-table lines before the first pipe row are the caption/title.
+        first_row = 0
+        while first_row < len(lines) and "|" not in lines[first_row]:
+            first_row += 1
+        caption = "\n".join(line for line in lines[:first_row] if line.strip())
+        lines = lines[first_row:]
+
         header_lines: list[str] = []
         body = lines
         # A Markdown table header is a row followed by a separator like |---|:--|.
@@ -555,7 +1005,7 @@ class _Chunker:
             # tokens but no meaning, so drop them instead of emitting noise.
             if any(cell.strip() for cell in row.split("|")) and not set(row.strip()) <= set("|-: ")
         ]
-        return "\n".join(header_lines), rows
+        return caption, "\n".join(header_lines), rows
 
     def _split_row(self, row: str, limit: int) -> list[str]:
         cells = [cell for cell in row.split("|") if cell.strip()]
@@ -581,32 +1031,193 @@ class _Chunker:
         body = "\n".join(rows)
         return f"{header}\n{body}" if header else body
 
+    # -- table row records ----------------------------------------------------------
+
+    def _add_table_records(self, sections: list[_Section]) -> None:
+        for section in sections:
+            heading = section.heading
+            path = section.path + ([heading] if heading else [])
+            for block in section.blocks:
+                if block.block_type == BlockType.TABLE and block.text:
+                    self._emit_table_records(block, heading, path)
+                    self._emit_table_profile(block, heading, path)
+
+    def _emit_table_profile(self, block: Block, heading: str | None, path: list[str]) -> None:
+        """Index the aggregates of a table that no single chunk can answer.
+
+        Spreadsheets get this from their parser, where the values are still
+        typed. A table lifted out of a PDF or a DOCX has the same problem —
+        "which kind of revenue was the largest" needs every row at once — so it
+        is profiled here, from the Markdown the parser produced.
+        """
+        if block.metadata.get("sheet_name") or not _table_profiles_enabled():
+            return  # spreadsheets are profiled by the parser
+        _, header_block, rows = self._table_parts(block.text)
+        if not header_block or len(rows) < TABLE_PROFILE_MIN_ROWS:
+            return
+        header = _table_cells(header_block.split("\n")[0])
+        body = [_table_cells(row) for row in rows]
+        if len(header) < 2 or any(len(row) > len(header) for row in body):
+            return
+        profile = profile_table(header, body)
+        if not profile:
+            return
+        caption = str(block.metadata.get("caption") or "").strip()
+        title = _shorten(caption, BREADCRUMB_MAX_CRUMB_CHARS) if caption else (heading or "")
+        label = f"«{title}» " if title else ""
+        heading_line = f"Сводка по таблице {label}(вычислена автоматически):"
+        self._emit(
+            [block],
+            section=heading,
+            sections=[heading] if heading else [],
+            path=path,
+            # A summary cut in half is two half-summaries, neither of which says
+            # which table it belongs to; drop the last measures instead.
+            text=self._fit_profile(heading_line, profile, path),
+            # A retrieved summary should still let the model check the table.
+            parent=self._bound_parent(block.text),
+            extra={"representation": "profile", "table_profile": True},
+        )
+
+    def _fit_profile(self, heading_line: str, profile: str, path: list[str]) -> str:
+        """Drop measures from the end until the summary fits into one chunk."""
+        limit = self._reserved_limit(path)
+        lines = profile.split("\n")
+        while lines:
+            text = f"{heading_line}\n" + "\n".join(lines)
+            if self._budget.size(text) <= limit:
+                return text
+            lines.pop()
+        return heading_line
+
+    def _emit_table_records(self, block: Block, heading: str | None, path: list[str]) -> None:
+        caption, header, rows = self._table_parts(block.text)
+        if not header or not (TABLE_ROW_RECORD_MIN_ROWS <= len(rows) <= TABLE_ROW_RECORD_MAX_ROWS):
+            return
+        columns = _table_cells(header.split("\n")[0])
+        if not columns or len(columns) > TABLE_ROW_RECORD_MAX_COLUMNS:
+            return
+        title = " ".join(caption.split()) if caption else str(block.metadata.get("caption") or "")
+        title = _shorten(title, BREADCRUMB_MAX_CRUMB_CHARS * 2) if title else ""
+        contexts = self._row_contexts(caption, header, rows)
+
+        for index, row in enumerate(rows):
+            cells = _table_cells(row)
+            if not cells or max((len(cell) for cell in cells), default=0) > (
+                TABLE_ROW_RECORD_MAX_CELL_CHARS
+            ):
+                continue
+            pairs = [
+                f"{column}: {value}"
+                for column, value in zip(columns, cells, strict=False)
+                if value.strip() and column.strip()
+            ]
+            # A record needs at least a key and a value to be worth indexing;
+            # a single-cell row carries no relation to retrieve.
+            if len(pairs) < 2:
+                continue
+            record = "; ".join(pairs)
+            text = f"{title}\n{record}" if title else record
+            self._emit(
+                [block],
+                section=heading,
+                sections=[heading] if heading else [],
+                path=path,
+                text=text,
+                parent=contexts[index],
+                extra={"representation": "row", "row_index": index + 1},
+            )
+
+    def _row_contexts(self, caption: str, header: str, rows: list[str]) -> list[str]:
+        """Parent passage per row: the caption, the header and its block of rows.
+
+        Rows are grouped into fixed blocks rather than given a window centred on
+        each one, so several records of the same table hand the LLM the *same*
+        passage — which the prompt builder then shows once instead of printing
+        five nearly identical slices of one table.
+        """
+        head = "\n".join(line for line in (caption, header) if line)
+        budget = max(200, PARENT_CONTEXT_MAX_CHARS - len(head))
+
+        contexts: list[str] = []
+        start = 0
+        while start < len(rows):
+            end, size = start, 0
+            while end < len(rows) and (size + len(rows[end]) + 1 <= budget or end == start):
+                size += len(rows[end]) + 1
+                end += 1
+            window = self._join_table(head, rows[start:end])
+            contexts.extend([window] * (end - start))
+            start = end
+        return contexts
+
+    # -- breadcrumbs ----------------------------------------------------------------
+
+    def _breadcrumb(self, path: list[str]) -> str:
+        """Heading path (with the document title) that prefixes a chunk."""
+        crumbs: list[str] = []
+        if self._title:
+            crumbs.append(self._title)
+        for crumb in path:
+            if crumb and (not crumbs or crumbs[-1] != crumb):
+                crumbs.append(crumb)
+        crumbs = [_shorten(c, BREADCRUMB_MAX_CRUMB_CHARS) for c in crumbs]
+        max_size = max(1, int(self._budget.limit * BREADCRUMB_MAX_RATIO))
+        # Drop the outermost crumbs first: the nearest headings matter most.
+        while crumbs and self._budget.size(BREADCRUMB_SEPARATOR.join(crumbs)) > max_size:
+            crumbs.pop(0)
+        return BREADCRUMB_SEPARATOR.join(crumbs)
+
+    def _crumb_size(self, crumb: str) -> int:
+        return (self._budget.size(crumb) + self._separator_size) if crumb else 0
+
+    def _reserved_limit(self, path: list[str]) -> int:
+        """Budget available for content once the breadcrumb is added."""
+        crumb = self._breadcrumb(path)
+        return max(1, self._budget.limit - self._crumb_size(crumb))
+
+    # -- emission -------------------------------------------------------------------
+
     def _emit(
         self,
         blocks: list[Block],
         section: str | None,
         sections: list[str],
+        path: list[str],
         text: str | None = None,
-        prepend_heading: bool = False,
         parent: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
-        chunk_text = text if text is not None else _SEPARATOR.join(b.text for b in blocks if b.text)
-        # Give continuation chunks of a long section their heading as context, so
-        # every chunk is self-describing for retrieval (a "breadcrumb").
-        if prepend_heading and section and section not in chunk_text:
-            chunk_text = f"{section}\n\n{chunk_text}"
+        body = text if text is not None else _SEPARATOR.join(b.text for b in blocks if b.text)
+        if not any(char.isalnum() for char in body):
+            return
+        crumb = self._breadcrumb(path)
+        # The breadcrumb makes every chunk self-describing for retrieval; when the
+        # chunk already opens with that heading, do not repeat it.
+        prefix = ""
+        if crumb:
+            crumbs = crumb.split(BREADCRUMB_SEPARATOR)
+            first_line = body.split("\n", 1)[0].strip()
+            if crumbs and first_line == crumbs[-1]:
+                crumbs = crumbs[:-1]
+            if crumbs:
+                prefix = f"{BREADCRUMB_SEPARATOR.join(crumbs)}{_SEPARATOR}"
+        chunk_text = f"{prefix}{body}"
 
         # Hard guarantee: never emit a chunk the encoder would truncate, whatever
         # the upstream heuristics produced (wide table rows, dense formulas, ...).
-        for piece in self._enforce_limit(chunk_text, section if prepend_heading else None):
+        for piece in self._enforce_limit(chunk_text, prefix):
             # Pieces without a single word or number (table rules, stray glyphs)
             # carry no information and would only dilute the index.
             if not any(char.isalnum() for char in piece):
                 continue
-            metadata = self._build_metadata(blocks, section, sections)
+            metadata = self._build_metadata(blocks, section, sections, path)
+            if extra:
+                metadata.update(extra)
             # Small-to-big retrieval: the piece is what gets embedded, the parent
             # passage is what the LLM reads (see qa.build_context_from_results).
-            if parent and len(parent) > len(piece):
+            body_only = piece[len(prefix) :] if prefix and piece.startswith(prefix) else piece
+            if parent and len(parent) > len(body_only) and parent != body_only:
                 metadata["context"] = parent
             self._chunks.append(
                 Chunk(
@@ -617,18 +1228,13 @@ class _Chunker:
             )
             self._index += 1
 
-    def _enforce_limit(self, text: str, section: str | None = None) -> list[str]:
+    def _enforce_limit(self, text: str, prefix: str = "") -> list[str]:
         if self._budget.size(text) <= self._budget.limit:
             return [text]
 
         # Keep the breadcrumb on every window, not just the first one.
-        prefix = ""
-        body = text
-        marker = f"{section}{_SEPARATOR}" if section else ""
-        if marker and text.startswith(marker):
-            prefix, body = marker, text[len(marker) :]
-
-        return self._fit_windows(body, prefix)
+        body = text[len(prefix) :] if prefix and text.startswith(prefix) else text
+        return self._fit_windows(body, prefix if text.startswith(prefix) else "")
 
     def _fit_windows(self, text: str, prefix: str = "") -> list[str]:
         """Cut text into windows that provably fit the budget, prefix included."""
@@ -643,7 +1249,11 @@ class _Chunker:
                 window = max(1, int(window * 0.8))
                 piece = text[start : start + window]
             pieces.append(prefix + piece)
-            start += max(1, window - self._char_overlap())
+            # Always advance by at least half a window: with a large overlap and
+            # a token-dense window (dot leaders, hashes) the naive step used to
+            # collapse to a single character and produce thousands of chunks.
+            step = max(window // 2, window - self._char_overlap(), 1)
+            start += step
         return pieces
 
     def _estimate_window(self, text: str) -> int:
@@ -659,6 +1269,7 @@ class _Chunker:
         blocks: list[Block],
         section: str | None,
         sections: list[str],
+        path: list[str],
     ) -> dict[str, Any]:
         block_types: list[str] = []
         for block in blocks:
@@ -674,8 +1285,9 @@ class _Chunker:
         metadata: dict[str, Any] = {}
         for block in blocks:
             for key, value in block.metadata.items():
-                if key not in _SKIP_BLOCK_METADATA:
-                    metadata.setdefault(key, value)
+                if key in _SKIP_BLOCK_METADATA or key.startswith("_"):
+                    continue
+                metadata.setdefault(key, value)
 
         metadata.update(
             {
@@ -686,6 +1298,8 @@ class _Chunker:
                 "block_types": block_types,
             }
         )
+        if self._title:
+            metadata["doc_title"] = self._title
         if pages:
             metadata["page_number"] = pages[0]
             metadata["page_numbers"] = pages
@@ -693,9 +1307,110 @@ class _Chunker:
             metadata["section"] = section
         if sections:
             metadata["sections"] = sections
+        full_path = list(path)
+        if section and (not full_path or full_path[-1] != section):
+            full_path.append(section)
+        if full_path:
+            metadata["heading_path"] = full_path
         if len(blocks) == 1 and blocks[0].bbox is not None:
             metadata["bbox"] = blocks[0].bbox
         if descriptions:
             metadata["vlm_description"] = " ".join(descriptions)
 
         return metadata
+
+
+def _semantic_split_enabled() -> bool:
+    raw = os.getenv("CHUNK_SEMANTIC_SPLIT")
+    if raw is None:
+        return DEFAULT_SEMANTIC_SPLIT
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def topic_boundaries(sentences: list[str]) -> set[int] | None:
+    """Indices of sentences that open a new topic, by embedding similarity.
+
+    Consecutive sentences are embedded with the retrieval encoder and the
+    cosine similarity of each neighbouring pair is measured; the pairs in the
+    lowest percentile of similarity are where the text changes subject. Returns
+    None when no encoder is available, so chunking never fails because of it.
+    """
+    try:
+        import numpy as np
+
+        from file_agent.lancedb_retriever import _load_default_embedding_model
+
+        model = _load_default_embedding_model()
+        vectors = np.asarray(model.encode(sentences, show_progress_bar=False), dtype="float32")
+        if vectors.ndim != 2 or len(vectors) != len(sentences):
+            return None
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        vectors = vectors / np.clip(norms, 1e-9, None)
+        similarity = np.sum(vectors[:-1] * vectors[1:], axis=1)
+        threshold = float(np.percentile(similarity, SEMANTIC_SPLIT_PERCENTILE))
+        return {index + 1 for index, value in enumerate(similarity) if value <= threshold}
+    except Exception:  # pragma: no cover - encoder unavailable or OOM
+        logger.debug("Semantic split unavailable; using sentence packing.", exc_info=True)
+        return None
+
+
+def _table_profiles_enabled() -> bool:
+    raw = os.getenv("TABLE_PROFILES")
+    if raw is None:
+        return DEFAULT_TABLE_PROFILES
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _row_records_enabled() -> bool:
+    raw = os.getenv("TABLE_ROW_RECORDS")
+    if raw is None:
+        return DEFAULT_TABLE_ROW_RECORDS
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _table_cells(row: str) -> list[str]:
+    """Cells of one Markdown table row, without the outer pipes."""
+    stripped = row.strip()
+    if "|" not in stripped:
+        return []
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _document_title(document: Document) -> str | None:
+    title = document.title
+    if not title:
+        return None
+    return " ".join(title.split())
+
+
+def _shorten(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _compact_header(header: str, cell_chars: int) -> str:
+    """The same columns with abbreviated names, for tables too wide to repeat."""
+    lines = [line for line in header.split("\n") if line.strip()]
+    if not lines:
+        return ""
+    cells = [_shorten(cell, cell_chars) for cell in _table_cells(lines[0])]
+    if not cells:
+        return ""
+    # Two long column names can shorten to the same string ("Резерв переоц…"),
+    # which would make the abbreviated header worse than none; number those.
+    seen: dict[str, int] = {}
+    for index, cell in enumerate(cells):
+        seen[cell] = seen.get(cell, 0) + 1
+        if seen[cell] > 1:
+            cells[index] = f"{cell}#{seen[cell]}"
+    row = "| " + " | ".join(cells) + " |"
+    # A minimal separator: the piece still parses as a Markdown table, and on a
+    # fourteen-column statement the usual "|---|" costs more than the names.
+    separator = "|" + "|".join(["-"] * len(cells)) + "|"
+    return f"{row}\n{separator}"
