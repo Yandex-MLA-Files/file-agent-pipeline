@@ -16,6 +16,7 @@ from file_agent.parsers.routing import analyze_pdf
 from file_agent.parsers.txt_parser import TXTParser
 from file_agent.parsers.xlsx_parser import XLSXParser
 from file_agent.telemetry import tracer
+from file_agent.vlm.base import VLMClient
 from file_agent.vlm.factory import create_vlm_client
 
 load_dotenv()
@@ -46,6 +47,7 @@ def parse_file(
     file_path: str | Path,
     enable_vlm: bool | None = None,
     enable_ocr: OcrMode = "auto",
+    vlm_client: VLMClient | None = None,
 ) -> Document:
     """Parse any supported file into a structured :class:`Document`.
 
@@ -56,6 +58,8 @@ def parse_file(
     :param enable_ocr: OCR policy for PDFs — ``"auto"`` lets the pipeline decide
         per page (see :mod:`file_agent.parsers.routing`), ``"on"`` forces OCR,
         ``"off"`` disables it. Ignored for formats that carry their own text.
+    :param vlm_client: optional shared VLM instance for benchmark and batch runs.
+        If omitted, the configured VLM factory behavior remains unchanged.
     """
     path = Path(file_path)
     suffix = path.suffix.lower()
@@ -65,7 +69,13 @@ def parse_file(
         span.set_attribute("file_agent.file_suffix", suffix)
         logger.info("Parsing file %s", path.name)
 
-        document = _parse_by_suffix(path, suffix, enable_vlm=enable_vlm, enable_ocr=enable_ocr)
+        document = _parse_by_suffix(
+            path,
+            suffix,
+            enable_vlm=enable_vlm,
+            enable_ocr=enable_ocr,
+            vlm_client=vlm_client,
+        )
         _attach_file_metadata(document, path)
 
         span.set_attribute("file_agent.block_count", len(document.blocks))
@@ -78,9 +88,15 @@ def _parse_by_suffix(
     suffix: str,
     enable_vlm: bool | None,
     enable_ocr: OcrMode,
+    vlm_client: VLMClient | None,
 ) -> Document:
     if suffix in {".pdf", ".docx"}:
-        return _parse_structured(path, enable_vlm=enable_vlm, enable_ocr=enable_ocr)
+        return _parse_structured(
+            path,
+            enable_vlm=enable_vlm,
+            enable_ocr=enable_ocr,
+            vlm_client=vlm_client,
+        )
     if suffix == ".md":
         return MarkdownParser().parse(path)
     if suffix == ".txt":
@@ -123,7 +139,12 @@ def _attach_file_metadata(document: Document, path: Path) -> None:
         logger.warning("Could not read native PDF metadata for %s", path.name, exc_info=True)
 
 
-def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) -> Document:
+def _parse_structured(
+    path: Path,
+    enable_vlm: bool | None,
+    enable_ocr: OcrMode,
+    vlm_client: VLMClient | None,
+) -> Document:
     do_ocr, ocr_full_page, analysis = _resolve_ocr_policy(path, enable_ocr)
 
     # Make the decision observable: without this there is no way to tell whether
@@ -156,7 +177,12 @@ def _parse_structured(path: Path, enable_vlm: bool | None, enable_ocr: OcrMode) 
         document.metadata["page_analysis"] = analysis.summary()
 
     if enable_vlm is not False:
-        _enhance_with_vlm(document, path, forced=enable_vlm is True)
+        _enhance_with_vlm(
+            document,
+            path,
+            forced=enable_vlm is True,
+            vlm_client=vlm_client,
+        )
 
     return document
 
@@ -184,7 +210,12 @@ def _resolve_ocr_policy(path: Path, enable_ocr: OcrMode):
     return analysis.needs_ocr, analysis.scanned_ratio >= FULL_SCAN_RATIO, analysis
 
 
-def _enhance_with_vlm(document: Document, path: Path, forced: bool) -> None:
+def _enhance_with_vlm(
+    document: Document,
+    path: Path,
+    forced: bool,
+    vlm_client: VLMClient | None = None,
+) -> None:
     if path.suffix.lower() != ".pdf":
         return
 
@@ -195,8 +226,8 @@ def _enhance_with_vlm(document: Document, path: Path, forced: bool) -> None:
     if not has_figures:
         return
 
-    vlm_client = create_vlm_client()
-    if vlm_client is None:
+    active_vlm_client = vlm_client or create_vlm_client()
+    if active_vlm_client is None:
         if forced:
             logger.warning(
                 "VLM requested but no backend configured; set VLM_BACKEND to "
@@ -205,4 +236,4 @@ def _enhance_with_vlm(document: Document, path: Path, forced: bool) -> None:
         return
 
     logger.info("VLM enhancement: describing figures in %s", path.name)
-    DocumentEnhancer(vlm_client=vlm_client).enhance(document, path)
+    DocumentEnhancer(vlm_client=active_vlm_client).enhance(document, path)

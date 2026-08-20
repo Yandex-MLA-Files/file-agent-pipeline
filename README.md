@@ -58,6 +58,12 @@ evidence shown to the model together with tool-call, token, and duration diagnos
 See [docs/hf_dataset_generation.md](docs/hf_dataset_generation.md) for the paired-run
 workflow.
 
+The local [DocBench](https://github.com/Anni-Zou/DocBench) runner parses and
+indexes every PDF once for all of its questions, supports validated per-question
+resume, continues past isolated failures, and exports judge-ready JSONL together
+with Parquet/Hugging Face data and latency, token, retrieval, and tool diagnostics.
+See [docs/docbench_generation.md](docs/docbench_generation.md).
+
 Long sections and locations return `next_offset`; tables use a bounded row
 `offset` and `limit`. Direct reads are preserved as answer sources just like
 retrieval results. All tools receive the active retriever and parsed documents
