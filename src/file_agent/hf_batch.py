@@ -101,6 +101,7 @@ def generate_hf_qa_records(
     overlap: int = 100,
     retriever: Retriever | None = None,
     resume: bool = False,
+    answer_mode: str = "rag",
     continue_on_error: bool = False,
     record_timeout: float | None = None,
 ) -> BatchGenerationResult:
@@ -124,6 +125,7 @@ def generate_hf_qa_records(
         top_k=top_k,
         max_chars=max_chars,
         overlap=overlap,
+        answer_mode=answer_mode,
     )
     records: list[GeneratedQARecord] = []
     processed_count = 0
@@ -164,6 +166,7 @@ def generate_hf_qa_records(
                         overlap=overlap,
                         retriever=retriever,
                         document_loader=document_loader,
+                        answer_mode=answer_mode,
                     )
             except (Exception, RecordTimeoutError) as exc:  # noqa: BLE001 - recorded per row
                 if not continue_on_error:
@@ -253,14 +256,16 @@ def build_generation_parameters(
     top_k: int,
     max_chars: int,
     overlap: int,
+    answer_mode: str = "rag",
 ) -> dict[str, Any]:
     prompt_template = build_qa_prompt(
         question="{question}",
         context="{context}",
     )
-    return {
+    parameters: dict[str, Any] = {
         "dataset_id": dataset_id,
         "revision": revision,
+        "answer_mode": answer_mode,
         "model_id": _model_identifier(llm_client),
         "temperature": _optional_scalar_attribute(llm_client, "temperature"),
         "max_tokens": _optional_scalar_attribute(llm_client, "max_tokens"),
@@ -287,6 +292,14 @@ def build_generation_parameters(
         "prompt_sha256": hashlib.sha256(prompt_template.encode("utf-8")).hexdigest(),
         "qa_prompt": qa_prompt_version(),
     }
+    if answer_mode == "agent":
+        # The agent's prompt and loop settings decide the answers as much as the
+        # QA prompt does for single-pass RAG; a checkpoint from another agent
+        # configuration must not be resumed into this run.
+        from file_agent.agent import AgentSettings
+
+        parameters["agent"] = AgentSettings.from_env().fingerprint()
+    return parameters
 
 
 def _vlm_model_identifier() -> str | None:

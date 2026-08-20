@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from file_agent.agent.tools import MIN_SEARCH_POOL
 from file_agent.chunking import Chunk
 from file_agent.hf_dataset import QADatasetRecord
 from file_agent.hf_rag import (
@@ -35,11 +36,18 @@ class FakeRetriever:
         self.index_calls += 1
         self.chunks = list(chunks)
 
-    def search(self, query: str, top_k: int = 5):
+    def search(self, query: str, top_k: int = 5, source_file: str | None = None):
         self.search_calls.append((query, top_k))
+        chunks = self.chunks
+        if source_file:
+            chunks = [
+                chunk
+                for chunk in chunks
+                if str((chunk.metadata or {}).get("source_file", "")) == source_file
+            ]
         return [
             SearchResult(chunk=chunk, score=1.0 / rank)
-            for rank, chunk in enumerate(self.chunks[:top_k], start=1)
+            for rank, chunk in enumerate(chunks[:top_k], start=1)
         ]
 
     def clear(self):
@@ -106,6 +114,74 @@ def test_process_qa_record_generates_answer_and_serializes_exact_contexts(tmp_pa
     assert "source_file=first.txt" in prompt
     assert "source_file=second.txt" in prompt
     assert "dataset_doc_id" in first_context.metadata_json
+
+
+class ScriptedAgentLLM:
+    """Chat-capable fake that first calls the search tool, then answers."""
+
+    def __init__(self):
+        self.chat_calls: list[list[dict[str, str]]] = []
+        self._replies = [
+            'Thought: search'
+            + chr(10)
+            + 'Action: {"tool": "search_documents", "arguments": {"query": "contexts"}}',
+            "Thought: done" + chr(10) + "Final Answer: Agent answer",
+        ]
+
+    def generate(self, prompt: str) -> str:
+        return self.chat([{"role": "user", "content": prompt}])
+
+    def chat(self, messages):
+        self.chat_calls.append(messages)
+        return self._replies.pop(0)
+
+
+def test_process_qa_record_agent_mode_uses_agent_answer_and_sources(tmp_path):
+    record = make_record()
+    document_paths = create_text_documents(tmp_path)
+    llm_client = ScriptedAgentLLM()
+    retriever = FakeRetriever()
+
+    result = process_qa_record(
+        record=record,
+        document_paths=document_paths,
+        llm_client=llm_client,
+        retriever=retriever,
+        answer_mode="agent",
+    )
+
+    assert result.answer_model == "Agent answer"
+    assert result.answer == "Gold answer"
+    # The agent decided the query itself; contexts are the passages it cited.
+    assert retriever.search_calls == [("contexts", MIN_SEARCH_POOL)]
+    assert [context.document_id for context in result.contexts] == [
+        "q0001/first.txt",
+        "q0001/second.txt",
+    ]
+    assert retriever.clear_calls == 1
+    assert len(llm_client.chat_calls) == 3
+
+
+def test_process_qa_record_rejects_unknown_answer_mode(tmp_path):
+    with pytest.raises(ValueError, match="answer_mode"):
+        process_qa_record(
+            record=make_record(),
+            document_paths=create_text_documents(tmp_path),
+            llm_client=DummyLLM(),
+            retriever=FakeRetriever(),
+            answer_mode="chat",
+        )
+
+
+def test_process_qa_record_agent_mode_requires_chat_client(tmp_path):
+    with pytest.raises(ValueError, match="chat"):
+        process_qa_record(
+            record=make_record(),
+            document_paths=create_text_documents(tmp_path),
+            llm_client=DummyLLM(),
+            retriever=FakeRetriever(),
+            answer_mode="agent",
+        )
 
 
 def test_serialize_search_results_matches_small_to_big_llm_context():

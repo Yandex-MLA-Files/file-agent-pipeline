@@ -17,6 +17,7 @@ from file_agent.hf_batch import (
 )
 from file_agent.hf_dataset import QADatasetRecord, load_qa_dataset
 from file_agent.hf_output import GeneratedDatasetArtifacts, save_generated_qa_dataset
+from file_agent.hf_rag import ANSWER_MODES
 from file_agent.llm.base import LLMClient
 from file_agent.llm.factory import create_llm_client
 
@@ -40,6 +41,7 @@ class HFGenerationConfig:
     overlap: int = 100
     limit: int | None = None
     resume: bool = False
+    answer_mode: str = "rag"
     continue_on_error: bool = False
     record_timeout: float | None = None
 
@@ -60,6 +62,8 @@ class HFGenerationConfig:
             raise ValueError("overlap must be smaller than max_chars")
         if self.limit is not None and self.limit <= 0:
             raise ValueError("limit must be greater than 0")
+        if self.answer_mode not in ANSWER_MODES:
+            raise ValueError(f"answer_mode must be one of {ANSWER_MODES}")
         if self.record_timeout is not None and self.record_timeout <= 0:
             raise ValueError("record_timeout must be greater than 0")
 
@@ -109,6 +113,7 @@ def run_hf_dataset_generation(
         max_chars=config.max_chars,
         overlap=config.overlap,
         resume=config.resume,
+        answer_mode=config.answer_mode,
         continue_on_error=config.continue_on_error,
         record_timeout=config.record_timeout,
     )
@@ -158,6 +163,12 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=_positive_int, help="Process only the first N rows")
     parser.add_argument("--resume", action="store_true", help="Reuse matching row checkpoints")
     parser.add_argument(
+        "--answer-mode",
+        choices=ANSWER_MODES,
+        default="rag",
+        help="Answer generation mode: single-pass RAG or the multi-step agent (default: rag)",
+    )
+    parser.add_argument(
         "--continue-on-error",
         action="store_true",
         help="Record rows that fail (parser crash, LLM outage, timeout) as pipeline errors "
@@ -200,6 +211,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             overlap=args.overlap,
             limit=args.limit,
             resume=args.resume,
+            answer_mode=args.answer_mode,
             continue_on_error=args.continue_on_error,
             record_timeout=args.record_timeout,
         )

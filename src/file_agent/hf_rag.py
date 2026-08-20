@@ -14,6 +14,8 @@ from file_agent.retrieval import Retriever, SearchResult
 
 DocumentLoader = Callable[[list[str | Path]], list[Document]]
 
+ANSWER_MODES = ("rag", "agent")
+
 
 @dataclass(frozen=True)
 class RetrievedContext:
@@ -138,6 +140,7 @@ def process_hf_qa_record(
     overlap: int = 100,
     retriever: Retriever | None = None,
     document_loader: DocumentLoader | None = None,
+    answer_mode: str = "rag",
 ) -> GeneratedQARecord:
     document_paths = download_record_documents(
         record=record,
@@ -155,6 +158,7 @@ def process_hf_qa_record(
         overlap=overlap,
         retriever=retriever,
         document_loader=document_loader,
+        answer_mode=answer_mode,
     )
 
 
@@ -167,9 +171,14 @@ def process_qa_record(
     overlap: int = 100,
     retriever: Retriever | None = None,
     document_loader: DocumentLoader | None = None,
+    answer_mode: str = "rag",
 ) -> GeneratedQARecord:
     if len(document_paths) != len(record.doc_ids):
         raise ValueError("document_paths count must match record.doc_ids count")
+    if answer_mode not in ANSWER_MODES:
+        raise ValueError(f"answer_mode must be one of {ANSWER_MODES}, got {answer_mode!r}")
+    if answer_mode == "agent" and not hasattr(llm_client, "chat"):
+        raise ValueError("answer_mode='agent' requires an LLM client with chat() support")
 
     active_document_loader = document_loader or load_documents
     documents = active_document_loader(document_paths)
@@ -186,21 +195,37 @@ def process_qa_record(
             max_chars=max_chars,
             overlap=overlap,
         )
-        response = answer_indexed_documents(
-            question=record.question,
-            llm_client=llm_client,
-            retriever=active_retriever,
-            documents_count=len(documents),
-            chunks_count=len(chunks),
-            top_k=top_k,
-        )
-        contexts = serialize_search_results(response.sources)
+        if answer_mode == "agent":
+            # Deferred import: hf_rag must stay importable without the agent
+            # package being exercised on the plain RAG path.
+            from file_agent.agent import answer_with_agent
+
+            agent_response = answer_with_agent(
+                question=record.question,
+                llm_client=llm_client,
+                retriever=active_retriever,
+                documents=documents,
+            )
+            answer_text = agent_response.answer
+            sources = agent_response.sources
+        else:
+            response = answer_indexed_documents(
+                question=record.question,
+                llm_client=llm_client,
+                retriever=active_retriever,
+                documents_count=len(documents),
+                chunks_count=len(chunks),
+                top_k=top_k,
+            )
+            answer_text = response.answer
+            sources = response.sources
+        contexts = serialize_search_results(sources)
 
         return GeneratedQARecord(
             id=record.id,
             question=record.question,
             doc_ids=record.doc_ids,
-            answer_model=response.answer,
+            answer_model=answer_text,
             contexts=contexts,
             answer=record.answer,
         )
@@ -216,11 +241,14 @@ def serialize_search_results(
     for rank, (result, passage) in enumerate(select_context_passages(results), start=1):
         metadata = dict(result.chunk.metadata)
         metadata.pop("context", None)
+        # Retrieved chunks carry the dataset document id; passages the agent
+        # built itself (a calculation, an overview) fall back to their file.
+        document_id = str(metadata.get("dataset_doc_id") or metadata.get("source_file") or "agent")
         contexts.append(
             RetrievedContext(
                 rank=rank,
                 chunk_id=result.chunk.id,
-                document_id=str(metadata.get("dataset_doc_id", "")),
+                document_id=document_id,
                 text=passage,
                 retrieval_text=result.chunk.text,
                 score=float(result.score),
