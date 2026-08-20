@@ -174,7 +174,35 @@ observations).
 
 ## Evaluation
 
-RESULTS_PLACEHOLDER
+127 questions of `sandrik1271/RAG-QA-Dataset` (21 documents), answers by
+Qwen3.5-27B (thinking off, temperature 0) over this branch's unchanged
+ingestion and retrieval; judge = **deepseek-v4-flash** on the Yandex AI
+Studio OpenAI-compatible endpoint, ragas metrics, the judge's own reasoning
+left on (it is much stricter than `reasoning_effort="none"`). All 127 rows
+count - the structured chunker handles every document within the row budget;
+the two rows whose first judgement hit the provider's completion cap were
+re-judged with an explicit `max_tokens` and merged.
+
+| run (127 rows) | faithfulness | answer_correctness | answer_relevancy | context_precision | context_recall |
+|---|---|---|---|---|---|
+| single-pass RAG (this baseline, run `pc-v15-retrieval-127`) | **0.940** | 0.500 | 0.809 | 0.800 | **0.820** |
+| **agent** (this branch, run `rt-agent-v1-127`) | 0.891 | **0.603** | **0.887** | **0.934** | 0.798 |
+
+The agent buys +0.10 answer_correctness - the metric the whole exercise is
+about - plus +0.08 relevancy and +0.13 context precision, and gives back
+0.05 faithfulness against a QA prompt that is deliberately conservative
+(it may answer "the documents do not say" where the agent keeps digging)
+and 0.02 recall. Per question the agent's answer_correctness is better on
+41 rows, worse on 15 and within ±0.1 on 71; faithfulness is better on 14
+and worse on 24.
+
+What the run looks like: 4.1 steps and ~48 s per question, zero fallbacks
+to single-pass RAG, 2.3 passages cited out of 6.8 read. Tool usage over 127
+traces: search_documents 160, find_text 38, read_section 32, query_table 25,
+read_document 15, list_documents 14, read_pages 12, calculate 1, plus a
+verification pass on almost every row; inspect_image went unused - the
+corpus' figures already carry ingestion-time descriptions, so the text
+tools answered first.
 
 For reference, the same agent design over the *old* ingestion baseline
 (branch `feat/agent`, unchanged legacy parsers and chunking) scored, on the
