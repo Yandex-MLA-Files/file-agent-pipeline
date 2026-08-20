@@ -41,11 +41,13 @@ Users can upload one or more documents, preview extracted text, find relevant ch
 - In-memory LanceDB hybrid retrieval combining BM25 full-text search, semantic vector search, and reciprocal rank fusion (RRF).
 - A QA prompt layer and end-to-end RAG orchestration.
 - A multi-step document agent (`src/file_agent/agent/`): a think-act-observe
-  loop where the LLM plans tool calls (`search_documents`, `list_documents`,
-  `read_section`) over the indexed documents; tool calls are JSON parsed
-  client-side, so any OpenAI-compatible backend works without server-side
-  tool-call support. Bounded session memory (`AgentSession`) enables
-  follow-up questions (see `docs/agent.md`).
+  loop where the LLM plans tool calls (`search_documents`, `find_text`,
+  `list_documents`, `read_section`, `read_pages`, `read_document`,
+  `query_table`, `calculate`) over the indexed documents and cites the
+  passages its answer relies on; tool calls are JSON parsed client-side, so
+  any OpenAI-compatible backend works without server-side tool-call support.
+  Bounded session memory (`AgentSession`) enables follow-up questions (see
+  `docs/agent.md`).
 - An `LLMClient` adapter built on the official OpenAI Python SDK, plus a
   `chat(messages)` method for multi-turn conversations.
 - Yandex AI Studio and local OpenAI-compatible LLM backends.
@@ -68,7 +70,10 @@ src/file_agent/
   rag.py                      # End-to-end RAG orchestration
   agent/                      # Multi-step document agent
     tools.py                  # Toolset over the indexed documents
-    agent.py                  # FileAgent orchestration loop
+    agent.py                  # FileAgent orchestration loop, settings, citations
+    passages.py               # Passage registry (ids the answer cites)
+    tables.py                 # DataFrames out of sheets and document tables
+    sandbox.py                # Guarded Python execution for query_table/calculate
   parsers/                    # Supported file parsers
     docling_parser.py         # Structured PDF/DOCX parsing (Docling)
     routing.py                # Per-page OCR decision heuristics

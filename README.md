@@ -8,9 +8,10 @@ RAG pipeline for answering questions about documents:
 - generate an answer with an OpenAI-compatible LLM.
 
 Two answer modes are available: single-pass RAG (one retrieval, one LLM
-call) and a multi-step agent that plans its own tool calls — search,
-document overview, reading whole sections — before answering. See
-[docs/agent.md](docs/agent.md).
+call) and a multi-step agent that plans its own tool calls — fused
+multi-query search, exact text search, document overview, reading sections
+and pages, computing over tables — and cites the passages its answer relies
+on. See [docs/agent.md](docs/agent.md).
 
 PDF and DOCX parsing uses Docling. OCR is enabled automatically for scanned PDF
 pages. Optional VLM processing is disabled by default.
