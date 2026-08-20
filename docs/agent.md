@@ -164,7 +164,50 @@ observations).
 
 ## Evaluation
 
-RESULTS_PLACEHOLDER
+127 questions of `sandrik1271/RAG-QA-Dataset` (21 documents), answers by
+Qwen3.5-27B (thinking off, temperature 0) over the unchanged ingestion
+baseline; judge = **deepseek-v4-flash** on the Yandex AI Studio
+OpenAI-compatible endpoint, ragas metrics, the model's own reasoning left on
+(it makes the judge stricter: on a 5-row probe `answer_correctness` fell from
+0.61 to 0.33 versus `reasoning_effort="none"`). Five questions over the
+philosophy lecture are excluded from the per-row table on the mentor's
+instruction: the baseline chunker exceeds the 900-second row budget on that
+document in every run, agent and RAG alike, so both modes score 0 there.
+
+| run (122 rows) | faithfulness | answer_correctness | answer_relevancy | context_precision | context_recall |
+|---|---|---|---|---|---|
+| single-pass RAG (baseline) | 0.601 | 0.296 | 0.541 | 0.615 | 0.624 |
+| **agent** (this branch) | **0.863** | **0.469** | **0.869** | **0.885** | **0.761** |
+
+Over all 127 rows with failures counted as zero: RAG
+0.577 / 0.285 / 0.520 / 0.591 / 0.600, agent
+0.829 / 0.451 / 0.846 / 0.850 / 0.731. (The baseline's judge run kept 6-8
+unre-judged timeout rows as zeros, so its numbers are, if anything, slightly
+understated - the gap is not.) Per question, the agent's answer_correctness
+is better on 60 rows, worse on 18 and within ±0.1 on 44; faithfulness is
+better on 70 and worse on 20.
+
+What the runs look like: 4.3 steps and ~48 s per question on average, zero
+fallbacks to single-pass RAG; tool usage over 122 traced questions -
+search_documents 174, read_section 52, find_text 37, query_table 27,
+read_pages 19, read_document 16, list_documents 10, calculate 1, plus one
+verification pass each. The answers cite 2.2 passages on average out of the
+5.8 they read.
+
+The editor pass earns its keep: re-judging the same run's draft answers
+(taken from the traces, no regeneration) drops faithfulness from 0.86 to
+0.77 on the 122 rows while buying only ~0.03 relevancy, so `AGENT_VERIFY`
+stays on by default.
+
+Two measurement notes. First, `context_precision`/`context_recall` for the
+agent grade the passages it *cited*, not everything it read - precision is
+high by construction (2.2 aimed passages against the RAG mode's fixed five)
+and recall is understated when the agent read but did not cite a relevant
+passage; the metrics comparable one-to-one with the baseline are the three
+answer-side columns. Second, on rows where the judge's reasoning outgrew the
+provider's default completion cap the metrics came back NaN; those rows were
+re-judged with an explicit `max_tokens` and merged, and the two rows that
+still failed are counted as zeros against the agent.
 
 ## Why not MCP (yet)
 
