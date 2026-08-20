@@ -17,6 +17,14 @@ files
 
 Users can upload one or more documents, preview extracted text, find relevant chunks, and generate an LLM answer with source metadata.
 
+On top of the single-pass RAG path this branch carries a multi-step document
+agent (`src/file_agent/agent/`): a think-act-observe loop where the LLM plans
+tool calls (`search_documents`, `find_text`, `list_documents`, `read_section`,
+`read_pages`, `read_document`, `query_table`, `calculate`, `inspect_image`)
+over the indexed documents and cites the passages its answer relies on; tool
+calls are JSON parsed client-side, so any OpenAI-compatible backend works
+without server-side tool-call support. See `docs/agent.md`.
+
 ## Current capabilities
 
 - A shared `Document` / `Block` representation with optional structural
@@ -95,6 +103,12 @@ src/file_agent/
   lancedb_retriever.py        # In-memory LanceDB hybrid retrieval
   qa.py                       # Context assembly and QA prompt
   rag.py                      # End-to-end RAG orchestration
+  agent/                      # Multi-step document agent
+    tools.py                  # Toolset over the indexed documents
+    agent.py                  # FileAgent orchestration loop, settings, citations
+    passages.py               # Passage registry (ids the answer cites)
+    tables.py                 # DataFrames out of sheets and document tables
+    sandbox.py                # Guarded Python execution for query_table/calculate
   parsers/                    # Supported file parsers
     common.py                 # Shared helpers (Markdown tables, heading levels, encodings)
     docling_parser.py         # Structured PDF parsing (Docling) + block post-processing
@@ -156,9 +170,6 @@ docs/parsing_and_chunking.md  # Parsing/chunking design and evaluation results
 Do not add the following without a separate task:
 
 - LangChain or LangGraph;
-- an agent loop or agent tooling in this branch: the baseline stays
-  agent-free on purpose, because every teammate builds their own agent on
-  top of it and a shared `src/file_agent/agent/` would collide;
 - a standalone vector database or FAISS;
 - Excel formula evaluation.
 

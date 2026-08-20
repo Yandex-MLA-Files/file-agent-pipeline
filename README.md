@@ -22,6 +22,12 @@ the question (multi-query / HyDE), re-scored by a cross-encoder and cut to
 distinct passages. Stages, switches, the retrieval-level benchmark and an audit
 of the judge: [docs/retrieval.md](docs/retrieval.md).
 
+Answers come in two modes: single-pass RAG, or a multi-step agent that plans
+tool calls over the indexed documents (search, exact text lookup, section and
+page reading, pandas over tables, arithmetic, a look at a figure through the
+vision model) and cites the passages its answer relies on. Design and judged
+results: [docs/agent.md](docs/agent.md).
+
 ## Setup
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
